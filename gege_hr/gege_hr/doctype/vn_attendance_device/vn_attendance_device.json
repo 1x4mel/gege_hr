@@ -1,0 +1,35 @@
+{
+ "actions": [],
+ "autoname": "field:device_code",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "info_break", "fieldtype": "Section Break", "label": "Information"},
+  {"fieldname": "device_name", "fieldtype": "Data", "in_list_view": 1, "label": "Device Name", "reqd": 1},
+  {"fieldname": "device_code", "fieldtype": "Data", "in_list_view": 1, "label": "Device Code", "reqd": 1, "unique": 1},
+  {"fieldname": "company", "fieldtype": "Link", "in_list_view": 1, "label": "Company", "options": "Company", "reqd": 1},
+  {"fieldname": "device_type", "default": "Biometric", "fieldtype": "Select", "label": "Device Type", "options": "Biometric\nFace Recognition\nMobile\nCard Reader\nOther", "reqd": 1},
+  {"fieldname": "work_location", "fieldtype": "Link", "label": "Work Location", "options": "VN Work Location"},
+  {"fieldname": "is_active", "default": "1", "fieldtype": "Check", "in_list_view": 1, "label": "Is Active"},
+  {"fieldname": "conn_break", "fieldtype": "Section Break", "label": "Connection"},
+  {"fieldname": "ip_address", "fieldtype": "Data", "label": "IP Address"},
+  {"fieldname": "port", "fieldtype": "Int", "label": "Port"},
+  {"fieldname": "serial_number", "fieldtype": "Data", "label": "Serial Number"},
+  {"fieldname": "timezone", "default": "Asia/Ho_Chi_Minh", "fieldtype": "Select", "label": "Timezone", "options": "Asia/Ho_Chi_Minh\nAsia/Bangkok\nAsia/Singapore\nUTC"},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "sync_method", "default": "Scheduled Pull", "fieldtype": "Select", "label": "Sync Method", "options": "Real-time API\nManual Upload\nScheduled Pull\nPush Notification"},
+  {"fieldname": "last_sync_at", "fieldtype": "Datetime", "label": "Last Sync At", "read_only": 1}
+ ],
+ "module": "gege_hr",
+ "name": "VN Attendance Device",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"read": 1, "role": "HR User"}
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "title_field": "device_name",
+ "track_changes": 1
+}

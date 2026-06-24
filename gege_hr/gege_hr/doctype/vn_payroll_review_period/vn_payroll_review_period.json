@@ -1,0 +1,41 @@
+{
+ "actions": [],
+ "autoname": "format:PRP-{YYMMDD}-{#####}",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "period_break", "fieldtype": "Section Break", "label": "Period Info"},
+  {"fieldname": "company", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Company", "options": "Company", "reqd": 1},
+  {"fieldname": "payroll_month", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Payroll Month", "options": "01\n02\n03\n04\n05\n06\n07\n08\n09\n10\n11\n12", "reqd": 1},
+  {"fieldname": "payroll_year", "fieldtype": "Int", "in_list_view": 1, "in_standard_filter": 1, "label": "Payroll Year", "reqd": 1},
+  {"fieldname": "from_date", "fieldtype": "Date", "label": "From Date", "reqd": 1},
+  {"fieldname": "to_date", "fieldtype": "Date", "label": "To Date", "reqd": 1},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "attendance_period", "fieldtype": "Link", "label": "Attendance Period", "options": "VN Monthly Attendance Period"},
+  {"fieldname": "status", "default": "Draft", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Status", "options": "Draft\nCalculated\nApproved\nSlips Generated\nPublished\nCancelled"},
+  {"fieldname": "totals_break", "fieldtype": "Section Break", "label": "Totals"},
+  {"fieldname": "total_employees", "default": "0", "fieldtype": "Int", "in_list_view": 1, "label": "Total Employees", "read_only": 1},
+  {"fieldname": "total_gross_pay", "default": "0", "fieldtype": "Currency", "in_list_view": 1, "label": "Total Gross Pay", "options": "Company:company:default_currency", "read_only": 1},
+  {"fieldname": "total_deductions", "default": "0", "fieldtype": "Currency", "in_list_view": 1, "label": "Total Deductions", "options": "Company:company:default_currency", "read_only": 1},
+  {"fieldname": "col2", "fieldtype": "Column Break"},
+  {"fieldname": "total_net_pay", "default": "0", "fieldtype": "Currency", "in_list_view": 1, "label": "Total Net Pay", "options": "Company:company:default_currency", "read_only": 1},
+  {"fieldname": "payroll_entry", "fieldtype": "Link", "label": "Payroll Entry", "options": "Payroll Entry", "read_only": 1}
+ ],
+ "links": [],
+ "module": "gege_hr",
+ "name": "VN Payroll Review Period",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"create": 1, "read": 1, "role": "Payroll Manager", "write": 1},
+  {"read": 1, "role": "HR User"},
+  {"read": 1, "role": "Payroll User"}
+ ],
+ "search_fields": "company,payroll_month,payroll_year,status",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "title_field": "company",
+ "track_changes": 1,
+ "is_submittable": 1
+}

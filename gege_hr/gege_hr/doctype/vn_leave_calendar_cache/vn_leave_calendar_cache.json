@@ -1,0 +1,35 @@
+{
+ "actions": [],
+ "autoname": "field:cache_key",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "info_break", "fieldtype": "Section Break", "label": "Information"},
+  {"fieldname": "cache_key", "fieldtype": "Data", "in_list_view": 1, "in_standard_filter": 1, "label": "Cache Key", "reqd": 1, "unique": 1},
+  {"fieldname": "company", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Company", "options": "Company", "reqd": 1},
+  {"fieldname": "branch", "fieldtype": "Link", "in_standard_filter": 1, "label": "Branch", "options": "Branch"},
+  {"fieldname": "department", "fieldtype": "Link", "in_standard_filter": 1, "label": "Department", "options": "Department"},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "month", "fieldtype": "Select", "in_standard_filter": 1, "label": "Month", "options": "01\n02\n03\n04\n05\n06\n07\n08\n09\n10\n11\n12", "reqd": 1},
+  {"fieldname": "year", "fieldtype": "Int", "in_standard_filter": 1, "label": "Year", "reqd": 1},
+  {"fieldname": "data_break", "fieldtype": "Section Break", "label": "Cache Data"},
+  {"fieldname": "data_json", "fieldtype": "Code", "label": "Calendar Data (JSON)", "options": "JSON"},
+  {"fieldname": "generated_at", "fieldtype": "Datetime", "label": "Generated At", "read_only": 1},
+  {"fieldname": "expires_at", "fieldtype": "Datetime", "label": "Expires At"}
+ ],
+ "links": [],
+ "module": "gege_hr",
+ "name": "VN Leave Calendar Cache",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"create": 1, "read": 1, "role": "HR User", "write": 1},
+  {"read": 1, "role": "Employee"}
+ ],
+ "search_fields": "company,branch,department,month,year",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "title_field": "cache_key",
+ "track_changes": 0
+}

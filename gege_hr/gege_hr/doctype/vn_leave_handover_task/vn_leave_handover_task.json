@@ -1,0 +1,38 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "info_break", "fieldtype": "Section Break", "label": "Information"},
+  {"fieldname": "leave_application", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Leave Application", "options": "Leave Application", "reqd": 1},
+  {"fieldname": "from_employee", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "From Employee", "options": "Employee", "reqd": 1},
+  {"fieldname": "to_employee", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "To Employee", "options": "Employee", "reqd": 1},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "handover_date", "fieldtype": "Date", "in_list_view": 1, "in_standard_filter": 1, "label": "Handover Date", "reqd": 1},
+  {"fieldname": "status", "default": "Pending", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Status", "options": "Pending\nIn Progress\nCompleted\nCancelled"},
+  {"fieldname": "detail_break", "fieldtype": "Section Break", "label": "Details"},
+  {"fieldname": "description", "fieldtype": "Small Text", "label": "Description", "reqd": 1},
+  {"fieldname": "attachment", "fieldtype": "Attach", "label": "Attachment"},
+  {"fieldname": "col2", "fieldtype": "Column Break"},
+  {"fieldname": "completed_at", "fieldtype": "Datetime", "label": "Completed At", "read_only": 1},
+  {"fieldname": "completed_by", "fieldtype": "Link", "label": "Completed By", "options": "User", "read_only": 1},
+  {"fieldname": "note", "fieldtype": "Small Text", "label": "Note"}
+ ],
+ "links": [],
+ "module": "gege_hr",
+ "name": "VN Leave Handover Task",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"create": 1, "read": 1, "role": "HR User", "write": 1},
+  {"create": 1, "if_owner": 1, "read": 1, "role": "Employee", "write": 1}
+ ],
+ "search_fields": "leave_application,from_employee,to_employee,handover_date,status",
+ "sort_field": "handover_date",
+ "sort_order": "DESC",
+ "title_field": "from_employee",
+ "track_changes": 1,
+ "is_submittable": 1
+}

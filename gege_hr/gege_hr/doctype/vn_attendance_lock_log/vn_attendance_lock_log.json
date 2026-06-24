@@ -1,0 +1,31 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "attendance_period", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Attendance Period", "options": "VN Monthly Attendance Period", "reqd": 1},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "action", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Action", "options": "Lock\nUnlock", "reqd": 1},
+  {"fieldname": "reason", "fieldtype": "Small Text", "label": "Reason"},
+  {"fieldname": "actor_break", "fieldtype": "Section Break", "label": "Actor"},
+  {"fieldname": "actor", "fieldtype": "Link", "in_list_view": 1, "label": "Actor", "options": "User", "reqd": 1},
+  {"fieldname": "col2", "fieldtype": "Column Break"},
+  {"fieldname": "old_status", "fieldtype": "Data", "label": "Old Status", "read_only": 1},
+  {"fieldname": "new_status", "fieldtype": "Data", "label": "New Status", "read_only": 1},
+  {"fieldname": "created_at", "default": "Now", "fieldtype": "Datetime", "label": "Created At", "read_only": 1}
+ ],
+ "links": [],
+ "module": "gege_hr",
+ "name": "VN Attendance Lock Log",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"read": 1, "role": "HR User"}
+ ],
+ "search_fields": "attendance_period,action,actor",
+ "sort_field": "created_at",
+ "sort_order": "DESC",
+ "track_changes": 1
+}

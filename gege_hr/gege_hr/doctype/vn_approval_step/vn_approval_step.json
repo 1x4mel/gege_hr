@@ -1,0 +1,27 @@
+{
+ "actions": [],
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "step_no", "fieldtype": "Int", "in_list_view": 1, "label": "Step No", "reqd": 1},
+  {"fieldname": "approver_type", "fieldtype": "Select", "in_list_view": 1, "label": "Approver Type", "options": "Line Manager\nDepartment Head\nHR User\nHR Manager\nSpecific User\nSpecific Role", "reqd": 1},
+  {"fieldname": "approver_user", "fieldtype": "Link", "in_list_view": 1, "label": "Approver User", "options": "User", "depends_on": "eval:doc.approver_type=='Specific User'"},
+  {"fieldname": "approver_role", "fieldtype": "Link", "in_list_view": 1, "label": "Approver Role", "options": "Role", "depends_on": "eval:doc.approver_type=='Specific Role'"},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "can_edit_value", "default": "0", "fieldtype": "Check", "label": "Can Edit Value"},
+  {"fieldname": "allow_delegate", "default": "0", "fieldtype": "Check", "label": "Allow Delegate"},
+  {"fieldname": "condition", "fieldtype": "Data", "label": "Condition"}
+ ],
+ "istable": 1,
+ "module": "gege_hr",
+ "name": "VN Approval Step",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"read": 1, "role": "HR User"}
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 0
+}

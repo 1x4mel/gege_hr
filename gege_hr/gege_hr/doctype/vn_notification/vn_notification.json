@@ -1,0 +1,38 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "info_break", "fieldtype": "Section Break", "label": "Info"},
+  {"fieldname": "employee", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Employee", "options": "Employee", "reqd": 1},
+  {"fieldname": "employee_name", "fieldtype": "Data", "in_list_view": 1, "label": "Employee Name", "read_only": 1},
+  {"fieldname": "user", "fieldtype": "Link", "in_list_view": 1, "label": "User", "options": "User", "reqd": 1},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "notification_type", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Notification Type", "options": "Check-in\nCheck-out\nLeave\nOT\nCorrection\nAdvance\nShift Change\nPayroll\nAlert\nSystem", "reqd": 1},
+  {"fieldname": "title", "fieldtype": "Data", "in_list_view": 1, "label": "Title", "reqd": 1},
+  {"fieldname": "message", "fieldtype": "Small Text", "label": "Message", "reqd": 1},
+  {"fieldname": "detail_break", "fieldtype": "Section Break", "label": "Detail"},
+  {"fieldname": "reference_doctype", "fieldtype": "Data", "label": "Reference DocType"},
+  {"fieldname": "reference_name", "fieldtype": "Data", "label": "Reference Name"},
+  {"fieldname": "col2", "fieldtype": "Column Break"},
+  {"fieldname": "read", "default": "0", "fieldname": "read", "fieldtype": "Check", "in_list_view": 1, "in_standard_filter": 1, "label": "Read"},
+  {"fieldname": "read_at", "fieldtype": "Datetime", "label": "Read At", "read_only": 1},
+  {"fieldname": "action_url", "fieldtype": "Data", "label": "Action URL"}
+ ],
+ "links": [],
+ "module": "gege_hr",
+ "name": "VN Notification",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "email": 1, "export": 1, "print": 1, "read": 1, "report": 1, "role": "HR Manager", "share": 1, "write": 1},
+  {"create": 1, "email": 1, "export": 1, "print": 1, "read": 1, "report": 1, "role": "HR User", "share": 1, "write": 1},
+  {"if_owner": 1, "read": 1, "role": "Employee", "write": 1}
+ ],
+ "search_fields": "employee,notification_type,read,user",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "title_field": "title",
+ "track_changes": 1
+}

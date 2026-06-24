@@ -1,0 +1,39 @@
+{
+ "actions": [],
+ "autoname": "field:policy_name",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "info_break", "fieldtype": "Section Break", "label": "Information"},
+  {"fieldname": "policy_name", "fieldtype": "Data", "in_list_view": 1, "in_standard_filter": 1, "label": "Policy Name", "reqd": 1, "unique": 1},
+  {"fieldname": "company", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Company", "options": "Company", "reqd": 1},
+  {"fieldname": "branch", "fieldtype": "Link", "label": "Branch", "options": "Branch"},
+  {"fieldname": "employee_group", "fieldtype": "Link", "label": "Employee Group", "options": "Employee Group"},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "is_active", "default": "1", "fieldtype": "Check", "in_list_view": 1, "label": "Is Active"},
+  {"fieldname": "limit_break", "fieldtype": "Section Break", "label": "Limits"},
+  {"fieldname": "max_percentage", "default": "50", "fieldtype": "Float", "in_list_view": 1, "label": "Max Percentage (%)", "precision": "2"},
+  {"fieldname": "max_fixed_amount", "fieldtype": "Currency", "label": "Max Fixed Amount", "options": "Company:company:default_currency"},
+  {"fieldname": "min_working_days", "default": "15", "fieldtype": "Int", "label": "Min Working Days"},
+  {"fieldname": "col2", "fieldtype": "Column Break"},
+  {"fieldname": "max_requests_per_month", "default": "1", "fieldtype": "Int", "in_list_view": 1, "label": "Max Requests Per Month"},
+  {"fieldname": "cutoff_day", "default": "20", "fieldtype": "Int", "label": "Cutoff Day"},
+  {"fieldname": "repayment_method", "default": "Next Month Deduction", "fieldtype": "Select", "in_list_view": 1, "label": "Repayment Method", "options": "Next Month Deduction\nInstallment\nFull Deduction"}
+ ],
+ "links": [],
+ "module": "gege_hr",
+ "name": "VN Salary Advance Policy",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"create": 1, "read": 1, "role": "Payroll Manager", "write": 1},
+  {"read": 1, "role": "HR User"},
+  {"read": 1, "role": "Employee"}
+ ],
+ "search_fields": "company,branch,employee_group",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "title_field": "policy_name",
+ "track_changes": 1
+}

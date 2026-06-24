@@ -1,0 +1,33 @@
+{
+ "actions": [],
+ "autoname": "field:rule_name",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "info_break", "fieldtype": "Section Break", "label": "Information"},
+  {"fieldname": "rule_name", "fieldtype": "Data", "in_list_view": 1, "in_standard_filter": 1, "label": "Rule Name", "reqd": 1, "unique": 1},
+  {"fieldname": "company", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Company", "options": "Company", "reqd": 1},
+  {"fieldname": "branch", "fieldtype": "Link", "in_standard_filter": 1, "label": "Branch", "options": "Branch"},
+  {"fieldname": "department", "fieldtype": "Link", "in_standard_filter": 1, "label": "Department", "options": "Department"},
+  {"fieldname": "shift_type", "fieldtype": "Link", "in_standard_filter": 1, "label": "Shift Type", "options": "Shift Type"},
+  {"fieldname": "is_active", "default": "1", "fieldtype": "Check", "in_list_view": 1, "label": "Is Active"},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "min_required_employees", "default": "1", "fieldtype": "Int", "label": "Min Required Employees", "reqd": 1},
+  {"fieldname": "max_leave_allowed", "default": "0", "fieldtype": "Int", "label": "Max Leave Allowed"},
+  {"fieldname": "rule_action", "default": "Warning", "fieldtype": "Select", "in_list_view": 1, "label": "Rule Action", "options": "Warning\nBlock\nRequire HR Approval"}
+ ],
+ "links": [],
+ "module": "gege_hr",
+ "name": "VN Leave Staffing Rule",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"read": 1, "role": "HR User"}
+ ],
+ "search_fields": "company,branch,department,shift_type,rule_action",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "title_field": "rule_name",
+ "track_changes": 1
+}

@@ -1,0 +1,144 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {
+   "fieldname": "general_break",
+   "fieldtype": "Section Break",
+   "label": "General Settings"
+  },
+  {
+   "default": "1",
+   "fieldname": "enable_mobile_checkin",
+   "fieldtype": "Check",
+   "label": "Enable Mobile Check-in"
+  },
+  {
+   "default": "1",
+   "fieldname": "require_geolocation",
+   "fieldtype": "Check",
+   "label": "Require Geolocation"
+  },
+  {
+   "default": "0",
+   "fieldname": "require_selfie",
+   "fieldtype": "Check",
+   "label": "Require Selfie"
+  },
+  {
+   "default": "0",
+   "fieldname": "require_wifi_validation",
+   "fieldtype": "Check",
+   "label": "Require Wi-Fi Validation"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_device_sync",
+   "fieldtype": "Check",
+   "label": "Enable Device Sync"
+  },
+  {
+   "fieldname": "timezone_break",
+   "fieldtype": "Section Break",
+   "label": "Time Zone"
+  },
+  {
+   "default": "Asia/Ho_Chi_Minh",
+   "fieldname": "timezone",
+   "fieldtype": "Select",
+   "label": "Portal Timezone",
+   "options": "Asia/Ho_Chi_Minh\nAsia/Bangkok\nAsia/Singapore\nUTC"
+  },
+  {
+   "fieldname": "attendance_break",
+   "fieldtype": "Section Break",
+   "label": "Attendance Settings"
+  },
+  {
+   "fieldname": "default_work_location",
+   "fieldtype": "Link",
+   "label": "Default Work Location",
+   "options": "VN Work Location"
+  },
+  {
+   "fieldname": "default_attendance_policy",
+   "fieldtype": "Link",
+   "label": "Default Attendance Policy",
+   "options": "VN Attendance Policy"
+  },
+  {
+   "default": "25",
+   "fieldname": "payroll_cutoff_day",
+   "fieldtype": "Int",
+   "label": "Payroll Cutoff Day"
+  },
+  {
+   "default": "5",
+   "fieldname": "lock_attendance_after_days",
+   "fieldtype": "Int",
+   "label": "Lock After Days"
+  },
+  {
+   "fieldname": "portal_break",
+   "fieldtype": "Section Break",
+   "label": "Portal Settings"
+  },
+  {
+   "default": "1",
+   "fieldname": "enable_employee_self_service",
+   "fieldtype": "Check",
+   "label": "Enable Employee Self Service"
+  },
+  {
+   "default": "1",
+   "fieldname": "enable_manager_dashboard",
+   "fieldtype": "Check",
+   "label": "Enable Manager Dashboard"
+  }
+ ],
+ "issingle": 1,
+ "module": "gege_hr",
+ "name": "VN HR Portal Setting",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 0,
+   "export": 0,
+   "if_owner": 0,
+   "print": 0,
+   "read": 1,
+   "report": 0,
+   "role": "HR Manager",
+   "set_user_permissions": 0,
+   "share": 0,
+   "submit": 0,
+   "write": 1
+  },
+  {
+   "create": 0,
+   "delete": 0,
+   "if_owner": 0,
+   "read": 1,
+   "role": "HR User",
+   "write": 0
+  },
+  {
+   "create": 0,
+   "delete": 0,
+   "if_owner": 0,
+   "read": 1,
+   "role": "Employee",
+   "write": 0
+  }
+ ],
+ "read_only": 0,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 1
+}

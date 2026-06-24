@@ -1,0 +1,36 @@
+{
+ "actions": [],
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "reference_break", "fieldtype": "Section Break", "label": "Reference"},
+  {"fieldname": "reference_doctype", "fieldtype": "Data", "in_list_view": 1, "in_standard_filter": 1, "label": "Reference DocType", "reqd": 1},
+  {"fieldname": "reference_name", "fieldtype": "Data", "in_list_view": 1, "label": "Reference Name", "reqd": 1},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "action", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Action", "options": "Submit\nApprove\nReject\nCancel\nDelegate\nComment\nEdit", "reqd": 1},
+  {"fieldname": "from_state", "fieldtype": "Data", "label": "From State"},
+  {"fieldname": "to_state", "fieldtype": "Data", "in_list_view": 1, "label": "To State"},
+  {"fieldname": "actor_break", "fieldtype": "Section Break", "label": "Actor"},
+  {"fieldname": "actor", "fieldtype": "Link", "in_list_view": 1, "label": "Actor", "options": "User", "reqd": 1},
+  {"fieldname": "actor_employee", "fieldtype": "Link", "label": "Actor Employee", "options": "Employee"},
+  {"fieldname": "col2", "fieldtype": "Column Break"},
+  {"fieldname": "comment", "fieldtype": "Small Text", "label": "Comment"},
+  {"fieldname": "action_at", "default": "Now", "fieldtype": "Datetime", "in_list_view": 1, "label": "Action At"},
+  {"fieldname": "old_value", "fieldtype": "Code", "label": "Old Value", "options": "JSON"},
+  {"fieldname": "new_value", "fieldtype": "Code", "label": "New Value", "options": "JSON"}
+ ],
+ "links": [],
+ "module": "gege_hr",
+ "name": "VN Approval Log",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"create": 1, "read": 1, "role": "HR User", "write": 1},
+  {"read": 1, "role": "Employee"},
+  {"read": 1, "role": "Line Manager"}
+ ],
+ "sort_field": "action_at",
+ "sort_order": "DESC",
+ "track_changes": 0
+}

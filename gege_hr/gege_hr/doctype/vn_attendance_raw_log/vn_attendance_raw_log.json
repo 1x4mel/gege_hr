@@ -1,0 +1,46 @@
+{
+ "actions": [],
+ "autoname": "format:RL-{YYMMDD}-{#####}",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "src_break", "fieldtype": "Section Break", "label": "Source"},
+  {"fieldname": "source_type", "default": "Manual", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Source Type", "options": "Mobile\nApp\nDevice\nManual\nImport", "reqd": 1},
+  {"fieldname": "device", "fieldtype": "Link", "label": "Device", "options": "VN Attendance Device"},
+  {"fieldname": "raw_employee_code", "fieldtype": "Data", "in_standard_filter": 1, "label": "Raw Employee Code"},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "employee", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Employee", "options": "Employee"},
+  {"fieldname": "employee_name", "fieldtype": "Data", "in_list_view": 1, "label": "Employee Name", "read_only": 1},
+  {"fieldname": "log_break", "fieldtype": "Section Break", "label": "Log Details"},
+  {"fieldname": "log_time", "fieldtype": "Datetime", "in_list_view": 1, "in_standard_filter": 1, "label": "Log Time", "reqd": 1},
+  {"fieldname": "log_type", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Log Type", "options": "IN\nOUT", "reqd": 1},
+  {"fieldname": "col2", "fieldtype": "Column Break"},
+  {"fieldname": "raw_payload", "fieldtype": "Code", "label": "Raw Payload", "options": "JSON"},
+  {"fieldname": "loc_break", "fieldtype": "Section Break", "label": "Location"},
+  {"fieldname": "latitude", "fieldtype": "Float", "label": "Latitude", "precision": "8"},
+  {"fieldname": "longitude", "fieldtype": "Float", "label": "Longitude", "precision": "8"},
+  {"fieldname": "proc_break", "fieldtype": "Section Break", "label": "Processing"},
+  {"fieldname": "is_duplicate", "default": "0", "fieldtype": "Check", "label": "Is Duplicate", "read_only": 1},
+  {"fieldname": "is_valid", "default": "1", "fieldtype": "Check", "label": "Is Valid", "read_only": 1},
+  {"fieldname": "validation_message", "fieldtype": "Small Text", "label": "Validation Message", "read_only": 1},
+  {"fieldname": "processing_status", "default": "Pending", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Processing Status", "options": "Pending\nProcessed\nError\nSkipped"},
+  {"fieldname": "col3", "fieldtype": "Column Break"},
+  {"fieldname": "employee_checkin", "fieldtype": "Link", "label": "Employee Checkin", "options": "Employee Checkin", "read_only": 1}
+ ],
+ "links": [
+  {"link_doctype": "Employee Checkin", "link_fieldname": "vn_raw_log"}
+ ],
+ "module": "gege_hr",
+ "name": "VN Attendance Raw Log",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"create": 1, "read": 1, "role": "HR User", "write": 1},
+  {"create": 1, "read": 1, "role": "Employee"}
+ ],
+ "search_fields": "employee,log_time,log_type,source_type",
+ "sort_field": "log_time",
+ "sort_order": "DESC",
+ "track_changes": 1
+}

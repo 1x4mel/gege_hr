@@ -1,0 +1,40 @@
+{
+ "actions": [],
+ "autoname": "format:AE-{YYMMDD}-{#####}",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "audit_break", "fieldtype": "Section Break", "label": "Event Info"},
+  {"fieldname": "audit_type", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Audit Type", "options": "Check-in\nCheck-out\nLeave Submit\nLeave Cancel\nLeave Approve\nLeave Reject\nOT Submit\nOT Approve\nCorrection Submit\nCorrection Approve\nAdvance Submit\nAdvance Approve\nWork Session Recalculate\nMonthly Lock\nMonthly Unlock\nPayroll Calculate\nPayroll Approve\nPayroll Publish\nManual Override", "reqd": 1},
+  {"fieldname": "company", "fieldtype": "Link", "in_standard_filter": 1, "label": "Company", "options": "Company", "reqd": 1},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "employee", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Employee", "options": "Employee"},
+  {"fieldname": "work_date", "fieldtype": "Date", "in_standard_filter": 1, "label": "Work Date"},
+  {"fieldname": "actor_break", "fieldtype": "Section Break", "label": "Actor"},
+  {"fieldname": "actor", "fieldtype": "Link", "in_list_view": 1, "label": "Actor", "options": "User", "reqd": 1},
+  {"fieldname": "actor_ip", "fieldtype": "Data", "label": "Actor IP"},
+  {"fieldname": "col2", "fieldtype": "Column Break"},
+  {"fieldname": "reference_doctype", "fieldtype": "Data", "label": "Reference DocType"},
+  {"fieldname": "reference_name", "fieldtype": "Data", "label": "Reference Name"},
+  {"fieldname": "detail_break", "fieldtype": "Section Break", "label": "Details"},
+  {"fieldname": "description", "fieldtype": "Small Text", "label": "Description"},
+  {"fieldname": "old_value", "fieldtype": "Code", "label": "Old Value", "options": "JSON"},
+  {"fieldname": "col3", "fieldtype": "Column Break"},
+  {"fieldname": "new_value", "fieldtype": "Code", "label": "New Value", "options": "JSON"},
+  {"fieldname": "created_at", "default": "Now", "fieldtype": "Datetime", "label": "Created At", "read_only": 1}
+ ],
+ "links": [],
+ "module": "gege_hr",
+ "name": "VN Audit Event",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1},
+  {"read": 1, "role": "HR Manager"},
+  {"read": 1, "role": "HR User"}
+ ],
+ "search_fields": "audit_type,employee,company,work_date,actor",
+ "sort_field": "created_at",
+ "sort_order": "DESC",
+ "track_changes": 0
+}

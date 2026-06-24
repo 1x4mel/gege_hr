@@ -1,0 +1,38 @@
+{
+ "actions": [],
+ "autoname": "field:matrix_name",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "info_break", "fieldtype": "Section Break", "label": "Info"},
+  {"fieldname": "matrix_name", "fieldtype": "Data", "in_list_view": 1, "label": "Matrix Name", "reqd": 1, "unique": 1},
+  {"fieldname": "company", "fieldtype": "Link", "in_list_view": 1, "label": "Company", "options": "Company", "reqd": 1},
+  {"fieldname": "transaction_type", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Transaction Type", "options": "Leave Application\nOvertime Request\nCorrection Request\nSalary Advance Request", "reqd": 1},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "apply_to", "default": "All", "fieldtype": "Select", "label": "Apply To", "options": "All\nBranch\nDepartment\nEmployee Grade"},
+  {"fieldname": "branch", "fieldtype": "Link", "label": "Branch", "options": "Branch", "depends_on": "eval:doc.apply_to=='Branch'"},
+  {"fieldname": "department", "fieldtype": "Link", "label": "Department", "options": "Department", "depends_on": "eval:doc.apply_to=='Department'"},
+  {"fieldname": "employee_grade", "fieldtype": "Link", "label": "Employee Grade", "options": "Employee Grade", "depends_on": "eval:doc.apply_to=='Employee Grade'"},
+  {"fieldname": "is_active", "default": "1", "fieldtype": "Check", "in_list_view": 1, "label": "Is Active"},
+  {"fieldname": "condition_break", "fieldtype": "Section Break", "label": "Conditions"},
+  {"fieldname": "min_amount", "fieldtype": "Currency", "label": "Min Amount", "options": "Company:company:default_currency"},
+  {"fieldname": "max_amount", "fieldtype": "Currency", "label": "Max Amount", "options": "Company:company:default_currency"},
+  {"fieldname": "col2", "fieldtype": "Column Break"},
+  {"fieldname": "min_hours", "fieldtype": "Float", "label": "Min Hours"},
+  {"fieldname": "max_hours", "fieldtype": "Float", "label": "Max Hours"},
+  {"fieldname": "steps", "fieldtype": "Table", "label": "Approval Steps", "options": "VN Approval Step", "reqd": 1}
+ ],
+ "links": [],
+ "module": "gege_hr",
+ "name": "VN Approval Matrix",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"read": 1, "role": "HR User"}
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "title_field": "matrix_name",
+ "track_changes": 1
+}

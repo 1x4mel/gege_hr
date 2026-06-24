@@ -1,0 +1,37 @@
+{
+ "actions": [],
+ "autoname": "field:employee",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "info_break", "fieldtype": "Section Break", "label": "Information"},
+  {"fieldname": "employee", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Employee", "options": "Employee", "reqd": 1, "unique": 1},
+  {"fieldname": "employee_name", "fieldtype": "Data", "in_list_view": 1, "label": "Employee Name", "read_only": 1},
+  {"fieldname": "user", "fieldtype": "Link", "in_standard_filter": 1, "label": "User", "options": "User"},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "preferred_language", "default": "vi", "fieldtype": "Select", "label": "Preferred Language", "options": "vi\nen"},
+  {"fieldname": "notification_enabled", "default": "1", "fieldtype": "Check", "label": "Notifications Enabled"},
+  {"fieldname": "device_break", "fieldtype": "Section Break", "label": "Device & Preferences"},
+  {"fieldname": "fcm_token", "fieldtype": "Data", "label": "FCM Token"},
+  {"fieldname": "last_login_at", "fieldtype": "Datetime", "label": "Last Login At", "read_only": 1},
+  {"fieldname": "last_login_ip", "fieldtype": "Data", "label": "Last Login IP", "read_only": 1},
+  {"fieldname": "col2", "fieldtype": "Column Break"},
+  {"fieldname": "pinned_devices", "fieldtype": "Small Text", "label": "Pinned Devices"},
+  {"fieldname": "theme_preference", "default": "System", "fieldtype": "Select", "label": "Theme Preference", "options": "Light\nDark\nSystem"}
+ ],
+ "links": [],
+ "module": "gege_hr",
+ "name": "VN Employee Portal Profile",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"create": 1, "read": 1, "role": "HR User", "write": 1},
+  {"create": 1, "if_owner": 1, "read": 1, "role": "Employee", "write": 1}
+ ],
+ "search_fields": "employee,employee_name,user",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "title_field": "employee_name",
+ "track_changes": 1
+}

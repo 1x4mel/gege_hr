@@ -1,0 +1,2 @@
+# Patches for gege_hr. Format: <patch_file_path>
+# (none yet — see doctype-design.md for the DocType roadmap)

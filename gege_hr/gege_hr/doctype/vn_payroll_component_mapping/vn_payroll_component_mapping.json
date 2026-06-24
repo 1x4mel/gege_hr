@@ -1,0 +1,36 @@
+{
+ "actions": [],
+ "autoname": "field:mapping_name",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "info_break", "fieldtype": "Section Break", "label": "Information"},
+  {"fieldname": "mapping_name", "fieldtype": "Data", "in_list_view": 1, "label": "Mapping Name", "reqd": 1, "unique": 1},
+  {"fieldname": "company", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Company", "options": "Company", "reqd": 1},
+  {"fieldname": "is_active", "default": "1", "fieldtype": "Check", "in_list_view": 1, "label": "Is Active"},
+  {"fieldname": "mapping_break", "fieldtype": "Section Break", "label": "Mapping Rules"},
+  {"fieldname": "segment_type", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Segment Type", "options": "Regular\nRegular Night\nOT\nOT Night\nOT Holiday\nOT Holiday Night\nLate\nEarly Leave\nLeave\nUnpaid", "reqd": 1},
+  {"fieldname": "day_type", "default": "All", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Day Type", "options": "Weekday\nWeekend\nHoliday\nAll"},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "salary_component", "fieldtype": "Link", "in_list_view": 1, "label": "Salary Component", "options": "Salary Component", "reqd": 1},
+  {"fieldname": "multiplier", "default": "1.0", "fieldtype": "Float", "in_list_view": 1, "label": "Multiplier", "precision": "2"},
+  {"fieldname": "formula_type", "default": "Hours × Rate", "fieldtype": "Select", "in_list_view": 1, "label": "Formula Type", "options": "Fixed\nHours × Rate\nHours × Rate × Multiplier\nCustom"},
+  {"fieldname": "formula", "fieldtype": "Code", "label": "Formula", "options": "Python"}
+ ],
+ "links": [],
+ "module": "gege_hr",
+ "name": "VN Payroll Component Mapping",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"create": 1, "read": 1, "role": "Payroll Manager", "write": 1},
+  {"read": 1, "role": "HR User"},
+  {"read": 1, "role": "Payroll User"}
+ ],
+ "search_fields": "company,segment_type,day_type,salary_component",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "title_field": "mapping_name",
+ "track_changes": 1
+}

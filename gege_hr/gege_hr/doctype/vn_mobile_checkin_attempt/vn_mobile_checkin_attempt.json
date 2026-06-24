@@ -1,0 +1,38 @@
+{
+ "actions": [],
+ "autoname": "MC-.YYMMDD.-.######",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "employee", "fieldtype": "Link", "in_list_view": 1, "label": "Employee", "options": "Employee", "reqd": 1},
+  {"fieldname": "status", "default": "Success", "fieldtype": "Select", "in_list_view": 1, "label": "Status", "options": "Success\nFailed\nDuplicate\nRejected"},
+  {"fieldname": "col_a", "fieldtype": "Column Break"},
+  {"fieldname": "intended_log_type", "fieldtype": "Select", "label": "Intended Log Type", "options": "IN\nOUT"},
+  {"fieldname": "reason", "fieldtype": "Small Text", "label": "Reason / Error"},
+  {"fieldname": "idem_break", "fieldtype": "Section Break", "label": "Idempotency & Device"},
+  {"fieldname": "client_request_id", "fieldtype": "Data", "in_list_view": 1, "in_standard_filter": 1, "label": "Client Request ID", "unique": 1},
+  {"fieldname": "device_id", "fieldtype": "Data", "label": "Device ID"},
+  {"fieldname": "col_b", "fieldtype": "Column Break"},
+  {"fieldname": "client_timestamp", "fieldtype": "Datetime", "label": "Client Timestamp"},
+  {"fieldname": "server_timestamp", "fieldtype": "Datetime", "in_list_view": 1, "label": "Server Timestamp", "read_only": 1},
+  {"fieldname": "geo_break", "fieldtype": "Section Break", "label": "Geolocation"},
+  {"fieldname": "latitude", "fieldtype": "Float", "label": "Latitude", "precision": "8"},
+  {"fieldname": "longitude", "fieldtype": "Float", "label": "Longitude", "precision": "8"},
+  {"fieldname": "geo_accuracy_meters", "fieldtype": "Float", "label": "GPS Accuracy (meters)"}
+ ],
+ "in_create": 1,
+ "is_submittable": 0,
+ "module": "gege_hr",
+ "name": "VN Mobile Checkin Attempt",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "read": 1, "role": "Employee"},
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager"},
+  {"create": 1, "read": 1, "role": "HR User"}
+ ],
+ "read_only": 1,
+ "sort_field": "server_timestamp",
+ "sort_order": "DESC",
+ "track_changes": 0
+}

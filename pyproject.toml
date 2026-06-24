@@ -1,0 +1,46 @@
+# Ruff configuration for gege_hr (Frappe Python app standard).
+# Ruff is Frappe's official linter/formatter (replaces black + flake8 + isort).
+# Config mirrors the conventions used by the Frappe framework itself:
+# line-length 110, target py310, pragmatic rule set.
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+extend-exclude = [
+    "__pycache__",
+    "build",
+    "dist",
+    "*.egg-info",
+]
+
+[tool.ruff.lint]
+# Rules aligned with Frappe's repo style:
+#   E/W  pycodestyle (E501 ignored via per-file, most kept)
+#   F    pyflakes (unused imports/vars, undefined names)
+#   I    isort (import ordering)
+#   UP   pyupgrade
+#   B    bugbear (common pitfalls)
+select = ["E", "W", "F", "I", "UP", "B"]
+ignore = [
+    "E501",   # line too long — Frappe apps tolerate long lines; formatter wraps where sane
+    "B008",   # function call in default arg — Frappe uses frappe.whitelist() decorators idiomatically
+    "B904",   # raise from — kept lenient for legacy broad excepts
+    "UP007",  # Optional[X] vs X | None — keep typing.Optional for py3.10 clarity
+    # Keep `from __future__ import annotations` — removing it changes annotation
+    # evaluation at runtime (PEP 563) which is risky for a Frappe app's
+    # whitelisted method signatures. Intentional project convention.
+    "UP010",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Package markers are intentionally empty.
+"__init__.py" = ["F401", "F403"]
+# Tests: allow unused fixtures / star imports / longer locals.
+"tests/*" = ["F401", "F811", "E402"]
+# hooks.py legitimately sets app_* config before imports (Frappe convention).
+"hooks.py" = ["E402"]
+
+[tool.ruff.format]
+# Black-compatible formatting (the Frappe default).
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true

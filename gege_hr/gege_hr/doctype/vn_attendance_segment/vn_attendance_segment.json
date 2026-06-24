@@ -1,0 +1,32 @@
+{
+ "actions": [],
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "segment_type", "fieldtype": "Select", "in_list_view": 1, "label": "Segment Type", "options": "Regular\nRegular Night\nOT\nOT Night\nOT Holiday\nOT Holiday Night\nLate\nEarly Leave\nBreak\nUnpaid\nLeave", "reqd": 1},
+  {"fieldname": "from_datetime", "fieldtype": "Datetime", "in_list_view": 1, "label": "From", "reqd": 1},
+  {"fieldname": "to_datetime", "fieldtype": "Datetime", "in_list_view": 1, "label": "To", "reqd": 1},
+  {"fieldname": "hours", "default": "0", "fieldtype": "Float", "in_list_view": 1, "label": "Hours", "read_only": 1},
+  {"fieldname": "calendar_date", "fieldtype": "Date", "label": "Calendar Date", "read_only": 1},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "is_night", "default": "0", "fieldtype": "Check", "label": "Is Night", "read_only": 1},
+  {"fieldname": "is_holiday", "default": "0", "fieldtype": "Check", "label": "Is Holiday", "read_only": 1},
+  {"fieldname": "is_weekend", "default": "0", "fieldtype": "Check", "label": "Is Weekend", "read_only": 1},
+  {"fieldname": "salary_component", "fieldtype": "Link", "label": "Salary Component", "options": "Salary Component"},
+  {"fieldname": "multiplier", "default": "1.0", "fieldtype": "Float", "label": "Multiplier"},
+  {"fieldname": "note", "fieldtype": "Small Text", "label": "Note"}
+ ],
+ "istable": 1,
+ "module": "gege_hr",
+ "name": "VN Attendance Segment",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"create": 1, "read": 1, "role": "HR User", "write": 1},
+  {"read": 1, "role": "Employee"}
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 0
+}

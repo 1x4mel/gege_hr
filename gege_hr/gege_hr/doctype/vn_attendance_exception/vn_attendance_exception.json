@@ -1,0 +1,44 @@
+{
+ "actions": [],
+ "autoname": "format:EXC-{YYMMDD}-{#####}",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "emp_break", "fieldtype": "Section Break", "label": "Employee"},
+  {"fieldname": "employee", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Employee", "options": "Employee", "reqd": 1},
+  {"fieldname": "employee_name", "fieldtype": "Data", "in_list_view": 1, "label": "Employee Name", "read_only": 1},
+  {"fieldname": "work_date", "fieldtype": "Date", "in_list_view": 1, "in_standard_filter": 1, "label": "Work Date", "reqd": 1},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "shift_instance", "fieldtype": "Link", "label": "Shift Instance", "options": "VN Employee Shift Instance"},
+  {"fieldname": "work_session", "fieldtype": "Link", "label": "Work Session", "options": "VN Attendance Work Session"},
+  {"fieldname": "attendance", "fieldtype": "Link", "label": "Attendance", "options": "Attendance"},
+  {"fieldname": "exc_break", "fieldtype": "Section Break", "label": "Exception Details"},
+  {"fieldname": "exception_type", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Exception Type", "options": "Missing Check-in\nMissing Check-out\nExcess OT\nShift Overlap\nInvalid GPS\nDuplicate Log\nExcess Work Hours\nPolicy Violation\nManual Flag", "reqd": 1},
+  {"fieldname": "severity", "default": "Medium", "fieldtype": "Select", "in_list_view": 1, "label": "Severity", "options": "Low\nMedium\nHigh\nCritical"},
+  {"fieldname": "description", "fieldtype": "Small Text", "label": "Description"},
+  {"fieldname": "status", "default": "Open", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Status", "options": "Open\nIn Progress\nResolved\nIgnored\nEscalated"},
+  {"fieldname": "col2", "fieldtype": "Column Break"},
+  {"fieldname": "assigned_to", "fieldtype": "Link", "label": "Assigned To", "options": "User"},
+  {"fieldname": "res_break", "fieldtype": "Section Break", "label": "Resolution"},
+  {"fieldname": "resolution_type", "fieldtype": "Select", "label": "Resolution Type", "options": "Auto Correct\nCorrection Request\nManual Override\nRecalculate\nIgnore"},
+  {"fieldname": "resolution_note", "fieldtype": "Small Text", "label": "Resolution Note"},
+  {"fieldname": "resolved_by", "fieldtype": "Link", "label": "Resolved By", "options": "User", "read_only": 1},
+  {"fieldname": "resolved_at", "fieldtype": "Datetime", "label": "Resolved At", "read_only": 1}
+ ],
+ "links": [
+  {"link_doctype": "VN Attendance Correction Request", "link_fieldname": "work_session"}
+ ],
+ "module": "gege_hr",
+ "name": "VN Attendance Exception",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"create": 1, "read": 1, "role": "HR User", "write": 1}
+ ],
+ "search_fields": "employee,work_date,exception_type,status,severity",
+ "sort_field": "work_date",
+ "sort_order": "DESC",
+ "title_field": "employee_name",
+ "track_changes": 1
+}

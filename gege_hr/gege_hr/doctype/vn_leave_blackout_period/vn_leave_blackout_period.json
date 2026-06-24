@@ -1,0 +1,35 @@
+{
+ "actions": [],
+ "autoname": "field:blackout_name",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "info_break", "fieldtype": "Section Break", "label": "Information"},
+  {"fieldname": "blackout_name", "fieldtype": "Data", "in_list_view": 1, "in_standard_filter": 1, "label": "Blackout Name", "reqd": 1, "unique": 1},
+  {"fieldname": "company", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Company", "options": "Company", "reqd": 1},
+  {"fieldname": "branch", "fieldtype": "Link", "in_standard_filter": 1, "label": "Branch", "options": "Branch"},
+  {"fieldname": "department", "fieldtype": "Link", "in_standard_filter": 1, "label": "Department", "options": "Department"},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "from_date", "fieldtype": "Date", "in_list_view": 1, "in_standard_filter": 1, "label": "From Date", "reqd": 1},
+  {"fieldname": "to_date", "fieldtype": "Date", "in_list_view": 1, "label": "To Date", "reqd": 1},
+  {"fieldname": "applies_to_leave_type", "fieldtype": "Link", "label": "Leave Type", "options": "Leave Type"},
+  {"fieldname": "is_active", "default": "1", "fieldtype": "Check", "in_list_view": 1, "label": "Is Active"},
+  {"fieldname": "rule_break", "fieldtype": "Section Break", "label": "Action"},
+  {"fieldname": "action", "default": "Warning", "fieldtype": "Select", "in_list_view": 1, "label": "Action", "options": "Warning\nBlock\nRequire HR Approval", "reqd": 1},
+  {"fieldname": "reason", "fieldtype": "Small Text", "label": "Reason", "reqd": 1}
+ ],
+ "links": [],
+ "module": "gege_hr",
+ "name": "VN Leave Blackout Period",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"read": 1, "role": "HR User"}
+ ],
+ "search_fields": "company,branch,department,from_date,to_date,action",
+ "sort_field": "from_date",
+ "sort_order": "DESC",
+ "title_field": "blackout_name",
+ "track_changes": 1
+}

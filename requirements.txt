@@ -1,0 +1,4 @@
+# Runtime dependencies for gege_hr.
+# Frappe (frappe-bench) provides: frappe, redis, etc. at the bench level,
+# so this file only lists app-specific extras. Keep it intentionally minimal —
+# timezone handling uses the stdlib `zoneinfo` (Python >= 3.9), no extra deps.

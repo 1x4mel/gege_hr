@@ -1,0 +1,43 @@
+{
+ "actions": [],
+ "autoname": "format:CRUN-{YYMMDD}-{#####}",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "run_break", "fieldtype": "Section Break", "label": "Run Info"},
+  {"fieldname": "run_type", "default": "Batch", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Run Type", "options": "Realtime\nBatch\nRecalculate\nBackfill", "reqd": 1},
+  {"fieldname": "company", "fieldtype": "Link", "label": "Company", "options": "Company", "reqd": 1},
+  {"fieldname": "branch", "fieldtype": "Link", "label": "Branch", "options": "Branch"},
+  {"fieldname": "department", "fieldtype": "Link", "label": "Department", "options": "Department"},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "from_date", "fieldtype": "Date", "in_list_view": 1, "label": "From Date", "reqd": 1},
+  {"fieldname": "to_date", "fieldtype": "Date", "in_list_view": 1, "label": "To Date", "reqd": 1},
+  {"fieldname": "status", "default": "Queued", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Status", "options": "Queued\nRunning\nCompleted\nPartial\nFailed\nCancelled"},
+  {"fieldname": "stats_break", "fieldtype": "Section Break", "label": "Statistics"},
+  {"fieldname": "total_shift_instances", "default": "0", "fieldtype": "Int", "label": "Total Shift Instances", "read_only": 1},
+  {"fieldname": "total_sessions_created", "default": "0", "fieldtype": "Int", "label": "Sessions Created", "read_only": 1},
+  {"fieldname": "total_sessions_updated", "default": "0", "fieldtype": "Int", "label": "Sessions Updated", "read_only": 1},
+  {"fieldname": "total_sessions_error", "default": "0", "fieldtype": "Int", "label": "Sessions Error", "read_only": 1},
+  {"fieldname": "col2", "fieldtype": "Column Break"},
+  {"fieldname": "started_at", "fieldtype": "Datetime", "label": "Started At", "read_only": 1},
+  {"fieldname": "ended_at", "fieldtype": "Datetime", "label": "Ended At", "read_only": 1},
+  {"fieldname": "triggered_by", "fieldtype": "Link", "label": "Triggered By", "options": "User", "read_only": 1},
+  {"fieldname": "params", "fieldtype": "Code", "label": "Parameters", "options": "JSON"},
+  {"fieldname": "error_log", "fieldtype": "Code", "label": "Error Log", "read_only": 1}
+ ],
+ "links": [
+  {"link_doctype": "VN Attendance Work Session", "link_fieldname": "calculation_run"}
+ ],
+ "module": "gege_hr",
+ "name": "VN Attendance Calculation Run",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"create": 1, "read": 1, "role": "HR User", "write": 1}
+ ],
+ "search_fields": "status,run_type,company",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 1
+}

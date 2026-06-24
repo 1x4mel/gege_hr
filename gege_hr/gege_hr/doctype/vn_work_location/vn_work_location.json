@@ -1,0 +1,37 @@
+{
+ "actions": [],
+ "autoname": "field:location_name",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "info_break", "fieldtype": "Section Break", "label": "Information"},
+  {"fieldname": "location_name", "fieldtype": "Data", "in_list_view": 1, "label": "Location Name", "reqd": 1, "unique": 1},
+  {"fieldname": "company", "fieldtype": "Link", "in_list_view": 1, "label": "Company", "options": "Company", "reqd": 1},
+  {"fieldname": "branch", "fieldtype": "Link", "label": "Branch", "options": "Branch"},
+  {"fieldname": "is_active", "default": "1", "fieldtype": "Check", "in_list_view": 1, "label": "Is Active"},
+  {"fieldname": "address_break", "fieldtype": "Section Break", "label": "Address & GPS"},
+  {"fieldname": "address", "fieldtype": "Link", "label": "Address", "options": "Address"},
+  {"fieldname": "address_display", "fieldtype": "Small Text", "label": "Address Display", "read_only": 1},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "latitude", "fieldtype": "Float", "in_list_view": 1, "label": "Latitude", "precision": "8"},
+  {"fieldname": "longitude", "fieldtype": "Float", "in_list_view": 1, "label": "Longitude", "precision": "8"},
+  {"fieldname": "allowed_radius_meters", "default": "50", "fieldtype": "Int", "label": "Allowed Radius (meters)"},
+  {"fieldname": "network_break", "fieldtype": "Section Break", "label": "Network Validation"},
+  {"fieldname": "allowed_wifi_ssid", "fieldtype": "Data", "label": "Allowed Wi-Fi SSID"},
+  {"fieldname": "allowed_ip_range", "fieldtype": "Data", "label": "Allowed IP Range"},
+  {"fieldname": "col2", "fieldtype": "Column Break"},
+  {"fieldname": "notes", "fieldtype": "Small Text", "label": "Notes"}
+ ],
+ "module": "gege_hr",
+ "name": "VN Work Location",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"create": 1, "read": 1, "role": "HR User", "write": 1}
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "title_field": "location_name",
+ "track_changes": 1
+}

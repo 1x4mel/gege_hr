@@ -1,0 +1,5 @@
+# Development / test dependencies for gege_hr.
+# Runtime deps stay minimal (see requirements.txt); these are only needed to
+# run the pure-function unit suite without a Frappe bench.
+pytest>=7.0
+ruff>=0.5.0

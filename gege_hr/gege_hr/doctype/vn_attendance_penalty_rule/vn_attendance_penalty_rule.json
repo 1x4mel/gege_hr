@@ -1,0 +1,51 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "fields": [
+  {
+   "fieldname": "from_minutes",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "From (minutes)",
+   "reqd": 1
+  },
+  {
+   "fieldname": "to_minutes",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "To (minutes)"
+  },
+  {
+   "fieldname": "penalty_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Penalty Type",
+   "options": "Fixed Amount\nPer Minute\nPercentage\nHalf Day\nFull Day",
+   "reqd": 1
+  },
+  {
+   "fieldname": "penalty_value",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Penalty Value",
+   "reqd": 1
+  },
+  {
+   "fieldname": "salary_component",
+   "fieldtype": "Link",
+   "label": "Salary Component",
+   "options": "Salary Component"
+  }
+ ],
+ "istable": 1,
+ "module": "gege_hr",
+ "name": "VN Attendance Penalty Rule",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC"
+}

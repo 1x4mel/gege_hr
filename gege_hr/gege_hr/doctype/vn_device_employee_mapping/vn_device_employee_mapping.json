@@ -1,0 +1,33 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-06-21 04:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "device", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Device", "options": "VN Attendance Device", "reqd": 1},
+  {"fieldname": "raw_employee_code", "fieldtype": "Data", "in_list_view": 1, "in_standard_filter": 1, "label": "Raw Employee Code", "reqd": 1},
+  {"fieldname": "employee", "fieldtype": "Link", "in_list_view": 1, "label": "Employee", "options": "Employee", "reqd": 1},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "valid_from", "fieldtype": "Date", "label": "Valid From"},
+  {"fieldname": "valid_to", "fieldtype": "Date", "label": "Valid To"},
+  {"fieldname": "is_active", "default": "1", "fieldtype": "Check", "in_list_view": 1, "label": "Is Active"},
+  {"fieldname": "note", "fieldtype": "Small Text", "label": "Note"}
+ ],
+ "links": [
+  {"link_doctype": "Employee Checkin", "link_fieldname": "device_id"}
+ ],
+ "module": "gege_hr",
+ "name": "VN Device Employee Mapping",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"create": 1, "read": 1, "role": "HR User", "write": 1}
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "title_field": "employee",
+ "track_changes": 1,
+ "unique_constraints": [
+  {"fields": ["device", "raw_employee_code"]}]
+}
