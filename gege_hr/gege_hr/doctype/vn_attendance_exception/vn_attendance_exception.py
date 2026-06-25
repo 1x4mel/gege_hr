@@ -22,6 +22,7 @@ class VNAttendanceException(Document):
 
     def validate(self):
         self._normalize_employee_name()
+        self._normalize_company()
         self._enforce_resolution_consistency()
 
     def before_save(self):
@@ -35,6 +36,16 @@ class VNAttendanceException(Document):
     def _normalize_employee_name(self):
         if self.employee and not self.employee_name:
             self.employee_name = frappe.db.get_value("Employee", self.employee, "employee_name")
+
+    def _normalize_company(self):
+        """Denormalise the employee's company for company-scoped dashboard counts.
+
+        The dashboard's ``_count_open_exceptions`` filters by ``company``; the
+        engine/HR creation paths only pass ``employee``, so we resolve company
+        here to keep every exception searchable by company.
+        """
+        if not self.company and self.employee:
+            self.company = frappe.db.get_value("Employee", self.employee, "company")
 
     def _enforce_resolution_consistency(self):
         """A closed exception must record how it was resolved."""

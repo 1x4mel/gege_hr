@@ -26,6 +26,7 @@ from frappe.utils import add_days, flt, get_datetime, getdate
 
 from gege_hr.gege_hr.api import audit as audit_api
 from gege_hr.gege_hr.utils import employee as emp_utils
+from gege_hr.gege_hr.utils import gamification as game
 from gege_hr.gege_hr.utils import tz as tz_utils
 from gege_hr.gege_hr.utils.ratelimit import rate_limit
 from gege_hr.gege_hr.utils.request_workflow import send_for_approval
@@ -150,6 +151,160 @@ def _shift_minutes(field: str, default: int) -> int:
         return default
 
 
+def _first_in_last_out(checkins: list[dict]) -> tuple[object, object]:
+    """Return (first IN, last OUT) raw ``time`` values from checkin rows.
+
+    Frappe ``Employee Checkin.log_type`` uses "IN"/"OUT" (or the localized
+    "Clock In"/"Clock Out"). The raw value is kept (datetime or string) so the
+    caller can normalise it to the portal timezone.
+    """
+    in_times, out_times = [], []
+    for c in checkins:
+        lt = (c.log_type or "").upper()
+        if lt in ("IN", "CLOCK IN"):
+            in_times.append(c.time)
+        elif lt in ("OUT", "CLOCK OUT"):
+            out_times.append(c.time)
+    first_in = sorted(in_times)[0] if in_times else None
+    last_out = sorted(out_times)[-1] if out_times else None
+    return first_in, last_out
+
+
+def _to_portal_dt(value):
+    """Normalise a raw checkin ``time`` (datetime/ISO/SQL str) → portal-local dt.
+
+    Frappe stores datetimes as UTC (naive); the helper treats them as UTC then
+    converts to the portal timezone (plan v5 §2.7). Returns ``None`` for falsy.
+    """
+    if not value:
+        return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if "T" in raw:
+            iso = raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw
+            try:
+                value = datetime.fromisoformat(iso)
+            except ValueError:
+                return None
+        else:
+            try:
+                value = datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=tz_utils.ZoneInfo("UTC"))
+    return tz_utils.to_portal(value)
+
+
+def _status_key(
+    actual_in,
+    actual_out,
+    deviation,
+    now_local: datetime | None = None,
+    planned_end: datetime | None = None,
+) -> str:
+    """Map (check-in done?, check-out done?, deviation) to an emotion status key.
+
+    Keys mirror the frontend ``StatusEmotion`` table:
+    ``early | on_time | late | very_late | not_started | completed |
+    missing_checkout``.
+    The check-in quality (early/on_time/late) is shown while the employee is
+    still working; ``completed`` once they have checked out. ``missing_checkout``
+    fires when the employee checked in but the shift end has passed with no OUT.
+    """
+    if actual_in and actual_out:
+        return "completed"
+    if actual_in is None:
+        return "not_started"
+    # Checked in but never checked out, and the planned shift end is in the past
+    # → flag a forgotten checkout so the UI can prompt a correction request.
+    if actual_out is None and now_local and planned_end and now_local > planned_end:
+        return "missing_checkout"
+    if deviation is None:
+        return "not_started"
+    if deviation <= -5:
+        return "early"
+    if deviation <= 5:
+        return "on_time"
+    if deviation <= 30:
+        return "late"
+    return "very_late"
+
+
+def _session_context(shift: dict | None, checkins: list[dict], now_local: datetime) -> dict | None:
+    """Build the rich ``session`` block (plan v5 §10.2 + gamification design).
+
+    Computes actual check-in/out, early/late deviation (portal-local minutes),
+    elapsed/remaining session minutes and the emotion ``status_key``. Returns
+    ``None`` when there is no shift today.
+
+    The block also exposes derived check-out semantics the UI uses for the
+    "về sớm / đúng giờ / tăng ca" pill: ``checkout_status``, ``overtime_minutes``
+    and ``early_exit_minutes``.
+    """
+    if not shift:
+        return None
+
+    first_in_raw, last_out_raw = _first_in_last_out(checkins)
+    planned_start = tz_utils.to_portal(
+        datetime.fromisoformat(shift["planned_start"].replace("Z", "+00:00"))
+    )
+    planned_end = tz_utils.to_portal(
+        datetime.fromisoformat(shift["planned_end"].replace("Z", "+00:00"))
+    )
+    actual_in = _to_portal_dt(first_in_raw)
+    actual_out = _to_portal_dt(last_out_raw)
+
+    deviation = (
+        int(round((actual_in - planned_start).total_seconds() / 60.0)) if actual_in else None
+    )
+    checkout_deviation = (
+        int(round((actual_out - planned_end).total_seconds() / 60.0)) if actual_out else None
+    )
+
+    if actual_in and not actual_out:
+        elapsed = int(max(0, (now_local - actual_in).total_seconds() / 60.0))
+        remaining = int(max(0, (planned_end - now_local).total_seconds() / 60.0))
+    elif actual_in and actual_out:
+        elapsed = int(max(0, (actual_out - actual_in).total_seconds() / 60.0))
+        remaining = 0
+    else:
+        elapsed = 0
+        remaining = int(max(0, (planned_end - planned_start).total_seconds() / 60.0))
+
+    status_key = _status_key(actual_in, actual_out, deviation, now_local, planned_end)
+
+    # Derive checkout semantics (only meaningful once the employee checked out).
+    overtime_minutes = 0
+    early_exit_minutes = 0
+    checkout_status = None
+    if actual_out and checkout_deviation is not None:
+        if checkout_deviation >= 5:
+            checkout_status = "overtime"
+            overtime_minutes = checkout_deviation
+        elif checkout_deviation <= -5:
+            checkout_status = "early"
+            early_exit_minutes = -checkout_deviation
+        else:
+            checkout_status = "on_time"
+
+    return {
+        "status_key": status_key,
+        "deviation_minutes": deviation,
+        "checkout_deviation_minutes": checkout_deviation,
+        "checkout_status": checkout_status,
+        "overtime_minutes": overtime_minutes,
+        "early_exit_minutes": early_exit_minutes,
+        "actual_checkin": tz_utils.utc_iso(actual_in) if actual_in else None,
+        "actual_checkout": tz_utils.utc_iso(actual_out) if actual_out else None,
+        "elapsed_minutes": elapsed,
+        "remaining_minutes": remaining,
+        "planned_duration_minutes": int(max(0, (planned_end - planned_start).total_seconds() / 60.0)),
+    }
+
+
 def _is_date_locked(work_date: str) -> bool:
     """True when a VN Monthly Attendance Period covering ``work_date`` is locked."""
     try:
@@ -177,7 +332,8 @@ def today_status(employee: str | None = None) -> dict:
     button_state = _derive_button_state(shift, checkins, now_local)
 
     setting = _portal_setting()
-    work_location = _work_location_for(emp)
+    work_location = _work_location_for(emp, day)
+    session = _session_context(shift, checkins, now_local)
 
     return {
         "employee": emp,
@@ -187,7 +343,15 @@ def today_status(employee: str | None = None) -> dict:
         "times": {
             "last_checkin": checkins[-1]["time"] if checkins else None,
             "checkin_count": len(checkins),
+            # Expose the first-IN / last-OUT (UTC ISO) so the UI can show actual
+            # times + worked duration. These match what TodayStatusCard expects.
+            "actual_checkin": session["actual_checkin"] if session else None,
+            "actual_checkout": session["actual_checkout"] if session else None,
         },
+        # Rich session block (plan v5 §10.2 + attendance-gamification-design).
+        "session": session,
+        # Gamification snapshot (XP / streak / badges) — null if disabled.
+        "gamification": game.get_snapshot(emp),
         "geo": {
             "require_geolocation": bool(setting.get("require_geolocation")),
             "work_location": work_location,
@@ -214,7 +378,19 @@ def mobile_checkin(
     """
     emp = _resolve_employee(employee)
     if not client_request_id:
-        client_request_id = f"srv-{datetime.utcnow().timestamp():.0f}"
+        client_request_id = f"srv-{tz_utils.utc_now().timestamp():.0f}"
+
+    # Normalise the client timestamp BEFORE touching the DB. Browsers send
+    # ``new Date().toISOString()`` ("2026-06-24T06:30:35.734Z") which MySQL
+    # rejects with OperationalError(1292). Convert to an aware datetime that
+    # Frappe serialises safely; a non-parseable value is logged + nulled out
+    # rather than failing the whole check-in.
+    client_ts = tz_utils.parse_client_timestamp(client_timestamp)
+    if client_timestamp and client_ts is None:
+        frappe.log_error(
+            title="VN Mobile Checkin: unparseable client_timestamp",
+            message=f"raw={client_timestamp!r} employee={emp}",
+        )
 
     # Idempotency: a second tap with the same client_request_id is a no-op.
     existing = frappe.db.get_value("VN Mobile Checkin Attempt", {"client_request_id": client_request_id})
@@ -242,8 +418,12 @@ def mobile_checkin(
             "employee": emp,
             "client_request_id": client_request_id,
             "device_id": device_id,
-            "client_timestamp": client_timestamp,
-            "server_timestamp": server_now.isoformat(),
+            "client_timestamp": client_ts,
+            # Stamp the audit ``server_timestamp`` with TRUE UTC, not
+            # ``frappe.utils.now()``. When ``System Settings.time_zone`` is
+            # unset, Frappe falls back to Asia/Kolkata (+5:30) and every stamp
+            # would land 5.5h in the future (the attendance "19:37" bug).
+            "server_timestamp": tz_utils.utc_now_str(),
             "latitude": flt(latitude) if latitude is not None else None,
             "longitude": flt(longitude) if longitude is not None else None,
             "intended_log_type": log_type,
@@ -253,12 +433,17 @@ def mobile_checkin(
     attempt.insert()
 
     # The actual Frappe HR check-in record (drives downstream recalculation).
+    #
+    # ``Employee Checkin.time`` MUST be true UTC (the storage convention
+    # ``gege_hr`` relies on). We stamp it from ``tz_utils.utc_now_str()``
+    # rather than ``server_now.astimezone(UTC)`` so the value is anchored to
+    # the OS clock and is immune to a misconfigured Frappe system timezone.
     frappe.get_doc(
         {
             "doctype": "Employee Checkin",
             "employee": emp,
             "log_type": log_type,
-            "time": server_now.astimezone(tz_utils.ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S"),
+            "time": tz_utils.utc_now_str(),
             "device_id": device_id or "gege_hr-mobile",
             "latitude": flt(latitude) if latitude is not None else None,
             "longitude": flt(longitude) if longitude is not None else None,
@@ -266,8 +451,33 @@ def mobile_checkin(
     ).insert()
 
     frappe.db.commit()
+
+    # Gamification: finalise XP/streak/badges once the session closes (check-out).
+    game_result = None
+    if log_type == "OUT":
+        try:
+            session_ctx = _session_context(shift, _checkins_for(emp, day), server_now)
+            game_result = game.apply_session_xp(
+                emp,
+                status_key=session_ctx["status_key"] if session_ctx else "completed",
+                work_date=day.isoformat(),
+                checkout_deviation_minutes=(
+                    session_ctx["checkout_deviation_minutes"] if session_ctx else None
+                ),
+                planned_duration_minutes=(
+                    session_ctx["planned_duration_minutes"] if session_ctx else None
+                ),
+                elapsed_minutes=session_ctx["elapsed_minutes"] if session_ctx else None,
+                is_overnight=bool(shift and shift.get("is_overnight")),
+            )
+        except Exception:
+            # Gamification must never block a successful check-in.
+            frappe.log_error(title="VN gamification: apply_session_xp failed", message=f"emp={emp}")
+
     refreshed = _checkin_result(emp, shift=shift)
     refreshed["log_type"] = log_type
+    if game_result and not game_result.get("skipped"):
+        refreshed["gamification"] = game_result
     return refreshed
 
 
@@ -284,7 +494,7 @@ def _enforce_geofence(employee: str, latitude, longitude) -> None:
         return
     if latitude is None or longitude is None:
         frappe.throw(_("Vui lòng bật GPS để chấm công."), frappe.ValidationError)
-    loc = _work_location_for(employee)
+    loc = _work_location_for(employee, tz_utils.now_in_portal().date())
     if not loc or loc.get("latitude") is None:
         return  # no geofence configured → allow
     allowed_m = loc.get("allowed_radius_meters", 50)
@@ -349,21 +559,40 @@ def _portal_setting() -> dict:
         }
 
 
-def _work_location_for(employee: str) -> dict | None:
-    # The Employee's work location is the gege_hr custom field
-    # ``default_work_location`` (it may not be installed on a site that hasn't
-    # run migrate yet) — guard so today_status never 500s.
-    try:
-        loc_name = (
-            frappe.db.get_value("Employee", employee, "default_work_location")
-            if frappe.get_meta("Employee").has_field("default_work_location")
-            else None
+def _work_location_for(employee: str, day: date | None = None) -> dict | None:
+    """Resolve the geofence check-in location for an employee.
+
+    Priority (highest wins):
+      1. ``Shift Assignment.vn_work_location`` for an active assignment covering
+         ``day`` (per-shift override — field staff / multi-site rosters).
+      2. ``Employee.default_work_location`` (gege_hr custom field).
+      3. ``VN HR Portal Setting.default_work_location`` (site-wide fallback).
+
+    All lookups are guarded: ``vn_work_location`` is a Custom Field only present
+    after migrate, and ``default_work_location`` likewise, so a fresh bench that
+    hasn't run migrate yet never 500s.
+    """
+    # --- 1. Shift-assignment override for the day -----------------------------
+    day = day or tz_utils.now_in_portal().date()
+    loc_name = _shift_location_for_day(employee, day)
+
+    # --- 2. Employee default --------------------------------------------------
+    if not loc_name:
+        try:
+            loc_name = (
+                frappe.db.get_value("Employee", employee, "default_work_location")
+                if frappe.get_meta("Employee").has_field("default_work_location")
+                else None
+            )
+        except Exception:
+            loc_name = None
+
+    # --- 3. Portal-setting fallback ------------------------------------------
+    if not loc_name:
+        loc_name = frappe.db.get_value(
+            "VN HR Portal Setting", "VN HR Portal Setting", "default_work_location"
         )
-    except Exception:
-        loc_name = None
-    loc_name = loc_name or frappe.db.get_value(
-        "VN HR Portal Setting", "VN HR Portal Setting", "default_work_location"
-    )
+
     if not loc_name:
         return None
     loc = frappe.db.get_value(
@@ -383,27 +612,149 @@ def _work_location_for(employee: str) -> dict | None:
     }
 
 
+def _shift_location_for_day(employee: str, day: date) -> str | None:
+    """The ``vn_work_location`` of the employee's active Shift Assignment on ``day``.
+
+    Returns ``None`` when no assignment covers the day, when the custom field is
+    not installed yet, or when the assignment has no location pinned (so the
+    caller falls back to the Employee default).
+    """
+    if not frappe.get_meta("Shift Assignment").has_field("vn_work_location"):
+        return None
+    sa = frappe.qb.DocType("Shift Assignment")
+    row = (
+        frappe.qb.from_(sa)
+        .select(sa.vn_work_location)
+        .where(sa.employee == employee)
+        .where(sa.status == "Active")
+        .where(sa.docstatus == 1)
+        .where(sa.start_date <= day)
+        .where((sa.end_date.isnull()) | (sa.end_date >= day))
+        .where(sa.vn_work_location.notnull() & (sa.vn_work_location != ""))
+        .limit(1)
+        .run(as_dict=True)
+    )
+    if not row:
+        return None
+    return (row[0].get("vn_work_location") or "").strip() or None
+
+
 @frappe.whitelist()
 def my_logs(
     employee: str | None = None,
     from_date: str | None = None,
     to_date: str | None = None,
 ) -> list[dict]:
-    """Plan §10.2 — employee raw check-in/out log."""
+    """Plan §10.2 — per-day Work-Session rows for the employee's monthly view.
+
+    The SPA ``MonthlyAttendanceView`` (status grid + daily log list) consumes
+    Work-Session-shaped day rows carrying ``work_date``, ``shift_type``,
+    ``planned_start/planned_end``, ``actual_checkin/actual_checkout``,
+    ``late_minutes``, ``early_leave_minutes``, ``payable_day`` and the
+    ``missing_checkin/has_leave/absent`` flags — none of which exist on the raw
+    ``Employee Checkin`` record. Previously this returned the raw check-in rows
+    (``{name, time, log_type, ...}``) so the grid could not place any cell
+    (no ``work_date``) and every status resolved to ``rest`` → an empty grid.
+
+    We now aggregate the submitted ``Attendance`` doctype into those day rows,
+    reusing the same source/status logic as ``team_daily_status`` and
+    ``my_monthly_summary`` so the grid, list and summary stay consistent.
+    """
     emp = _resolve_employee(employee)
     today = tz_utils.now_in_portal().date()
     start = getdate(from_date) if from_date else add_days(today, -30)
     end = getdate(to_date) if to_date else today
-    rows = frappe.db.get_all(
-        "Employee Checkin",
-        filters={"employee": emp, "time": ["between", [start, add_days(end, 1)]]},
-        fields=["name", "time", "log_type", "device_id", "latitude", "longitude"],
-        order_by="time desc",
+
+    att_rows = frappe.db.get_all(
+        "Attendance",
+        filters={
+            "employee": emp,
+            "attendance_date": ["between", [start, end]],
+            "docstatus": 1,
+        },
+        fields=[
+            "name",
+            "attendance_date",
+            "status",
+            "shift",
+            "in_time",
+            "out_time",
+            "late_entry",
+            "early_exit",
+            "working_hours",
+        ],
+        order_by="attendance_date desc",
         limit_page_length=500,
     )
-    for r in rows:
-        r["log_type"] = (r.log_type or "").upper()
-    return rows
+
+    # Cache Shift Type → (start_time, end_time) so per-day planned windows are
+    # computed with a single query regardless of month size.
+    shift_names = {r.get("shift") for r in att_rows if r.get("shift")}
+    shift_window: dict[str, tuple] = {}
+    if shift_names:
+        for st in frappe.db.get_all(
+            "Shift Type",
+            {"name": ["in", list(shift_names)]},
+            ["name", "start_time", "end_time"],
+        ):
+            shift_window[st.name] = (st.start_time, st.end_time)
+
+    out: list[dict] = []
+    for r in att_rows:
+        day = getdate(r.attendance_date)
+        status = (r.status or "").strip()
+        shift_name = r.get("shift") or ""
+        stime, etime = shift_window.get(shift_name, (None, None))
+
+        planned_start_iso = planned_end_iso = None
+        late_min = early_min = 0
+        if stime and etime:
+            # Planned window as naive local wall-clock strings, the same shape
+            # as the raw in_time/out_time so the SPA's formatTime() (which
+            # treats naive datetimes as local) renders both consistently in
+            # every browser timezone.
+            planned_in = datetime.combine(day, datetime.min.time()) + stime
+            planned_out = datetime.combine(day, datetime.min.time()) + etime
+            # Overnight shifts end on the next calendar day.
+            if tz_utils.is_overnight(stime, etime):
+                planned_out += timedelta(days=1)
+            planned_start_iso = planned_in.strftime("%Y-%m-%d %H:%M:%S")
+            planned_end_iso = planned_out.strftime("%Y-%m-%d %H:%M:%S")
+            if r.in_time:
+                late_min = max(0, int((get_datetime(r.in_time) - planned_in).total_seconds() // 60))
+            if r.out_time:
+                early_min = max(0, int((planned_out - get_datetime(r.out_time)).total_seconds() // 60))
+
+        has_leave = status == "On Leave"
+        is_absent = status == "Absent"
+        is_half = status == "Half Day"
+        payable = 1.0 if status == "Present" else (0.5 if is_half else 0.0)
+
+        out.append(
+            {
+                "name": r.name,
+                "work_date": str(day),
+                "shift_type": shift_name or "",
+                "status": status,
+                "planned_start": planned_start_iso,
+                "planned_end": planned_end_iso,
+                "actual_checkin": r.in_time,
+                "actual_checkout": r.out_time,
+                "late_minutes": late_min if r.late_entry else 0,
+                "early_leave_minutes": early_min if r.early_exit else 0,
+                "regular_hours": flt(r.working_hours or 0, 2),
+                "total_actual_hours": flt(r.working_hours or 0, 2),
+                "raw_overtime_hours": 0.0,
+                "approved_overtime_hours": 0.0,
+                "payable_day": payable,
+                "has_leave": has_leave,
+                "absent": is_absent,
+                "missing_checkin": status == "Present" and not r.in_time,
+                "missing_checkout": status == "Present" and r.in_time and not r.out_time,
+                "need_review": False,
+            }
+        )
+    return out
 
 
 def _parse_year_month(year, month, now):
@@ -437,6 +788,61 @@ def _parse_year_month(year, month, now):
     return y, m
 
 
+def _monthly_overtime_hours(rows: list[dict]) -> float:
+    """Estimate total overtime (hours) from monthly Attendance rows.
+
+    For each row with both ``in_time`` and ``out_time`` plus a ``shift``, the
+    planned end is reconstructed from the Shift Type end time on that day; OT is
+    the positive excess of ``out_time`` over that planned end. Rows lacking a
+    shift or out_time contribute nothing. This is a pragmatic estimate until the
+    M2 Work-Session engine ships precise figures.
+    """
+    if not rows:
+        return 0.0
+
+    # Cache Shift Type → end_time (time-of-day) to avoid per-row lookups.
+    shift_names = {r.get("shift") for r in rows if r.get("shift")}
+    end_times: dict[str, object] = {}
+    if shift_names:
+        for st in frappe.db.get_all(
+            "Shift Type", {"name": ["in", list(shift_names)]}, ["name", "end_time"]
+        ):
+            end_times[st.name] = st.end_time
+
+    tz = tz_utils.get_tzinfo()
+    total_minutes = 0.0
+    for r in rows:
+        out_time = r.get("out_time")
+        shift = r.get("shift")
+        d = r.get("attendance_date")
+        if not out_time or not shift or not d:
+            continue
+        shift_end = end_times.get(shift)
+        if not shift_end:
+            continue
+        try:
+            if isinstance(d, str):
+                d = getdate(d)
+            # Frappe stores Shift Type "Time" fields as datetime.timedelta
+            # (not datetime.time); normalise to seconds so the planned-end
+            # wall-clock can be built reliably for both types.
+            if isinstance(shift_end, timedelta):
+                end_secs = shift_end.total_seconds()
+            else:
+                end_secs = shift_end.hour * 3600 + shift_end.minute * 60 + shift_end.second
+            out_dt = get_datetime(out_time)
+            planned_end = datetime.combine(d, datetime.min.time()) + timedelta(seconds=end_secs)
+            # Shift end by noon means the shift crosses midnight (overnight).
+            if end_secs <= 12 * 3600:
+                planned_end += timedelta(days=1)
+            delta = (out_dt - planned_end).total_seconds()
+            if delta > 0:
+                total_minutes += delta / 60.0
+        except Exception:
+            continue
+    return flt(total_minutes / 60.0, 2)
+
+
 @frappe.whitelist()
 def my_monthly_summary(
     employee: str | None = None, year: int | None = None, month: int | None = None
@@ -444,7 +850,9 @@ def my_monthly_summary(
     """Plan §10.2 — monthly worked/payable/late/absent/leave/OT totals.
 
     Milestone-1 uses Attendance (Frappe HR) counts; the Work-Session engine
-    (M2) will replace these with precise payable/OT figures.
+    (M2) will replace these with precise payable/OT figures. Until then OT is
+    estimated per-day from out_time vs the shift planned end (see
+    ``_monthly_overtime_hours``).
     """
     emp = _resolve_employee(employee)
     now = tz_utils.now_in_portal()
@@ -472,6 +880,10 @@ def my_monthly_summary(
         ],
         order_by="attendance_date desc",
     )
+    early_exit_days = frappe.db.count(
+        "Attendance",
+        {"employee": emp, "early_exit": 1, "attendance_date": ["between", [start, end]]},
+    )
     return {
         "employee": emp,
         "year": y,
@@ -487,7 +899,8 @@ def my_monthly_summary(
                 "Attendance",
                 {"employee": emp, "late_entry": 1, "attendance_date": ["between", [start, end]]},
             ),
-            "overtime_hours": 0.0,  # populated by M2 Work-Session engine
+            "early_exit_days": early_exit_days,
+            "overtime_hours": _monthly_overtime_hours(rows),
         },
         "rows": rows,
     }
@@ -538,7 +951,21 @@ def team_attendance(
     ``Attendance`` only. Defaults to the current month when no range is given.
     """
     frappe.only_for(["HR Manager", "HR User", "System Manager", "Line Manager"])
+    # HR Manager / System Manager oversee the whole company, so they see every
+    # active employee — independent of the (often empty) ``reports_to`` link.
+    # Line Manager / HR User still only see their direct reports. This keeps the
+    # team grid consistent with the per-employee monthly view, which never
+    # depends on ``reports_to``.
+    caller_roles = set(frappe.get_roles())
+    is_company_wide = bool(caller_roles & {"HR Manager", "System Manager"})
+
     manager_emp = emp_utils.emp_name(manager) if manager else emp_utils.get_employee_for_user()
+    # The SPA forwards the logged-in user's email/username as ``manager``; that
+    # is not an Employee *name*, so resolve it (by user_id) before filtering on
+    # ``reports_to``. Falls back to the session's own Employee when unresolved.
+    if manager_emp and not frappe.db.exists("Employee", manager_emp):
+        resolved = emp_utils.get_employee_for_user(manager_emp)
+        manager_emp = resolved or emp_utils.get_employee_for_user() or manager_emp
     if from_date and to_date:
         start = getdate(from_date)
         end = getdate(to_date)
@@ -547,13 +974,86 @@ def team_attendance(
         start = today.replace(day=1)
         end = today
 
-    members = frappe.db.get_all(
-        "Employee",
-        filters={"status": "Active", "reports_to": manager_emp},
-        fields=["name", "employee_name", "designation"],
+    # Scope the roster to the manager's company when it can be resolved, so the
+    # company-wide view does not leak cross-company employees in multi-company
+    # setups. The manager's own Employee row is excluded from the roster.
+    company = (
+        frappe.db.get_value("Employee", manager_emp, "company")
+        if manager_emp and frappe.db.exists("Employee", manager_emp)
+        else None
     )
 
+    if is_company_wide:
+        member_filters = {"status": "Active"}
+        if company:
+            member_filters["company"] = company
+        members = frappe.db.get_all(
+            "Employee",
+            filters=member_filters,
+            fields=["name", "employee_name", "designation"],
+        )
+        if manager_emp:
+            members = [m for m in members if m.name != manager_emp]
+    else:
+        members = frappe.db.get_all(
+            "Employee",
+            filters={"status": "Active", "reports_to": manager_emp},
+            fields=["name", "employee_name", "designation"],
+        )
+
+    # Only employees with an active Shift Assignment overlapping [start, end]
+    # are relevant for a shift-based roster. Resolve each member's primary
+    # shift_type from the earliest such assignment so the grid can be split into
+    # one table per shift. ``end_date`` may be null (open-ended assignment).
+    primary_shift: dict[str, str] = {}
+    if members:
+        assignments = frappe.db.get_all(
+            "Shift Assignment",
+            filters={
+                "employee": ["in", [m["name"] for m in members]],
+                "status": "Active",
+                "start_date": ["<=", end],
+                "docstatus": 1,
+            },
+            fields=["employee", "shift_type", "start_date", "end_date"],
+            order_by="start_date asc",
+        )
+        for a in assignments:
+            a_end = getdate(a.end_date) if a.end_date else None
+            if a_end and a_end < start:
+                continue
+            if a.employee not in primary_shift:
+                primary_shift[a.employee] = a.shift_type
+    members = [m for m in members if m["name"] in primary_shift]
+
+    # Shift Type start/end windows — used both for the per-group header and to
+    # translate the raw Attendance row (status="Present" even when late) into a
+    # UI-friendly per-day status + real late/early minutes.
+    shift_names = sorted({s for s in primary_shift.values()})
+    shift_meta: dict[str, dict] = {}
+    if shift_names:
+        for st in frappe.db.get_all(
+            "Shift Type",
+            {"name": ["in", shift_names]},
+            ["name", "start_time", "end_time"],
+        ):
+            shift_meta[st.name] = {"start_time": st.start_time, "end_time": st.end_time}
+
+    shift_window_cache: dict[str, tuple] = {n: (m.get("start_time"), m.get("end_time")) for n, m in shift_meta.items()}
+
+    def _shift_window(shift_name: str | None):
+        if not shift_name:
+            return None, None
+        if shift_name not in shift_window_cache:
+            st = frappe.db.get_value("Shift Type", shift_name, ["start_time", "end_time"], as_dict=True)
+            shift_window_cache[shift_name] = (
+                getattr(st, "start_time", None) if st else None,
+                getattr(st, "end_time", None) if st else None,
+            )
+        return shift_window_cache[shift_name]
+
     summary = {"present": 0, "late": 0, "absent": 0, "on_leave": 0}
+    grouped: dict[str, list] = {sn: [] for sn in shift_names}
     out_members = []
     for m in members:
         rows = frappe.db.get_all(
@@ -563,7 +1063,7 @@ def team_attendance(
                 "attendance_date": ["between", [start, end]],
                 "docstatus": 1,
             },
-            fields=["attendance_date", "status", "in_time", "out_time", "late_entry", "early_exit"],
+            fields=["attendance_date", "status", "shift", "in_time", "out_time", "late_entry", "early_exit"],
             order_by="attendance_date asc",
         )
         by_date = {str(r.attendance_date): r for r in rows}
@@ -571,31 +1071,77 @@ def team_attendance(
         cur = start
         while cur <= end:
             att = by_date.get(str(cur))
+            if not att:
+                days.append(
+                    {
+                        "work_date": str(cur),
+                        "status": "Not marked",
+                        "checkin_time": None,
+                        "checkout_time": None,
+                        "late_minutes": 0,
+                        "early_leave_minutes": 0,
+                    }
+                )
+                cur += timedelta(days=1)
+                continue
+
+            # Core Attendance keeps status="Present" even on late/early days;
+            # promote to a display status the SPA grid recognises (⏰ Late).
+            disp_status = att.status
+            late_min = 0
+            early_min = 0
+            shift_start, shift_end = _shift_window(getattr(att, "shift", None))
+            if att.late_entry:
+                disp_status = "Late"
+                if att.in_time and shift_start is not None:
+                    planned = datetime.combine(cur, datetime.min.time()) + shift_start
+                    late_min = max(0, int((get_datetime(att.in_time) - planned).total_seconds() // 60))
+            if att.early_exit and att.out_time and shift_end is not None:
+                planned = datetime.combine(cur, datetime.min.time()) + shift_end
+                early_min = max(0, int((planned - get_datetime(att.out_time)).total_seconds() // 60))
+
             days.append(
                 {
                     "work_date": str(cur),
-                    "status": (att.status if att else "Not marked"),
-                    "checkin_time": (att.in_time if att else None),
-                    "checkout_time": (att.out_time if att else None),
-                    "late_minutes": 0,  # not modelled on core Attendance
-                    "early_leave_minutes": 0,
+                    "status": disp_status,
+                    "checkin_time": att.in_time,
+                    "checkout_time": att.out_time,
+                    "late_minutes": late_min,
+                    "early_leave_minutes": early_min,
                 }
             )
-            if att:
-                if att.status == "Present":
-                    summary["present"] += 1
-                    if att.late_entry:
-                        summary["late"] += 1
-                elif att.status == "Absent":
-                    summary["absent"] += 1
-                elif att.status == "On Leave":
-                    summary["on_leave"] += 1
+            if att.status == "Present":
+                summary["present"] += 1
+                if att.late_entry:
+                    summary["late"] += 1
+            elif att.status == "Absent":
+                summary["absent"] += 1
+            elif att.status == "On Leave":
+                summary["on_leave"] += 1
             cur += timedelta(days=1)
-        out_members.append({**m, "days": days})
+        out = {**m, "days": days, "shift_type": primary_shift[m["name"]]}
+        out_members.append(out)
+        grouped.setdefault(out["shift_type"], []).append(out)
+
+    # Build one group per shift, preserving the sorted shift order so the UI is
+    # deterministic. Empty shifts (no member after Attendance filtering) are
+    # still listed so the manager sees the shift exists.
+    groups = []
+    for sn in shift_names:
+        st = shift_meta.get(sn, {})
+        groups.append(
+            {
+                "shift_type": sn,
+                "shift_start": st.get("start_time"),
+                "shift_end": st.get("end_time"),
+                "members": grouped.get(sn, []),
+            }
+        )
 
     return {
         "from_date": str(start),
         "to_date": str(end),
+        "groups": groups,
         "members": out_members,
         "summary": summary,
     }
@@ -695,11 +1241,16 @@ def on_employee_checkin_create(doc, method: str | None = None) -> None:
     Resolves the VN Employee Shift Instance covering this check-in (by employee
     + planned window) and triggers ``utils.calc.persist_work_session`` on the
     short queue. Falls back to inline computation when enqueue is unavailable.
+
+    When no matching Shift Instance exists (e.g. backfill not run yet for the
+    check-in's day) we no longer drop the log silently — an "Unmatched Checkin"
+    ``VN Attendance Exception`` is raised so HR can backfill + recalculate.
     """
     if not getattr(doc, "employee", None):
         return
     shift_instance = _resolve_shift_instance_for_checkin(doc)
     if not shift_instance:
+        _raise_unmatched_checkin(doc)
         return
     try:
         frappe.enqueue(
@@ -713,6 +1264,53 @@ def on_employee_checkin_create(doc, method: str | None = None) -> None:
         from gege_hr.gege_hr.utils import calc
 
         calc.persist_work_session(shift_instance, calculate_mode="realtime")
+
+
+def _raise_unmatched_checkin(checkin_doc) -> None:
+    """Record an ``Unmatched Checkin`` exception when a punch has no Shift Instance.
+
+    Idempotent per (employee, work_date) so a flurry of punches on an unmatched
+    day only produces one exception row. Auto-resolves once a Shift Instance +
+    Work Session exist (re-evaluated by the recalculation flow).
+    """
+    check_dt = getattr(checkin_doc, "time", None)
+    if check_dt is None:
+        return
+    work_date = tz_utils.to_portal(get_datetime(check_dt)).date()
+    employee = getattr(checkin_doc, "employee", None)
+    if not employee:
+        return
+    # One Open exception per employee/day — skip if already present.
+    if frappe.db.exists(
+        "VN Attendance Exception",
+        {
+            "employee": employee,
+            "work_date": work_date,
+            "exception_type": "Unmatched Checkin",
+            "status": ["in", ["Open", "In Progress", "Escalated"]],
+        },
+    ):
+        return
+    employee_name = frappe.db.get_value("Employee", employee, "employee_name") or employee
+    try:
+        frappe.get_doc(
+            {
+                "doctype": "VN Attendance Exception",
+                "employee": employee,
+                "employee_name": employee_name,
+                "work_date": work_date,
+                "exception_type": "Unmatched Checkin",
+                "severity": "Medium",
+                "description": (
+                    f"Employee Checkin {getattr(checkin_doc, 'name', '')} tại "
+                    f"{check_dt} không khớp Shift Instance nào (chưa sinh ca cho ngày này)."
+                ),
+                "status": "Open",
+            }
+        ).insert(ignore_permissions=True)
+    except Exception:
+        # Never let exception-logging break the check-in insert path.
+        frappe.log_error(frappe.get_traceback(), "Unmatched Checkin exception log failed")
 
 
 def _resolve_shift_instance_for_checkin(checkin_doc) -> str | None:
@@ -800,6 +1398,122 @@ def recalculate_work_session(work_session: str | None = None, shift_instance: st
         "ok": True,
         "work_session": name,
         "totals": _work_session_totals(name) if name else None,
+    }
+
+
+@frappe.whitelist()
+def recalculate_period(
+    from_date: str | None = None,
+    to_date: str | None = None,
+    employee: str | None = None,
+    backfill: int = 1,
+) -> dict:
+    """Batch-recalculate Work Sessions for a date window (HR/manager action).
+
+    Solves the root cause of the empty ``/hr/attendance`` page: existing
+    Employee Checkins that never produced a Work Session because their Shift
+    Instance was missing. Steps per call:
+
+    1. Optionally backfill Shift Instances for the window
+       (``shift.backfill_shift_instances``).
+    2. Auto-resolve stale ``Unmatched Checkin`` exceptions now that instances
+       exist.
+    3. Recompute every Shift Instance in the window via
+       ``calc.persist_work_session`` (skip Locked sessions).
+
+    Returns counts: ``instances_created``, ``sessions_recalculated``,
+    ``exceptions_resolved``. Safe to run repeatedly (idempotent).
+    """
+    frappe.only_for(["HR Manager", "HR User", "System Manager"])
+    from gege_hr.gege_hr.api import shift as shift_api
+    from gege_hr.gege_hr.utils import calc
+
+    today = tz_utils.now_in_portal().date()
+    start = getdate(from_date) if from_date else add_days(today, -7)
+    end = getdate(to_date) if to_date else today
+    if end < start:
+        start, end = end, start
+
+    instances_created = 0
+    if backfill:
+        instances_created = shift_api._materialise_shift_instances(
+            from_date=start, to_date=end, employee=employee
+        )
+
+    si_filters = {"work_date": ["between", [start, end]], "docstatus": 1}
+    if employee:
+        si_filters["employee"] = employee
+    shift_instances = frappe.db.get_all(
+        "VN Employee Shift Instance", filters=si_filters, pluck="name"
+    )
+
+    sessions_recalculated = 0
+    for si_name in shift_instances:
+        # Skip Locked sessions (CAS guard in persist_work_session).
+        status = frappe.db.get_value("VN Attendance Work Session", {"shift_instance": si_name}, "calculation_status")
+        if status == "Locked":
+            continue
+        try:
+            if calc.persist_work_session(si_name, calculate_mode="batch"):
+                sessions_recalculated += 1
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(), f"Work Session recalc failed for {si_name}"
+            )
+
+    # Auto-resolve stale "Unmatched Checkin" exceptions now covered.
+    exceptions_resolved = 0
+    open_exc = frappe.db.get_all(
+        "VN Attendance Exception",
+        filters={
+            "exception_type": "Unmatched Checkin",
+            "status": ["in", ["Open", "In Progress", "Escalated"]],
+            "work_date": ["between", [start, end]],
+        },
+        fields=["name", "employee", "work_date"],
+    )
+    for exc in open_exc:
+        if employee and exc.get("employee") != employee:
+            continue
+        covered = frappe.db.exists(
+            "VN Employee Shift Instance",
+            {"employee": exc["employee"], "work_date": exc["work_date"], "docstatus": 1},
+        )
+        if covered:
+            frappe.db.set_value(
+                "VN Attendance Exception",
+                exc["name"],
+                {
+                    "status": "Resolved",
+                    "resolution_type": "Recalculate",
+                    "resolution_note": "Đã sinh Shift Instance + tính lại Work Session.",
+                    "resolved_by": frappe.session.user,
+                    "resolved_at": get_datetime(),
+                },
+            )
+            exceptions_resolved += 1
+
+    audit_api.log(
+        "Work Session Period Recalculate",
+        company=None,
+        employee=employee,
+        reference_doctype="VN Attendance Work Session",
+        reference_name=None,
+        description=(
+            f"Tính lại Work Session {start} → {end}"
+            f" (employee={employee or 'all'}): "
+            f"instances={instances_created}, sessions={sessions_recalculated}, "
+            f"resolved={exceptions_resolved}"
+        ),
+    )
+    return {
+        "ok": True,
+        "from_date": start.isoformat(),
+        "to_date": end.isoformat(),
+        "employee": employee,
+        "instances_created": instances_created,
+        "sessions_recalculated": sessions_recalculated,
+        "exceptions_resolved": exceptions_resolved,
     }
 
 

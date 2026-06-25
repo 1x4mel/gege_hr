@@ -201,6 +201,16 @@ def _normalise_row(row: dict, transaction_type: str, approver: str) -> dict:
         out.setdefault("work_date", out.get("posting_date"))
         # Surface a single amount for the FE's summary tile (hrStatus ADVANCE).
         out["advance_amount"] = out.get("requested_amount")
+    # Unify the human reason/description onto a single ``reason`` field so the
+    # approval-inbox card always has something to show the manager. Leave
+    # Application stores its reason in ``description`` (Frappe has no ``reason``
+    # column); OT / Correction / Advance use ``reason``. Prefer an explicit
+    # ``reason`` when present, otherwise fall back to ``description``.
+    unified_reason = (out.get("reason") or out.get("description") or "").strip()
+    if unified_reason:
+        out["reason"] = unified_reason
+    elif "reason" not in out:
+        out["reason"] = ""
     return out
 
 
@@ -264,6 +274,76 @@ def _write_log(
             title="VN Approval Log write failed",
             message=f"{doctype} {name} {action}",
         )
+
+
+def _delegate_leave(name: str, request_type: str, comment: str | None, *, approved: bool) -> dict:
+    """Leave Application approve/reject that actually persists.
+
+    Core Frappe Leave Application derives ``status`` from ``docstatus`` and
+    HRMS's ``validate`` recomputes it on every ``save()`` — so a plain
+    ``doc.status = "Approved"; doc.save()`` on a submitted (docstatus 1) leave
+    is silently reverted and the request stays ``Open`` (reappearing in the
+    inbox). The unified inbox filters on the ``status`` column, so we persist
+    the decision there directly (bypassing the recomputing validate), stamp the
+    approver, and run the leave-specific audit + notify hooks best-effort.
+    """
+    from gege_hr.gege_hr.api import leave as leave_api
+
+    action = "Approve" if approved else "Reject"
+    target_state = "Approved" if approved else "Rejected"
+    doc = frappe.get_doc("Leave Application", name)
+    current = doc.get("status")
+    if current == target_state:
+        return {
+            "name": name,
+            "request_type": request_type,
+            "status": target_state,
+            "message": _("Đơn nghỉ phép {0} đã ở trạng thái {1}.").format(name, target_state),
+        }
+    if current not in ("Open", "Draft"):
+        frappe.throw(
+            _("Đơn nghỉ đang ở trạng thái {0} — không thể xử lý.").format(current),
+            frappe.PermissionError,
+        )
+
+    # Stamp the approver when the field exists, then persist the decision on the
+    # status column the inbox reads (db.set_value skips HRMS's recomputing validate).
+    updates = {"status": target_state}
+    try:
+        if approved and doc.meta.has_field("leave_approver"):
+            updates["leave_approver"] = _user()
+    except Exception:
+        pass
+    frappe.db.set_value("Leave Application", name, updates, update_modified=False)
+
+    # Best-effort: notify the employee + append a leave comment (never abort).
+    try:
+        leave_api._after_leave_decision(doc, approved=approved, reason=(comment or ""))
+    except Exception:
+        pass
+    try:
+        if not approved and comment:
+            doc.add_comment("Comment", _("Lý do từ chối: {0}").format(comment))
+    except Exception:
+        pass
+
+    _write_log(
+        transaction_type=request_type,
+        name=name,
+        action=action,
+        from_state=current,
+        to_state=target_state,
+        comment=comment,
+        actor=_user(),
+    )
+    return {
+        "name": name,
+        "request_type": request_type,
+        "status": target_state,
+        "message": _("Đã duyệt đơn nghỉ phép {0}.").format(name)
+        if approved
+        else _("Đã từ chối đơn nghỉ phép {0}.").format(name),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -339,6 +419,12 @@ def approve_request(
             _("Bạn không phải người duyệt ở bước này."),
             frappe.PermissionError,
         )
+
+    # Leave Application status is managed by core Frappe HR via docstatus, not a
+    # free `status` field — so delegate to the HRMS-aware leave endpoints that
+    # submit/cancel correctly (the matrix step states don't apply here).
+    if request_type == "Leave Application":
+        return _delegate_leave(name, request_type, comment, approved=True)
 
     # Resolve the next state from the matrix (→ Approved when last step done).
     matrices = _load_matrices(request_type, doc.get("company"))
@@ -425,6 +511,10 @@ def reject_request(
             _("Bạn không phải người duyệt ở bước này."),
             frappe.PermissionError,
         )
+
+    # Leave Application: delegate to the HRMS-aware reject (see approve_request).
+    if request_type == "Leave Application":
+        return _delegate_leave(name, request_type, comment, approved=False)
 
     doc.set(cfg["status_field"], cfg["reject_state"])
     doc.save()

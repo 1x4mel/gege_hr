@@ -57,12 +57,20 @@ _CATALOG_DOCTYPES = frozenset(
         "Designation",
         "Branch",
         "Employment Type",
+        # HR master/policy DocTypes surfaced via the generic catalog CRUD
+        # (plan: missing-ui-plan.md Tier A). All are flat single-table masters.
+        "VN Salary Advance Policy",
+        "VN Leave Staffing Rule",
+        "VN Payroll Component Mapping",
+        "VN Device Employee Mapping",
+        "VN Leave Policy Extension",
     }
 )
 
 # Simple masters the MasterCatalogManager card edits via list/save/delete.
 # Holiday List (child table → dedicated holiday_master RPC) and VN Attendance
-# Policy (read-only / complex) are intentionally excluded from write.
+# Policy (complex child-table editor → dedicated attendance_policy RPC) are
+# intentionally excluded from this generic write path.
 _EDITABLE_SIMPLE = frozenset(
     {
         "VN Work Location",
@@ -71,6 +79,11 @@ _EDITABLE_SIMPLE = frozenset(
         "Designation",
         "Branch",
         "Employment Type",
+        "VN Salary Advance Policy",
+        "VN Leave Staffing Rule",
+        "VN Payroll Component Mapping",
+        "VN Device Employee Mapping",
+        "VN Leave Policy Extension",
     }
 )
 

@@ -113,6 +113,55 @@ def audit_events(
     return [audit_utils.audit_row(r) for r in rows]
 
 
+@frappe.whitelist()
+def approval_logs(
+    reference_doctype: str | None = None,
+    reference_name: str | None = None,
+    actor: str | None = None,
+    limit: int = 200,
+) -> list[dict]:
+    """Read-only trail of every approval action from ``VN Approval Log``.
+
+    Surfaced in HrAuditView so HR can trace who approved/rejected/delegated each
+    request (the VN Audit Event captures the *what*, this captures the granular
+    approval workflow transitions). HR-gated, degrades gracefully when the
+    DocType or table isn't installed.
+    """
+    _require_hr()
+    if not frappe.db.table_exists("VN Approval Log"):
+        return []
+    filters: dict = {}
+    if reference_doctype:
+        filters["reference_doctype"] = reference_doctype
+    if reference_name:
+        filters["reference_name"] = reference_name
+    if actor:
+        filters["actor"] = actor
+    try:
+        rows = frappe.db.get_all(
+            "VN Approval Log",
+            filters=filters,
+            fields=[
+                "name",
+                "reference_doctype",
+                "reference_name",
+                "action",
+                "from_state",
+                "to_state",
+                "actor",
+                "actor_employee",
+                "comment",
+                "action_at",
+            ],
+            order_by="action_at desc",
+            limit_page_length=int(limit or 200),
+        )
+    except Exception:
+        frappe.log_error(title="audit.approval_logs failed")
+        return []
+    return rows
+
+
 def _date_window(from_date: str | None, to_date: str | None):
     frm = getdate(from_date) if from_date else None
     to = getdate(to_date) if to_date else None

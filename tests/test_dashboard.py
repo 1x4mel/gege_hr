@@ -153,3 +153,42 @@ def test_module_imports_outside_bench():
     # The whitelist shim must not require frappe at import time.
     assert callable(dash.get_employee_dashboard)
     assert getattr(dash.get_employee_dashboard, "whitelisted", False) is True
+
+
+# --------------------------------------------------------------------------- #
+# Regression: VN Attendance Exception must declare a `company` field.
+# The dashboard's `_count_open_exceptions` filters by company; a missing column
+# raises OperationalError(1054) "Unknown column 'company' in 'WHERE'" at runtime.
+# This guards against the schema being dropped/renamed in a future migration.
+# --------------------------------------------------------------------------- #
+def _exception_meta_path():
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    return root / "gege_hr/gege_hr/doctype/vn_attendance_exception"
+
+
+def test_exception_doctype_has_company_field():
+    import json
+
+    meta_path = _exception_meta_path() / "vn_attendance_exception.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    fields = {f["fieldname"] for f in meta.get("fields", [])}
+    assert "company" in fields, (
+        "VN Attendance Exception must declare a `company` field — the dashboard "
+        "filters exceptions by company."
+    )
+
+
+def test_exception_controller_normalizes_company():
+    # The controller derives company from the linked Employee so engine-created
+    # exceptions (which only pass `employee`) are company-filterable. Read the
+    # source as text so the test stays bench-free (the module imports frappe).
+    src = (_exception_meta_path() / "vn_attendance_exception.py").read_text(encoding="utf-8")
+    assert "_normalize_company" in src
+    # validate() must call the normaliser.
+    validate_block = src.split("def validate(")[1].split("def ", 1)[0]
+    assert "_normalize_company" in validate_block
+    # Normaliser resolves company from the Employee link.
+    norm_block = src.split("def _normalize_company(")[1].split("def ", 1)[0]
+    assert "Employee" in norm_block and "company" in norm_block

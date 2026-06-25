@@ -74,6 +74,35 @@ def _as_dt(value: Any) -> datetime:
     return tz_utils.to_portal(naive)
 
 
+def _db_dt(value) -> str | None:
+    """Convert an ISO-8601/ISO-Z/datetime value into a Frappe Datetime DB string.
+
+    ``calculate_work_session`` emits ``planned_start``/``actual_checkin`` etc. as
+    ``tz_utils.utc_iso(...)`` (e.g. ``2026-06-24T01:00:00Z``). MariaDB rejects the
+    ``T…Z`` form for ``Datetime`` columns ("Incorrect datetime value"), which
+    silently broke every ``VN Attendance Work Session`` insert. This normalises
+    the value to ``YYYY-MM-DD HH:MM:SS`` in UTC for safe persistence.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(tz_utils.ZoneInfo("UTC")).replace(tzinfo=None)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    raw = str(value).strip()
+    if not raw:
+        return None
+    iso = raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw.replace("T", " ")
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return raw  # let the caller decide; better than dropping the value
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(tz_utils.ZoneInfo("UTC")).replace(tzinfo=None)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _night_band(policy: dict) -> tuple[time, time]:
     ns = policy.get("night_start_time") or "22:00:00"
     ne = policy.get("night_end_time") or "06:00:00"
@@ -914,8 +943,8 @@ def _ws_payload(si: dict, calc: dict, policy: dict) -> dict:
     segments = [
         {
             "segment_type": s["segment_type"],
-            "from_datetime": s["from_datetime"],
-            "to_datetime": s["to_datetime"],
+            "from_datetime": _db_dt(s["from_datetime"]),
+            "to_datetime": _db_dt(s["to_datetime"]),
             "hours": s["hours"],
             "calendar_date": s["calendar_date"],
             "is_night": s["is_night"],
@@ -932,10 +961,10 @@ def _ws_payload(si: dict, calc: dict, policy: dict) -> dict:
         "shift_type": si.get("shift_type"),
         "company": si.get("company"),
         "attendance_policy": policy.get("name"),
-        "planned_start": calc["planned_start"],
-        "planned_end": calc["planned_end"],
-        "actual_checkin": calc["actual_checkin"],
-        "actual_checkout": calc["actual_checkout"],
+        "planned_start": _db_dt(calc["planned_start"]),
+        "planned_end": _db_dt(calc["planned_end"]),
+        "actual_checkin": _db_dt(calc["actual_checkin"]),
+        "actual_checkout": _db_dt(calc["actual_checkout"]),
         "total_actual_hours": calc["total_actual_hours"],
         "scheduled_regular_hours": calc["scheduled_regular_hours"],
         "actual_within_shift_hours": calc["actual_within_shift_hours"],

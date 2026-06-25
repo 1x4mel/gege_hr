@@ -164,6 +164,113 @@ def _audit_admin(
 
 
 # --------------------------------------------------------------------------- #
+# Portal settings (VN HR Portal Setting single-doctype CRUD)
+# --------------------------------------------------------------------------- #
+# The editable, attendance-relevant fields exposed to the HR Manager on the
+# "Cài đặt chấm công chung" card. Whitelisting prevents arbitrary field writes
+# (e.g. ``default_company``) from the portal — only these may change via RPC.
+PORTAL_SETTING_FIELDS = [
+    "enable_mobile_checkin",
+    "require_geolocation",
+    "require_selfie",
+    "require_wifi_validation",
+    "enable_device_sync",
+    "default_work_location",
+    "default_attendance_policy",
+    "payroll_cutoff_day",
+    "lock_attendance_after_days",
+    "timezone",
+    "enable_employee_self_service",
+    "enable_manager_dashboard",
+]
+
+# Lookup options for the Link / Select fields so the SPA can render dropdowns
+# without a separate round-trip per field.
+_PORTAL_OPTION_DT = {
+    "default_work_location": "VN Work Location",
+    "default_attendance_policy": "VN Attendance Policy",
+}
+
+
+@frappe.whitelist()
+def get_portal_setting() -> dict:
+    """Return the current ``VN HR Portal Setting`` values + dropdown options.
+
+    HR-gated (only HR Manager / System Manager may read the global config).
+    """
+    _require_hr_admin()
+    doc = frappe.get_cached_doc("VN HR Portal Setting", "VN HR Portal Setting")
+    out = {f: doc.get(f) for f in PORTAL_SETTING_FIELDS if doc.meta.has_field(f)}
+    out["__options"] = {}
+    for field, dt in _PORTAL_OPTION_DT.items():
+        if not doc.meta.has_field(field):
+            continue
+        out["__options"][field] = [
+            r.name for r in frappe.db.get_all(dt, {"is_active": 1}, ["name"]) if _meta_has_active(dt)
+        ] or [r.name for r in frappe.db.get_all(dt, ["name"])]
+    if doc.meta.has_field("timezone"):
+        # Expose the Select options verbatim (newline-separated in meta).
+        tz_field = doc.meta.get_field("timezone")
+        out["__options"]["timezone"] = (tz_field.options or "").split("\n") if tz_field else []
+    return out
+
+
+@frappe.whitelist()
+def save_portal_setting(**kwargs) -> dict:
+    """Persist the editable ``VN HR Portal Setting`` fields.
+
+    Only keys in :data:`PORTAL_SETTING_FIELDS` are honoured; unknown keys are
+    ignored (defence-in-depth). Each change is audited as a Manual Override so
+    the settings card is traceable like every other admin mutation.
+    """
+    _require_hr_admin()
+    doc = frappe.get_doc("VN HR Portal Setting", "VN HR Portal Setting")
+    changes: list[str] = []
+    for field in PORTAL_SETTING_FIELDS:
+        if field not in kwargs or not doc.meta.has_field(field):
+            continue
+        new_val = kwargs[field]
+        # Frappe whitelist passes booleans/ints as strings — coerce for Check/Int.
+        ftype = doc.meta.get_field(field).fieldtype
+        if ftype == "Check":
+            new_val = 1 if str(new_val) in ("1", "true", "True", "on") else 0
+        elif ftype == "Int":
+            try:
+                new_val = int(new_val)
+            except (TypeError, ValueError):
+                continue
+        old_val = doc.get(field)
+        if new_val in (None, "") and ftype in ("Link", "Select"):
+            new_val = None
+        if old_val == new_val:
+            continue
+        doc.set(field, new_val)
+        changes.append(f"{field}: {old_val!r} → {new_val!r}")
+
+    if not changes:
+        return {"saved": False, "message": "Không có thay đổi."}
+    doc.flags.ignore_permissions = True
+    doc.save()
+    frappe.db.commit()
+    _audit_admin(
+        "Cập nhật Cài đặt chấm công chung: " + "; ".join(changes),
+        reference_doctype="VN HR Portal Setting",
+        reference_name="VN HR Portal Setting",
+        new_value="; ".join(changes),
+    )
+    # Echo back the fresh values so the caller can refresh its form state.
+    return {"saved": True, "changes": changes, **{f: doc.get(f) for f in PORTAL_SETTING_FIELDS}}
+
+
+def _meta_has_active(doctype: str) -> bool:
+    """True when ``doctype`` has an ``is_active`` field (VN Work Location does)."""
+    try:
+        return bool(frappe.get_meta(doctype).has_field("is_active"))
+    except Exception:
+        return False
+
+
+# --------------------------------------------------------------------------- #
 # G1: User creation
 # --------------------------------------------------------------------------- #
 @frappe.whitelist()
@@ -174,6 +281,56 @@ def get_assignable_roles() -> list[dict]:
 
 
 @frappe.whitelist()
+def get_user_roles(user: str) -> list[str]:
+    """Return every role currently assigned to ``user``.
+
+    Why this exists as an RPC instead of reading ``Has Role`` via REST:
+    the generic ``/api/resource/Has Role`` path enforces DocType-level
+    permissions, and HR Manager's read grant on ``Has Role`` (a Custom
+    DocPerm from :mod:`setup_permissions`) only takes effect after a
+    ``bench migrate``. Routing through this gated RPC (which reads the
+    ``User`` doc — HR Manager has ``read`` on ``User``) keeps role
+    listing working regardless of the ``Has Role`` permission state.
+    """
+    _require_hr_admin()
+    user = (user or "").strip()
+    if not user or not frappe.db.exists("User", user):
+        frappe.throw(_("Người dùng không tồn tại."))
+    # Read roles with a direct SQL query (frappe.db.get_all bypasses both
+    # DocType permission checks — already gated by _require_hr_admin — and any
+    # in-process User document cache), so the list always reflects the live DB
+    # state immediately after an assign_roles / remove_roles mutation.
+    return frappe.db.get_all("Has Role", filters={"parent": user}, pluck="role") or []
+
+
+@frappe.whitelist()
+def set_user_enabled(user: str, enabled: int) -> dict:
+    """Enable / disable a Frappe User.
+
+    Like the other admin mutations, this bypasses DocType permissions on
+    ``User`` (gated instead by :func:`_require_hr_admin`) because HR
+    Manager's ``write`` Custom DocPerm on ``User`` only takes effect after
+    ``setup_permissions.grant_hr_permissions`` / ``bench migrate``.
+
+    Returns ``{"name", "enabled"}``.
+    """
+    _require_hr_admin()
+    user = (user or "").strip()
+    if not user or not frappe.db.exists("User", user):
+        frappe.throw(_("Người dùng không tồn tại."))
+    target = frappe.get_doc("User", user)
+    target.enabled = 1 if enabled else 0
+    target.save(ignore_permissions=True)
+    _audit_admin(
+        _("Cập nhật trạng thái tài khoản: {0}").format("Kích hoạt" if enabled else "Khoá"),
+        reference_doctype="User",
+        reference_name=user,
+        new_value={"enabled": bool(enabled)},
+    )
+    return {"name": user, "enabled": bool(enabled)}
+
+
+@frappe.whitelist()
 def create_user(
     email: str,
     full_name: str,
@@ -181,6 +338,7 @@ def create_user(
     last_name: str | None = None,
     send_welcome_email: int = 1,
     roles: list[str] | None = None,
+    password: str | None = None,
 ) -> dict:
     """Create a Frappe User and assign portal roles atomically.
 
@@ -191,6 +349,9 @@ def create_user(
     * only :data:`PORTAL_ROLES` are honoured (silently drops anything else);
     * the new User is created as ``Website User`` (not System User) so it
       cannot access the desk by default.
+    * if ``password`` is supplied it is stored immediately so the employee
+      can log in right away (min length enforced); otherwise the account is
+      only usable once Frappe's welcome-email password-set link is delivered.
     """
     _require_hr_admin()
     email = (email or "").strip()
@@ -200,6 +361,12 @@ def create_user(
     if frappe.db.exists("User", email):
         frappe.throw(_("Email đã tồn tại: {0}").format(email))
 
+    # _require_hr_admin() above is the app-level authorization gate. The
+    # core Frappe ``User`` DocType is not granted to HR Manager until
+    # ``setup_permissions.grant_hr_permissions`` has run (normally via
+    # ``bench migrate``), so the insert/role-add bypass DocType permissions
+    # — the same pattern used by ``catalog_master``. Only portal roles are
+    # ever added, so this cannot escalate privileges.
     user = frappe.get_doc(
         {
             "doctype": "User",
@@ -213,13 +380,32 @@ def create_user(
             "user_type": "Website User",
         }
     )
-    user.insert()
+    user.insert(ignore_permissions=True)
+
+    # Set the password if HR provided a temporary one. This writes into
+    # ``__Auth`` so the employee can authenticate immediately — the default
+    # welcome-email flow often fails on self-hosted LAN installs with no
+    # outbound mail server, which previously left accounts unusable.
+    from frappe.utils.password import update_password
+
+    if password:
+        pwd = (password or "").strip()
+        if len(pwd) < 8:
+            frappe.delete_doc("User", user.name, ignore_permissions=True, force=True)
+            frappe.throw(_("Mật khẩu tạm phải có ít nhất 8 ký tự."))
+        update_password(user.name, pwd)
 
     assigned = []
     for role in roles or []:
         if role in PORTAL_ROLES:
-            user.add_roles(role)
+            # Mirror assign_roles(): append to the "roles" child table and save
+            # with ignore_permissions (the gate is _require_hr_admin above).
+            # NOTE: User.add_roles() does not accept ignore_permissions in this
+            # Frappe version, so we avoid it here.
+            user.append("roles", {"role": role})
             assigned.append(role)
+    if assigned:
+        user.save(ignore_permissions=True)
 
     _audit_admin(
         _("Tạo tài khoản người dùng"),
@@ -255,7 +441,7 @@ def assign_roles(user: str, roles: list[str]) -> dict:
             current.add(role)
             added.append(role)
     if added:
-        target.save()
+        target.save(ignore_permissions=True)
     _audit_admin(
         _("Gán vai trò: {0}").format(", ".join(added) or "—"),
         reference_doctype="User",
@@ -290,7 +476,7 @@ def remove_roles(user: str, roles: list[str]) -> dict:
             target.get("roles").remove(row)
             removed.append(role)
     if removed:
-        target.save()
+        target.save(ignore_permissions=True)
     _audit_admin(
         _("Gỡ vai trò: {0}").format(", ".join(removed) or "—"),
         reference_doctype="User",
@@ -365,20 +551,25 @@ def list_shift_assignments(
     if to_date:
         filters["end_date"] = ["<=", getdate(to_date)]
     try:
+        fields = [
+            "name",
+            "employee",
+            "employee_name",
+            "shift_type",
+            "start_date",
+            "end_date",
+            "status",
+            "docstatus",
+            "company",
+        ]
+        # The work-location column is a gege_hr Custom Field — only present
+        # after migrate. Guard so a fresh bench (pre-migrate) doesn't 500.
+        if frappe.get_meta("Shift Assignment").has_field("vn_work_location"):
+            fields += ["vn_work_location as work_location"]
         return frappe.get_all(
             "Shift Assignment",
             filters=filters,
-            fields=[
-                "name",
-                "employee",
-                "employee_name",
-                "shift_type",
-                "start_date",
-                "end_date",
-                "status",
-                "docstatus",
-                "company",
-            ],
+            fields=fields,
             order_by="start_date desc",
             limit_page_length=int(limit or 100),
         )
@@ -393,6 +584,7 @@ def create_shift_assignment(
     start_date: str,
     end_date: str | None = None,
     status: str = "Active",
+    work_location: str | None = None,
 ) -> dict:
     """Create + submit a Shift Assignment (Frappe HR submittable DocType).
 
@@ -413,6 +605,14 @@ def create_shift_assignment(
         frappe.throw(_("Ca làm việc không tồn tại."))
     if not start_date:
         frappe.throw(_("Ngày bắt đầu là bắt buộc."))
+
+    # Optional geofence check-in location (overrides Employee default for the
+    # assignment span). The custom field is only present after migrate.
+    work_location = (work_location or "").strip() if work_location else ""
+    has_loc_field = frappe.get_meta("Shift Assignment").has_field("vn_work_location")
+    if work_location:
+        if not has_loc_field or not frappe.db.exists("VN Work Location", work_location):
+            frappe.throw(_("Địa điểm làm việc không tồn tại."))
 
     company = _company_for_employee(employee)
     end = getdate(end_date) if end_date else None
@@ -438,17 +638,18 @@ def create_shift_assignment(
             )
         )
 
-    doc = frappe.get_doc(
-        {
-            "doctype": "Shift Assignment",
-            "employee": employee,
-            "shift_type": shift_type,
-            "start_date": start,
-            "end_date": end,
-            "status": status,
-            "company": company,
-        }
-    )
+    payload = {
+        "doctype": "Shift Assignment",
+        "employee": employee,
+        "shift_type": shift_type,
+        "start_date": start,
+        "end_date": end,
+        "status": status,
+        "company": company,
+    }
+    if work_location and has_loc_field:
+        payload["vn_work_location"] = work_location
+    doc = frappe.get_doc(payload)
     doc.insert()
     doc.submit()
 
@@ -462,9 +663,10 @@ def create_shift_assignment(
             "shift_type": shift_type,
             "start_date": str(start),
             "end_date": str(end) if end else None,
+            "work_location": work_location or None,
         },
     )
-    return {"name": doc.name}
+    return {"name": doc.name, "work_location": work_location or None}
 
 
 @frappe.whitelist()

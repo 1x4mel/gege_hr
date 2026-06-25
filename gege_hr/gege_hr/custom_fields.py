@@ -355,12 +355,38 @@ leave_application_fields = [
 ]
 
 
+# --------------------------------------------------------------------------- #
+# A.5 Shift Assignment — geofence work location for per-shift check-in (plan v5
+# §8.5 / doctype-design §A.5). Frappe HR ships a native ``shift_location`` (Link
+# to "Shift Location") but that doctype carries no GPS/radius metadata, so the
+# gege_hr chấm công engine cannot use it. We add our own geofence-aware Link to
+# ``VN Work Location`` so an HR manager can pin a *different* check-in site per
+# shift assignment (field staff / multi-site rosters). When set, it overrides
+# ``Employee.default_work_location`` for every day the assignment is active.
+# --------------------------------------------------------------------------- #
+shift_assignment_fields = [
+    {
+        "fieldname": "vn_shift_assignment_location",
+        "fieldtype": "Section Break",
+        "label": "VN Check-in Location",
+    },
+    {
+        "fieldname": "vn_work_location",
+        "fieldtype": "Link",
+        "label": "Work Location (Check-in)",
+        "options": "VN Work Location",
+        "description": "Địa điểm chấm công cho ca này. Để trống để dùng địa điểm mặc định của nhân viên.",
+    },
+]
+
+
 def get_custom_fields() -> dict:
     """Return the ``{doctype: [fields]}`` map consumed by the ``custom_fields`` hook."""
     return {
         "Shift Type": shift_type_fields,
         "Employee": employee_fields,
         "Employee Checkin": employee_checkin_fields,
+        "Shift Assignment": shift_assignment_fields,
         "Salary Slip": salary_slip_fields,
         "Leave Application": leave_application_fields,
     }

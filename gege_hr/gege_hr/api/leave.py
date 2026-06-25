@@ -34,6 +34,20 @@ from gege_hr.gege_hr.utils.request_workflow import send_for_approval
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+def _as_employee_id(value) -> str:
+    """Coerce a leave-payload ``employee`` field to the Employee ID string.
+
+    The SPA employee store may pass the *whole* Employee doc (a dict) instead
+    of the bare ID, e.g. ``{"name": "HR-EMP-001", ...}``. Extract the id and
+    strip it so downstream ``.strip()`` calls never raise ``AttributeError``.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("employee") or value.get("employee_id") or ""
+    return str(value).strip()
+
+
 def _resolve(employee: str | None) -> str:
     if employee:
         return emp_utils.emp_name(employee)
@@ -96,9 +110,13 @@ def leave_type_options(employee: str | None = None) -> list[dict]:
     Returns ``[{ leave_type, leave_type_name, is_paid, description }]`` to
     match the ``useLeave``/``SearchableSelect`` contract.
     """
+    # NOTE: Frappe HRMS `Leave Type` has no `disabled`/`is_active` column, so we
+    # must not filter on one — doing so throws OperationalError (1054) which the
+    # bare except below used to swallow, silently returning [] (empty dropdown).
     try:
-        rows = frappe.db.get_all("Leave Type", filters={"disabled": 0}, fields=["name"], order_by="name")
-    except Exception:
+        rows = frappe.db.get_all("Leave Type", fields=["name"], order_by="name")
+    except Exception as exc:  # bench-safe: keep the view alive if HR is absent
+        frappe.log_error(frappe.get_traceback(), "leave_type_options")
         rows = []
     out = []
     for r in rows:
@@ -243,7 +261,7 @@ def preview_leave(**kwargs) -> dict:
     Returns ``{ leave_hours, leave_days, balance_before, balance_after,
     balance_impact, warnings: [], is_blocker }``.
     """
-    employee = (kwargs.get("employee") or "").strip()
+    employee = _as_employee_id(kwargs.get("employee"))
     if employee:
         _assert_own(employee)
     emp = _resolve(employee)
@@ -333,7 +351,7 @@ def apply(**kwargs) -> dict:
     if not kwargs:
         frappe.throw(_("Thiếu dữ liệu yêu cầu nghỉ phép."))
 
-    employee = (kwargs.get("employee") or "").strip()
+    employee = _as_employee_id(kwargs.get("employee"))
     if employee:
         _assert_own(employee)
     emp = _resolve(employee)

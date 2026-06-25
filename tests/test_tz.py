@@ -115,3 +115,58 @@ def test_split_by_night_full_overnight_three_chunks():
     # 2h + 8h + 2h
     durations = [(s["end"] - s["start"]).total_seconds() / 3600 for s in spans]
     assert durations == [2.0, 8.0, 2.0]
+
+
+# --------------------------------------------------------------------------- #
+# parse_client_timestamp  (bugfix: MySQL 1292 on ISO-8601 with ms+Z)
+# --------------------------------------------------------------------------- #
+def test_parse_client_timestamp_iso_with_ms_z():
+    # The exact failing value from the production traceback.
+    assert tz.parse_client_timestamp("2026-06-24T06:30:35.734Z") == "2026-06-24 06:30:35"
+
+
+def test_parse_client_timestamp_iso_no_ms_z():
+    assert tz.parse_client_timestamp("2026-06-24T06:30:35Z") == "2026-06-24 06:30:35"
+
+
+def test_parse_client_timestamp_iso_with_offset():
+    # +07:00 → 13:30:00 local == 06:30:00 UTC
+    assert tz.parse_client_timestamp("2026-06-24T13:30:00+07:00") == "2026-06-24 06:30:00"
+
+
+def test_parse_client_timestamp_frappe_naive_assumed_utc():
+    assert tz.parse_client_timestamp("2026-06-24 06:30:35") == "2026-06-24 06:30:35"
+
+
+def test_parse_client_timestamp_epoch_ms():
+    expected = datetime(2026, 6, 24, 6, 30, 35, tzinfo=UTC)
+    epoch_ms = int(expected.timestamp() * 1000)
+    # microseconds dropped in the DB-safe string
+    assert tz.parse_client_timestamp(epoch_ms) == "2026-06-24 06:30:35"
+
+
+def test_parse_client_timestamp_datetime_passthrough_naive():
+    naive = datetime(2026, 6, 24, 6, 30, 35)
+    assert tz.parse_client_timestamp(naive) == "2026-06-24 06:30:35"
+
+
+def test_parse_client_timestamp_output_is_mysql_safe():
+    """Regression guard: output must never carry 'T', 'Z', offset, or µs."""
+    for raw in ("2026-06-24T06:30:35.734Z", "2026-06-24T13:30:00+07:00"):
+        out = tz.parse_client_timestamp(raw)
+        assert out is not None
+        assert "T" not in out and "Z" not in out and "+" not in out
+        assert "." not in out  # no fractional seconds
+        assert out == out.strip()
+
+
+def test_parse_client_timestamp_none_empty():
+    assert tz.parse_client_timestamp(None) is None
+    assert tz.parse_client_timestamp("") is None
+    assert tz.parse_client_timestamp("   ") is None
+
+
+def test_parse_client_timestamp_garbage_returns_none():
+    assert tz.parse_client_timestamp("not a date") is None
+    assert tz.parse_client_timestamp("2026-13-99") is None
+    assert tz.parse_client_timestamp([]) is None

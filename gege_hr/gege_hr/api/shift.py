@@ -37,11 +37,28 @@ def my_schedule(
     # Milestone-1 derives the schedule from Shift Assignment (no Shift Instance
     # DocType yet). Each active assignment expands into per-day planned windows.
     out: list[dict] = []
+    has_loc_field = frappe.get_meta("Shift Assignment").has_field("vn_work_location")
+    sa_fields = ["name", "shift_type", "start_date", "end_date"]
+    if has_loc_field:
+        sa_fields.append("vn_work_location")
     assignments = frappe.db.get_all(
         "Shift Assignment",
         filters={"employee": emp, "status": "Active", "docstatus": 1, "start_date": ["<=", end]},
-        fields=["name", "shift_type", "start_date", "end_date"],
+        fields=sa_fields,
     )
+    work_location_names = {
+        a.get("vn_work_location")
+        for a in assignments
+        if a.get("vn_work_location")
+    }
+    loc_label_by_name = {
+        r["name"]: r["location_name"]
+        for r in frappe.db.get_all(
+            "VN Work Location",
+            filters={"name": ["in", list(work_location_names)] or [""]},
+            fields=["name", "location_name"],
+        )
+    } if work_location_names else {}
     day = start
     while day <= end:
         for a in assignments:
@@ -50,6 +67,7 @@ def my_schedule(
             if a_start <= day <= a_end:
                 st = frappe.get_cached_doc("Shift Type", a.shift_type)
                 planned_start, planned_end = tz_utils.planned_window(day, st.start_time, st.end_time)
+                wl = a.get("vn_work_location") or None
                 out.append(
                     {
                         "work_date": day.isoformat(),
@@ -60,6 +78,8 @@ def my_schedule(
                         "planned_start": tz_utils.utc_iso(planned_start),
                         "planned_end": tz_utils.utc_iso(planned_end),
                         "shift_assignment": a.name,
+                        "work_location": wl,
+                        "work_location_name": loc_label_by_name.get(wl) if wl else None,
                     }
                 )
         day += timedelta(days=1)
@@ -118,6 +138,38 @@ def generate_shift_instances(days: int | None = None) -> dict:
     return {"ok": True, "created": created}
 
 
+@frappe.whitelist()
+def backfill_shift_instances(
+    from_date: str | None = None,
+    to_date: str | None = None,
+    employee: str | None = None,
+) -> dict:
+    """Materialise VN Employee Shift Instance rows for an arbitrary date window.
+
+    Unlike the daily generator (which only looks forward from ``today``), this
+    backfills **past** dates so that historical Employee Checkins can be matched
+    to a Shift Instance and aggregated into Work Sessions. Idempotent: existing
+    instance rows are skipped. Used by the ``/hr/attendance`` hotfix + the
+    "Tính lại kỳ" recalculation flow.
+    """
+    frappe.only_for(["HR Manager", "HR User", "System Manager"])
+    today = tz_utils.now_in_portal().date()
+    win_start = getdate(from_date) if from_date else today
+    win_end = getdate(to_date) if to_date else today
+    if win_end < win_start:
+        win_start, win_end = win_end, win_start
+    created = _materialise_shift_instances(
+        from_date=win_start, to_date=win_end, employee=employee
+    )
+    return {
+        "ok": True,
+        "from_date": win_start.isoformat(),
+        "to_date": win_end.isoformat(),
+        "employee": employee,
+        "created": created,
+    }
+
+
 def generate_daily_shift_instances(*args, **kwargs) -> int:
     """Daily scheduler → materialise VN Employee Shift Instance rows.
 
@@ -130,20 +182,38 @@ def generate_daily_shift_instances(*args, **kwargs) -> int:
     return _materialise_shift_instances(horizon)
 
 
-def _materialise_shift_instances(horizon: int) -> int:
+def _materialise_shift_instances(
+    horizon: int = SHIFT_INSTANCE_HORIZON_DAYS,
+    from_date=None,
+    to_date=None,
+    employee: str | None = None,
+) -> int:
     today = tz_utils.now_in_portal().date()
-    end = add_days(today, horizon)
+    if from_date or to_date:
+        # Explicit backfill window (may cover past dates).
+        win_start = getdate(from_date) if from_date else today
+        win_end = getdate(to_date) if to_date else add_days(today, horizon)
+    else:
+        win_start = today
+        win_end = add_days(today, horizon)
+    has_loc_field = frappe.get_meta("Shift Assignment").has_field("vn_work_location")
+    sa_fields = ["name", "employee", "shift_type", "start_date", "end_date", "company"]
+    if has_loc_field:
+        sa_fields.append("vn_work_location")
+    sa_filters = {"status": "Active", "docstatus": 1, "start_date": ["<=", win_end]}
+    if employee:
+        sa_filters["employee"] = employee
     assignments = frappe.db.get_all(
         "Shift Assignment",
-        filters={"status": "Active", "docstatus": 1, "start_date": ["<=", end]},
-        fields=["name", "employee", "shift_type", "start_date", "end_date", "company"],
+        filters=sa_filters,
+        fields=sa_fields,
     )
     created = 0
     for a in assignments:
         a_start = getdate(a.start_date)
-        a_end = getdate(a.end_date) if a.end_date else end
-        day = max(a_start, today)
-        while day <= min(a_end, end):
+        a_end = getdate(a.end_date) if a.end_date else win_end
+        day = max(a_start, win_start)
+        while day <= min(a_end, win_end):
             if _ensure_shift_instance(a, day):
                 created += 1
             day = add_days(day, 1)
@@ -183,6 +253,10 @@ def _ensure_shift_instance(assignment: dict, day: date) -> bool:
 
     employee_name = frappe.db.get_value("Employee", assignment.employee, "employee_name")
     policy = frappe.db.get_value("Employee", assignment.employee, "default_attendance_policy")
+    work_loc = assignment.get("vn_work_location") or None
+    work_loc_name = None
+    if work_loc:
+        work_loc_name = frappe.db.get_value("VN Work Location", work_loc, "location_name")
 
     doc = frappe.get_doc(
         {
@@ -194,6 +268,8 @@ def _ensure_shift_instance(assignment: dict, day: date) -> bool:
             "shift_name": assignment.shift_type,
             "source_shift_assignment": assignment.name,
             "attendance_policy": policy,
+            "work_location": work_loc,
+            "work_location_name": work_loc_name,
             "company": assignment.company,
             "status": "Scheduled",
             "planned_start": _frappe_dt(planned_start),

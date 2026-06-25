@@ -1,2 +1,2 @@
 # Patches for gege_hr. Format: <patch_file_path>
-# (none yet — see doctype-design.md for the DocType roadmap)
+gege_hr.gege_hr.patches.v2_0.backfill_exception_company

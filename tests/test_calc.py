@@ -467,3 +467,39 @@ class TestCalculatePayableDay:
     def test_below_half_day_zero(self):
         ws = {"absent": 0, "actual_within_shift_hours": 1.0}
         assert calc.calculate_payable_day(ws, base_policy()) == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# _db_dt — Frappe Datetime DB serialization (root cause of empty /hr/attendance)
+# --------------------------------------------------------------------------- #
+class TestDbDt:
+    """``calculate_work_session`` emits ISO-Z strings (``2026-06-24T01:00:00Z``);
+    MariaDB rejects them for Datetime columns, silently killing every Work
+    Session insert. ``_db_dt`` must normalise to ``YYYY-MM-DD HH:MM:SS``."""
+
+    def test_iso_z_normalized(self):
+        assert calc._db_dt("2026-06-24T01:00:00Z") == "2026-06-24 01:00:00"
+
+    def test_lowercase_z(self):
+        assert calc._db_dt("2026-06-24T01:00:00z") == "2026-06-24 01:00:00"
+
+    def test_offset_converted_to_utc(self):
+        # +07:00 → 00:00 UTC
+        assert calc._db_dt("2026-06-24T08:00:00+07:00") == "2026-06-24 01:00:00"
+
+    def test_datetime_input(self):
+        dt = datetime(2026, 6, 24, 1, 0, 0, tzinfo=ZoneInfo("UTC"))
+        assert calc._db_dt(dt) == "2026-06-24 01:00:00"
+
+    def test_naive_datetime_passthrough(self):
+        dt = datetime(2026, 6, 24, 1, 0, 0)
+        assert calc._db_dt(dt) == "2026-06-24 01:00:00"
+
+    def test_none_returns_none(self):
+        assert calc._db_dt(None) is None
+
+    def test_output_is_db_safe(self):
+        # The exact failure trigger: no 'T' and no 'Z' in the result.
+        out = calc._db_dt("2026-06-24T01:00:00Z")
+        assert "T" not in out and "Z" not in out
+        assert out.count("-") == 2 and out.count(":") == 2
