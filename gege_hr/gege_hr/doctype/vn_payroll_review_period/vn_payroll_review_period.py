@@ -60,14 +60,19 @@ class VNPayrollReviewPeriod(Document):
         if not self.attendance_period:
             return
         try:
-            locked = frappe.db.get_value(
-                "VN Monthly Attendance Period",
-                self.attendance_period,
-                "is_locked",
+            # Lock state lives in ``status == "Locked"`` (there is no
+            # ``is_locked`` column — that historic lookup always failed).
+            locked = (
+                frappe.db.get_value(
+                    "VN Monthly Attendance Period",
+                    self.attendance_period,
+                    "status",
+                )
+                == "Locked"
             )
         except Exception:
-            locked = None
-        if locked in (0, None) and self.status != self.STATUS_DRAFT:
+            locked = False
+        if not locked and self.status != self.STATUS_DRAFT:
             # Only enforce at calculation time — a Draft period may be created
             # in anticipation of the lock.
             frappe.throw(

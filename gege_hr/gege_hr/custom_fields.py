@@ -125,7 +125,22 @@ employee_checkin_fields = [
         "fieldname": "vn_source_type",
         "fieldtype": "Select",
         "label": "Source Type",
-        "options": "\nMobile\nApp\nDevice\nManual\nImport",
+        "options": "\nMobile\nApp\nDevice\nManual\nImport\nAuto",
+    },
+    {
+        "fieldname": "vn_auto_generated",
+        "fieldtype": "Check",
+        "label": "Auto Generated",
+        "default": "0",
+        "read_only": 1,
+        "description": "1 = log do hệ thống sinh (OUT giả cho ca quên checkout).",
+    },
+    {
+        "fieldname": "vn_checkout_miss",
+        "fieldtype": "Link",
+        "label": "Checkout Miss",
+        "options": "VN Checkout Miss",
+        "read_only": 1,
     },
     {"fieldname": "vn_raw_log", "fieldtype": "Link", "label": "Raw Log", "options": "VN Attendance Raw Log"},
     {
@@ -380,6 +395,126 @@ shift_assignment_fields = [
 ]
 
 
+# A.6 Attendance (core) — back-link to the VN Work Session that produced it
+# (FIX-1 / hr-gap-audit I-1). attendance_sync.upsert writes this so the round-trip
+# between the portal's Work Session and Frappe HR's standard Attendance is traceable.
+attendance_fields = [
+    {
+        "fieldname": "vn_work_session",
+        "fieldtype": "Link",
+        "label": "VN Work Session",
+        "options": "VN Attendance Work Session",
+        "read_only": 1,
+    },
+]
+
+
+# --------------------------------------------------------------------------- #
+# A.7 Department — hourly rate per department for the time-bracket payroll model
+# --------------------------------------------------------------------------- #
+department_fields = [
+    {"fieldname": "vn_payroll_break", "fieldtype": "Section Break", "label": "VN Payroll"},
+    {
+        "fieldname": "vn_hourly_rate",
+        "fieldtype": "Currency",
+        "label": "Lương giờ (VND)",
+        "default": "20000",
+        "description": "Mức lương cơ bản theo giờ cho nhân viên thuộc phòng ban này",
+    },
+]
+
+# --------------------------------------------------------------------------- #
+# A.8 VN HR Portal Setting — configurable time brackets + deduction rates
+# --------------------------------------------------------------------------- #
+# VN Attendance Work Session — flag a session auto-closed by the checkout-miss
+# engine so the UI can badge it and payroll knows OT was intentionally excluded.
+work_session_checkout_miss_fields = [
+    {
+        "fieldname": "vn_auto_checkout",
+        "fieldtype": "Check",
+        "label": "Auto Checkout",
+        "default": "0",
+        "read_only": 1,
+        "description": "1 = checkout tự sinh @ planned_end (nhân viên quên checkout).",
+    },
+    {
+        "fieldname": "vn_checkout_miss",
+        "fieldtype": "Link",
+        "label": "Checkout Miss",
+        "options": "VN Checkout Miss",
+        "read_only": 1,
+    },
+]
+
+
+portal_payroll_fields = [
+    {"fieldname": "vn_payroll_setting_break", "fieldtype": "Section Break", "label": "Payroll Settings"},
+    {
+        "fieldname": "vn_time_brackets",
+        "fieldtype": "Small Text",
+        "label": "Time Brackets (JSON)",
+        "default": '[{"from":8,"to":16,"coeff":1.0},{"from":16,"to":24,"coeff":1.2},{"from":0,"to":8,"coeff":1.5}]',
+        "description": "Khung giờ + hệ số. from/to = giờ (0-24). Mỗi giờ làm việc nhân hệ số khung giờ tương ứng.",
+    },
+    {"fieldname": "vn_ded_bhxh", "fieldtype": "Float", "label": "BHXH (%)", "default": "8"},
+    {"fieldname": "vn_ded_bhyt", "fieldtype": "Float", "label": "BHYT (%)", "default": "1.5"},
+    {"fieldname": "vn_ded_bhtn", "fieldtype": "Float", "label": "BHTN (%)", "default": "1"},
+    {"fieldname": "vn_ded_tncn", "fieldtype": "Float", "label": "Thuế TNCN (%)", "default": "10"},
+    {
+        "fieldname": "vn_default_hourly_rate",
+        "fieldtype": "Currency",
+        "label": "Default lương giờ (VND)",
+        "default": "20000",
+        "description": "Lương giờ mặc định cho NV chưa có phòng ban",
+    },
+    {
+        "fieldname": "vn_cm_break",
+        "fieldtype": "Section Break",
+        "label": "Quên Checkout (Auto-close)",
+    },
+    {
+        "fieldname": "vn_cm_enabled",
+        "fieldtype": "Check",
+        "label": "Bật auto-close quên checkout",
+        "default": "1",
+        "description": "Tự đóng ca thiếu checkout @ planned_end + tạo ticket giải trình.",
+    },
+    {
+        "fieldname": "vn_cm_grace_hours",
+        "fieldtype": "Int",
+        "label": "Grace giải trình (giờ)",
+        "default": "24",
+        "description": "Hạn giải trình; quá hạn tự Penalised.",
+    },
+    {
+        "fieldname": "vn_cm_free_first_n",
+        "fieldtype": "Int",
+        "label": "Miễn phạt N lần đầu",
+        "default": "2",
+    },
+    {
+        "fieldname": "vn_cm_penalty_amount",
+        "fieldtype": "Currency",
+        "label": "Phạt mỗi lần (VND)",
+        "default": "100000",
+    },
+    {
+        "fieldname": "vn_cm_window_days",
+        "fieldtype": "Int",
+        "label": "Cửa sổ đếm (ngày)",
+        "default": "90",
+        "description": "Reset bộ đếm occurrence sau khoảng này.",
+    },
+    {
+        "fieldname": "vn_cm_buffer_minutes",
+        "fieldtype": "Int",
+        "label": "Buffer sau planned_end (phút)",
+        "default": "360",
+        "description": "Sau planned_end + buffer mới tự đóng. 360ph (6h) cho NV kịp checkout muộn/OT mà không bị đóng oan.",
+    },
+]
+
+
 def get_custom_fields() -> dict:
     """Return the ``{doctype: [fields]}`` map consumed by the ``custom_fields`` hook."""
     return {
@@ -389,4 +524,8 @@ def get_custom_fields() -> dict:
         "Shift Assignment": shift_assignment_fields,
         "Salary Slip": salary_slip_fields,
         "Leave Application": leave_application_fields,
+        "Attendance": attendance_fields,
+        "Department": department_fields,
+        "VN Attendance Work Session": work_session_checkout_miss_fields,
+        "VN HR Portal Setting": portal_payroll_fields,
     }

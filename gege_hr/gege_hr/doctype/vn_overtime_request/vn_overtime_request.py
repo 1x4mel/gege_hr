@@ -71,22 +71,38 @@ class VNOvertimeRequest(Document):
             requested = 0
         if requested <= 0:
             frappe.throw(_("Requested Hours phải lớn hơn 0."))
-        # Cap against the policy max (plan §13 validation).
-        max_hours = self._policy_max_ot_hours()
-        if max_hours and requested > max_hours:
-            frappe.throw(
-                _("Requested Hours ({0}) vượt Max OT Hours Per Shift ({1}).").format(requested, max_hours)
-            )
+        # Cap against the policy max (plan §13 validation) — ONLY at creation
+        # (is_new). Enforcing it on every save would block cancelling/rejecting an
+        # OT that was filed before the cap was set (reject_request / cancel both
+        # call save() → validate). Editing an existing OT is a minor, accepted gap.
+        if self.is_new():
+            max_hours = self._policy_max_ot_hours()
+            if max_hours and requested > max_hours:
+                frappe.throw(
+                    _("Requested Hours ({0}) vượt Max OT Hours Per Shift ({1}).").format(requested, max_hours)
+                )
 
     def _policy_max_ot_hours(self) -> float:
         """Resolve the policy cap (``max_overtime_hours_per_shift``) for the OT
-        day. Returns ``0`` when no policy is resolvable (skip the cap)."""
+        day. Returns ``0`` when no policy is resolvable (skip the cap).
+
+        Resolution mirrors ``calc.load_policy``: the Shift Instance's
+        ``attendance_policy`` → the employee's default → the most-recent active
+        policy. The fallback matters because on some sites the Shift Instances
+        are not linked to a policy, which previously made the cap silently no-op
+        even after HR set it via the HR UI (``overtime_settings.set_ot_cap``)."""
         try:
-            policy_name = (
-                frappe.db.get_value("VN Employee Shift Instance", self.shift_instance, "attendance_policy")
-                if self.shift_instance
-                else None
-            )
+            policy_name = None
+            if self.shift_instance:
+                policy_name = frappe.db.get_value(
+                    "VN Employee Shift Instance", self.shift_instance, "attendance_policy"
+                )
+            if not policy_name and self.employee:
+                policy_name = frappe.db.get_value("Employee", self.employee, "default_attendance_policy")
+            if not policy_name:
+                policy_name = frappe.db.get_value(
+                    "VN Attendance Policy", {"is_active": 1}, "name", order_by="modified desc"
+                )
             if policy_name:
                 return float(
                     frappe.db.get_value("VN Attendance Policy", policy_name, "max_overtime_hours_per_shift")

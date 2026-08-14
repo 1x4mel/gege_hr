@@ -248,10 +248,16 @@ def compute_line(agg: dict, base_salary: float, config: dict | None = None) -> d
     unpaid_leave_deduction = unpaid_days * daily_rate
     salary_advance_deduction = _num(cfg.get("salary_advance_deduction"))
     other_deduction = _num(cfg.get("other_deduction"))
+    # Checkout-miss penalty (layered on by the API layer, like advance/other).
+    checkout_miss_penalty = _num(cfg.get("checkout_miss_penalty"))
 
     gross_pay = proportional_base + overtime_amount + night_allowance_amount
     total_deduction = (
-        late_penalty_amount + unpaid_leave_deduction + salary_advance_deduction + other_deduction
+        late_penalty_amount
+        + unpaid_leave_deduction
+        + salary_advance_deduction
+        + other_deduction
+        + checkout_miss_penalty
     )
     net_pay = gross_pay - total_deduction
 
@@ -267,6 +273,7 @@ def compute_line(agg: dict, base_salary: float, config: dict | None = None) -> d
         "unpaid_leave_deduction": round2(unpaid_leave_deduction),
         "salary_advance_deduction": round2(salary_advance_deduction),
         "other_deduction": round2(other_deduction),
+        "checkout_miss_penalty": round2(checkout_miss_penalty),
         "gross_pay": round2(gross_pay),
         "total_deduction": round2(total_deduction),
         "net_pay": round2(net_pay),
@@ -410,3 +417,244 @@ def employee_advance_deductions(company: str, employees: list[str], from_date, t
         return out
     except Exception:
         return {}
+
+
+# --------------------------------------------------------------------------- #
+# Hourly-rate × time-bracket payroll model (plan §payroll-hourly-rate-design)
+# --------------------------------------------------------------------------- #
+def resolve_hourly_rate(employee: str, date=None) -> float:
+    """Hourly rate for ``employee`` from their Department's ``vn_hourly_rate``.
+
+    Falls back to ``VN HR Portal Setting.vn_default_hourly_rate`` (default 20 000 VND)
+    when the employee has no department or the department has no rate set.
+    """
+    if frappe is None or not employee:
+        return 20000.0
+    try:
+        dept = frappe.db.get_value("Employee", employee, "department")
+        if dept:
+            rate = frappe.db.get_value("Department", dept, "vn_hourly_rate")
+            if rate and float(rate) > 0:
+                return float(rate)
+        # Fallback to portal default.
+        default = frappe.db.get_single_value("VN HR Portal Setting", "vn_default_hourly_rate")
+        return float(default or 20000)
+    except Exception:
+        return 20000.0
+
+
+def load_time_brackets() -> list[dict]:
+    """Parse time-bracket config from ``VN HR Portal Setting.vn_time_brackets``.
+
+    Returns ``[{from, to, coeff}, ...]`` (from/to = hour-of-day 0–24).
+    """
+    if frappe is None:
+        return [
+            {"from": 8, "to": 16, "coeff": 1.0},
+            {"from": 16, "to": 24, "coeff": 1.2},
+            {"from": 0, "to": 8, "coeff": 1.5},
+        ]
+    try:
+        import json
+
+        raw = frappe.db.get_single_value("VN HR Portal Setting", "vn_time_brackets")
+        if raw:
+            return json.loads(raw)
+    except Exception:
+        pass
+    return [
+        {"from": 8, "to": 16, "coeff": 1.0},
+        {"from": 16, "to": 24, "coeff": 1.2},
+        {"from": 0, "to": 8, "coeff": 1.5},
+    ]
+
+
+def load_deduction_rates() -> dict[str, float]:
+    """BHXH/BHYT/BHTN/TNCN rates (percent) from VN HR Portal Setting."""
+    if frappe is None:
+        return {"BHXH": 8.0, "BHYT": 1.5, "BHTN": 1.0, "TNCN": 10.0}
+    try:
+        return {
+            "BHXH": float(frappe.db.get_single_value("VN HR Portal Setting", "vn_ded_bhxh") or 8),
+            "BHYT": float(frappe.db.get_single_value("VN HR Portal Setting", "vn_ded_bhyt") or 1.5),
+            "BHTN": float(frappe.db.get_single_value("VN HR Portal Setting", "vn_ded_bhtn") or 1),
+            "TNCN": float(frappe.db.get_single_value("VN HR Portal Setting", "vn_ded_tncn") or 10),
+        }
+    except Exception:
+        return {"BHXH": 8.0, "BHYT": 1.5, "BHTN": 1.0, "TNCN": 10.0}
+
+
+def load_penalty_rules(company: str | None = None) -> list[dict]:
+    """Active ``VN Attendance Penalty Rule`` rows for ``company``.
+
+    Returns ``[{from_minutes, to_minutes, penalty_type, penalty_value}, ...]``
+    sorted by ``from_minutes`` ascending.
+    """
+    if frappe is None:
+        return []
+    try:
+        filters = {}
+        if company:
+            filters["company"] = company
+        rows = frappe.db.get_all(
+            "VN Attendance Penalty Rule",
+            filters=filters,
+            fields=["from_minutes", "to_minutes", "penalty_type", "penalty_value"],
+            order_by="from_minutes asc",
+        )
+        return rows or []
+    except Exception:
+        return []
+
+
+def load_checkout_miss_penalty(employee: str, start_date, end_date) -> float:
+    """Sum ``penalty_amount`` of Penalised, non-waived VN Checkout Miss tickets
+    for ``employee`` within ``[start_date, end_date]``.
+
+    Only ``Penalised`` tickets with ``penalty_waived=0`` count — waived ones and
+    pending/explained ones are excluded. Returns ``0.0`` outside a bench / error.
+    """
+    if frappe is None:
+        return 0.0
+    try:
+        rows = frappe.db.get_all(
+            "VN Checkout Miss",
+            filters={
+                "employee": employee,
+                "status": "Penalised",
+                "penalty_waived": 0,
+                "docstatus": ["<", 2],
+                "work_date": ["between", [start_date, end_date]],
+            },
+            fields=["penalty_amount"],
+        )
+        return float(sum(float((r or {}).get("penalty_amount") or 0) for r in (rows or [])))
+    except Exception:
+        return 0.0
+
+
+def split_hours_by_bracket(start_dt, end_dt, brackets: list[dict]) -> dict[float, float]:
+    """Split a datetime range into ``{coefficient: hours}`` per time bracket.
+
+    ``brackets`` = ``[{"from": 8, "to": 16, "coeff": 1.0}, ...]`` where from/to
+    are hours-of-day (0–24). Iterates hour-by-hour; the last partial hour is
+    counted fractionally. Overnight sessions (crossing midnight) are handled by
+    matching the hour-of-day to the correct bracket.
+
+    Returns ``{1.0: 120.0, 1.2: 30.5, 1.5: 8.0}`` (coeff → hours).
+    """
+    from datetime import timedelta
+
+    if start_dt >= end_dt:
+        return {}
+
+    result: dict[float, float] = {}
+    cur = start_dt
+    while cur < end_dt:
+        hod = cur.hour + cur.minute / 60.0 + cur.second / 3600.0  # hour-of-day
+        coeff = 1.0  # fallback
+        for b in brackets:
+            bf, bt = float(b["from"]), float(b["to"])
+            if bf < bt:  # same-day bracket (08–16)
+                if bf <= hod < bt:
+                    coeff = float(b["coeff"])
+                    break
+            else:  # overnight bracket (22–06) — wraps midnight
+                if hod >= bf or hod < bt:
+                    coeff = float(b["coeff"])
+                    break
+        nxt = min(cur + timedelta(hours=1), end_dt)
+        actual = (nxt - cur).total_seconds() / 3600.0
+        result[coeff] = result.get(coeff, 0.0) + actual
+        cur = nxt
+    return result
+
+
+def compute_hourly_line(
+    bracket_hours: dict[float, float],
+    hourly_rate: float,
+    deduction_rates: dict[str, float],
+    late_penalty: float = 0.0,
+    checkout_miss_penalty: float = 0.0,
+    salary_advance_deduction: float = 0.0,
+    allowances: list[float] | None = None,
+    extra_deductions: list[float] | None = None,
+) -> dict:
+    """Full payroll breakdown from the hourly-rate × time-bracket model.
+
+    ``bracket_hours`` = ``{coeff: hours}`` (from :func:`split_hours_by_bracket`).
+    ``deduction_rates`` = ``{"BHXH": 8.0, ...}`` (percent of gross).
+    ``allowances`` = ``[500000, 200000]`` (fixed amounts from Salary Structure
+    earnings — e.g. lunch, transport — added to the hourly gross).
+    ``extra_deductions`` = ``[100000]`` (fixed amounts from Salary Structure
+    deductions — e.g. union fee — subtracted after the % deductions).
+
+    Returns a dict compatible with the existing VN Payroll Review Line shape.
+    """
+    # 1. Base gross from hourly × hours × coefficient
+    base_gross = sum(hours * hourly_rate * coeff for coeff, hours in bracket_hours.items())
+
+    # 2. Allowances (fixed amounts from Salary Structure earnings)
+    total_allowances = sum(allowances or [])
+
+    # 3. Total gross = hourly gross + allowances
+    gross = base_gross + total_allowances
+
+    # 4. Standard deductions (% of gross)
+    total_pct = sum(deduction_rates.values()) / 100.0
+    standard_deductions = gross * total_pct
+
+    # 5. Extra deductions (fixed amounts from Salary Structure deductions)
+    total_extra_ded = sum(extra_deductions or [])
+
+    # 6. Net = gross - standard_deductions - extra_ded - penalties - advance
+    net = (
+        gross
+        - standard_deductions
+        - total_extra_ded
+        - late_penalty
+        - checkout_miss_penalty
+        - salary_advance_deduction
+    )
+
+    worked_hours = sum(bracket_hours.values())
+    return {
+        "base_salary": round2(hourly_rate),
+        "gross_pay": round2(gross),
+        "total_deduction": round2(
+            standard_deductions + total_extra_ded + late_penalty + checkout_miss_penalty + salary_advance_deduction
+        ),
+        "net_pay": round2(net),
+        "hourly_rate": round2(hourly_rate),
+        "worked_hours": round2(worked_hours),
+        "bracket_hours_1": round2(bracket_hours.get(1.0, 0)),
+        "bracket_hours_1_2": round2(bracket_hours.get(1.2, 0)),
+        "bracket_hours_1_5": round2(bracket_hours.get(1.5, 0)),
+        "late_penalty": round2(late_penalty),
+        "checkout_miss_penalty": round2(checkout_miss_penalty),
+        "allowance_amount": round2(total_allowances),
+    }
+
+
+def compute_late_penalty(late_minutes_list: list[float], penalty_rules: list[dict]) -> float:
+    """Total late-occurrence penalty for an employee.
+
+    For each entry in ``late_minutes_list`` (minutes late per occurrence), find
+    the first matching ``VN Attendance Penalty Rule`` bracket and apply its amount.
+    """
+    total = 0.0
+    for late_min in late_minutes_list:
+        for rule in penalty_rules:
+            from_m = float(rule.get("from_minutes") or 0)
+            to_m = float(rule.get("to_minutes") or 9999)
+            if from_m <= late_min <= to_m:
+                ptype = rule.get("penalty_type", "Fixed Amount")
+                pval = float(rule.get("penalty_value") or 0)
+                if ptype == "Fixed Amount":
+                    total += pval
+                elif ptype == "Per Minute":
+                    total += late_min * pval
+                elif ptype == "Percentage":
+                    total += pval  # caller should multiply by daily/hourly rate
+                break
+    return round2(total)

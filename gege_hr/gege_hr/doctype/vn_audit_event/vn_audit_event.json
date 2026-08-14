@@ -6,7 +6,7 @@
  "engine": "InnoDB",
  "fields": [
   {"fieldname": "audit_break", "fieldtype": "Section Break", "label": "Event Info"},
-  {"fieldname": "audit_type", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Audit Type", "options": "Check-in\nCheck-out\nLeave Submit\nLeave Cancel\nLeave Approve\nLeave Reject\nOT Submit\nOT Approve\nCorrection Submit\nCorrection Approve\nAdvance Submit\nAdvance Approve\nWork Session Recalculate\nMonthly Lock\nMonthly Unlock\nPayroll Calculate\nPayroll Approve\nPayroll Publish\nManual Override", "reqd": 1},
+  {"fieldname": "audit_type", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Audit Type", "options": "Check-in\nCheck-out\nLeave Submit\nLeave Cancel\nLeave Approve\nLeave Reject\nOT Submit\nOT Approve\nCorrection Submit\nCorrection Approve\nAdvance Submit\nAdvance Approve\nWork Session Recalculate\nMonthly Lock\nMonthly Unlock\nPayroll Calculate\nPayroll Approve\nPayroll Publish\nManual Override\nCheckout Miss Explain\nCheckout Miss Resolve", "reqd": 1},
   {"fieldname": "company", "fieldtype": "Link", "in_standard_filter": 1, "label": "Company", "options": "Company", "reqd": 1},
   {"fieldname": "col1", "fieldtype": "Column Break"},
   {"fieldname": "employee", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Employee", "options": "Employee"},

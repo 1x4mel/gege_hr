@@ -267,18 +267,31 @@ def assign_salary_structure(
 
 
 def _ensure_no_overlapping_assignment(employee, start, end):
-    """Raise on an overlapping active Salary Structure Assignment."""
+    """Raise on an overlapping active Salary Structure Assignment.
+
+    Standard Frappe ``Salary Structure Assignment`` has no ``to_date`` column
+    (only ``from_date``) — so an assignment is "active indefinitely from
+    from_date". We treat any existing submitted assignment whose ``from_date``
+    precedes ``end`` as an overlap (same logic the HRMS native check uses).
+    """
     filters = [["employee", "=", employee], ["docstatus", "=", 1]]
     existing = frappe.get_all(
         "Salary Structure Assignment",
-        fields=["name", "from_date", "to_date"],
+        fields=["name", "from_date"],
         filters=filters,
     )
     for row in existing:
         r_from = getdate(row["from_date"])
+        # Interval overlap [r_from, r_to?] ∩ [start, end?]. A missing bound
+        # means open-ended (+∞): standard Frappe SSA has no ``to_date`` column,
+        # but rows that DO carry one (VN-seeded / custom) must bound the check —
+        # the previous ``start <= r_from or r_from <= start`` was a tautology
+        # that flagged every disjoint past assignment.
         r_to = getdate(row["to_date"]) if row.get("to_date") else None
-        overlap = (not end or r_from <= end) and (not r_to or start <= r_to)
-        if overlap:
+        new_to = getdate(end) if end else None
+        starts_before_new_end = new_to is None or r_from <= new_to
+        old_ends_after_new_start = r_to is None or r_to >= start
+        if starts_before_new_end and old_ends_after_new_start:
             frappe.throw(_("Nhân viên đã có bảng lương áp dụng trong khoảng này ({0}).").format(row["name"]))
 
 

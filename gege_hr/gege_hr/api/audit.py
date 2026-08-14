@@ -20,6 +20,7 @@ from frappe import _
 from frappe.utils import getdate
 
 from gege_hr.gege_hr.utils import audit as audit_utils
+from gege_hr.gege_hr.utils import pagination
 
 DOCTYPE = "VN Audit Event"
 _LIST_FIELDS = [
@@ -69,6 +70,58 @@ def audit_categories() -> dict:
     }
 
 
+# Broad-search fields for the audit trail (DNA §6.6 D — OR-combined free text).
+_AUDIT_SEARCH_FIELDS = (
+    "name",
+    "audit_type",
+    "description",
+    "actor",
+    "employee",
+    "reference_name",
+    "reference_doctype",
+)
+
+
+def _audit_search_or_filters(search: str | None) -> list | None:
+    """Frappe ``or_filters`` (list form) for a free-text audit search, or None."""
+    q = (search or "").strip()
+    if not q:
+        return None
+    like = f"%{q}%"
+    return [[field, "like", like] for field in _AUDIT_SEARCH_FIELDS]
+
+
+# Lightweight fields needed to compute the SPA summary tiles server-side (the
+# full set, not just the current page) — DNA §6.6 A.
+_AUDIT_SUMMARY_FIELDS = ["name", "employee", "actor", "created_at"]
+
+
+def _audit_summary(light_rows) -> dict:
+    """Aggregate ``total`` + today/distinct counts for the SPA summary tiles."""
+    today = getdate()
+    today_count = 0
+    employees: set = set()
+    actors: set = set()
+    for r in light_rows or []:
+        created = r.get("created_at")
+        if created:
+            try:
+                if getdate(created) == today:
+                    today_count += 1
+            except Exception:
+                pass
+        if r.get("employee"):
+            employees.add(r["employee"])
+        if r.get("actor"):
+            actors.add(r["actor"])
+    return {
+        "total": len(light_rows or []),
+        "today": today_count,
+        "distinct_employees": len(employees),
+        "distinct_actors": len(actors),
+    }
+
+
 @frappe.whitelist()
 def audit_events(
     company: str | None = None,
@@ -77,11 +130,25 @@ def audit_events(
     category: str | None = None,
     from_date: str | None = None,
     to_date: str | None = None,
+    search: str | None = None,
     limit: int = 200,
-) -> list[dict]:
-    """HR/System read. Filter by type, coarse category, employee or date window."""
+    page: int = 1,
+    page_size: int = 0,
+) -> list[dict] | dict:
+    """HR/System read. Filter by type, coarse category, employee, date window,
+    or a free-text ``search`` (OR-matched across the row's text fields).
+
+    Pagination is **opt-in** (DNA §6.6 A): pass ``page`` + a positive
+    ``page_size`` to receive ``{"data": [...], "total": int, "summary": {...}}``
+    where ``total`` is counted via ``get_all().len`` (``db.count`` ignores
+    ``or_filters``) and ``summary`` aggregates the *full* filtered set so the
+    SPA summary tiles stay correct under pagination. Without ``page_size`` the
+    legacy bare-list return is preserved (internal callers + bench tests).
+    """
     _require_hr()
     if not _table_ready():
+        if page_size:
+            return {"data": [], "total": 0, "summary": _audit_summary([])}
         return []
     filters: dict = {}
     if company:
@@ -99,10 +166,48 @@ def audit_events(
         window = _date_window(from_date, to_date)
         if window:
             filters["work_date"] = window
+    or_filters = _audit_search_or_filters(search)
+
+    if page_size:
+        # Server-side summary over the full filtered set (not just the page).
+        summary = _audit_summary(
+            pagination.all_rows(
+                DOCTYPE,
+                fields=_AUDIT_SUMMARY_FIELDS,
+                filters=filters,
+                or_filters=or_filters,
+            )
+        )
+        page = max(1, pagination.as_int(page, 1))
+        page_size = max(1, pagination.as_int(page_size, 20))
+        start = (page - 1) * page_size
+        try:
+            rows = (
+                frappe.db.get_all(
+                    DOCTYPE,
+                    filters=filters,
+                    or_filters=or_filters,
+                    fields=_LIST_FIELDS,
+                    order_by="created_at desc",
+                    limit_start=start,
+                    limit_page_length=page_size,
+                )
+                or []
+            )
+        except Exception:
+            frappe.log_error(title="audit.audit_events failed")
+            return {"data": [], "total": summary["total"], "summary": summary}
+        return {
+            "data": [audit_utils.audit_row(r) for r in rows],
+            "total": summary["total"],
+            "summary": summary,
+        }
+
     try:
         rows = frappe.db.get_all(
             DOCTYPE,
             filters=filters,
+            or_filters=or_filters,
             fields=_LIST_FIELDS,
             order_by="created_at desc",
             limit_page_length=int(limit or 200),

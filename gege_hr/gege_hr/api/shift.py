@@ -19,6 +19,34 @@ from gege_hr.gege_hr.utils import employee as emp_utils
 from gege_hr.gege_hr.utils import tz as tz_utils
 
 
+# ---------------------------------------------------------------------------
+# Shift Type validate hook — keep Frappe-native auto-attendance windows in sync
+# with the gege_hr custom fields. The portal UI edits ``vn_*`` custom fields
+# (e.g. vn_max_checkout_after_end_minutes = 360) but Frappe's NATIVE auto-
+# attendance reads its own fields (allow_check_out_after_shift_end_time), which
+# previously stayed at the default 60 → overnight checkouts ~70 min after the
+# shift end were dropped / mis-paired. Mirroring the values on every save makes
+# native Attendance pairing agree with the Work-Session engine.
+# ---------------------------------------------------------------------------
+_NATIVE_FROM_CUSTOM = {
+    "allow_check_out_after_shift_end_time": "vn_max_checkout_after_end_minutes",
+    "begin_check_in_before_shift_start_time": "vn_earliest_checkin_minutes",
+}
+
+
+def sync_native_shift_windows(doc, method: str | None = None) -> None:
+    """``Shift Type.validate`` hook — mirror gege_hr custom windows → native."""
+    for native, custom in _NATIVE_FROM_CUSTOM.items():
+        custom_val = getattr(doc, custom, None)
+        if custom_val is None:
+            continue
+        try:
+            setattr(doc, native, custom_val)
+        except Exception:
+            # Field may be absent on a stripped meta — never block the save.
+            pass
+
+
 @frappe.whitelist()
 def my_schedule(
     employee: str | None = None, from_date: str | None = None, to_date: str | None = None

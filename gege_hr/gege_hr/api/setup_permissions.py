@@ -100,9 +100,15 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
         HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
     },
     # --- Leave (core Frappe HR) — leave.py self-service + HR approval --------
+    # HR Manager also gets ``share`` so the unified-inbox approval flow can grant
+    # the approving manager per-doc access via DocShare (the same mechanism HRMS
+    # uses in ``share_doc_with_approver``) before ``doc.submit()`` — proper Frappe,
+    # submit still runs validate + on_submit (Leave Ledger + audit logs).
     "Leave Application": {
         EMPLOYEE: {"read": 1, "write": 1, "create": 1, "delete": 1, "submit": 1, "cancel": 1},
-        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1, "submit": 1, "cancel": 1, "amend": 1},
+        HR_MANAGER: {
+            "read": 1, "write": 1, "create": 1, "delete": 1, "submit": 1, "cancel": 1, "amend": 1, "share": 1,
+        },
         HR_USER: {"read": 1},
         "Line Manager": {"read": 1},
     },
@@ -155,11 +161,72 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
         HR_MANAGER: {"read": 1, "write": 1, "create": 1, "cancel": 1},
         "Payroll Manager": {"read": 1, "write": 1, "create": 1, "cancel": 1},
     },
-    # --- VN request doctype: HR Manager full lifecycle (advance mark/reverse)
-    # JSON already grants create/write/delete; submit/cancel/amend added here so
-    # the HR "mark paid / reverse" flows run without a permission bypass.
+    # --- VN request doctypes: HR Manager full lifecycle so the approval inbox can
+    # read + advance state (approve_request / reject_request) on every request
+    # type. Without read/write here an HR Manager gets 403 when approving an
+    # Attendance Correction or Overtime request.
     "VN Salary Advance Request": {
         HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1, "submit": 1, "cancel": 1, "amend": 1},
+    },
+    "VN Attendance Correction Request": {
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
+        HR_USER: {"read": 1},
+    },
+    "VN Overtime Request": {
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
+        HR_USER: {"read": 1},
+        # Employee self-service: create / write (read) on their own OT requests.
+        # Ownership is enforced at the app layer (overtime._assert_own) — every
+        # employee is scoped to their own docs; HR can grant/revoke this from the
+        # HR UI via overtime_settings.enable_employee_ot_submission.
+        EMPLOYEE: {"read": 1, "write": 1, "create": 1},
+    },
+    # --- Leave-cancellation + encashment/comp-off (inbox + manager approve) -----
+    "VN Leave Cancellation Request": {
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
+        # Employee needs ``share`` so the owner (filing the request) can share it
+        # with the approver (HRMS DocShare pattern) → the approver can then act.
+        EMPLOYEE: {"read": 1, "write": 1, "create": 1, "share": 1, "delete": 1},
+    },
+    "Leave Encashment": {  # HRMS — leave_extra.approve_leave_encashment (.submit)
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
+        EMPLOYEE: {"read": 1, "write": 1, "create": 1},
+    },
+    "Compensatory Leave Request": {  # HRMS — leave_extra.approve_comp_off (.submit)
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
+        EMPLOYEE: {"read": 1, "write": 1, "create": 1},
+    },
+    # --- Expense / grievance / travel / onboarding (manager approve + HR admin) -
+    "Expense Claim": {  # HRMS — expense.approve_expense_claim / reject
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
+        EMPLOYEE: {"read": 1, "write": 1, "create": 1},
+    },
+    "Employee Grievance": {  # HRMS — employee_services.resolve_grievance
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
+        EMPLOYEE: {"read": 1, "write": 1, "create": 1},
+    },
+    "Travel Request": {  # HRMS — employee_services.approve_travel_request
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
+        EMPLOYEE: {"read": 1, "write": 1, "create": 1},
+    },
+    "VN Employee Onboarding": {  # onboarding.py HR admin lifecycle
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1, "delete": 1},
+    },
+    "VN Employee Onboarding Template": {  # onboarding.save_template
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},
+    },
+    # --- Payroll review period lifecycle (approve / generate / publish) ---------
+    "VN Payroll Review Period": {
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
+    },
+    "VN Payroll Review Line": {
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1},
+    },
+    # --- Employee master: HR admin edit (admin.save_employee) ------------------
+    "Employee": {
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},
+        HR_USER: {"read": 1},
+        EMPLOYEE: {"read": 1},
     },
 }
 

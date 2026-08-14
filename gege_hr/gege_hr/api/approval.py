@@ -116,10 +116,16 @@ def _employee_attrs(employee: str) -> dict:
     if vals.get("reports_to"):
         attrs["line_manager_user"] = frappe.db.get_value("Employee", vals["reports_to"], "user_id")
     # Department head user, if the Department doctype exposes it.
+    # Guarded: ``leave_approvers`` is an ERPNext HR custom field that may not be
+    # installed on a gege_hr-only bench → the column won't exist → pymysql crash.
     if vals.get("department"):
-        attrs["dept_head_user"] = (
-            frappe.db.get_value("Department", vals["department"], "leave_approvers") or None
-        )
+        try:
+            if frappe.get_meta("Department").has_field("leave_approvers"):
+                attrs["dept_head_user"] = (
+                    frappe.db.get_value("Department", vals["department"], "leave_approvers") or None
+                )
+        except Exception:
+            pass
     return attrs
 
 
@@ -179,6 +185,12 @@ _TYPE_FIELDS: dict[str, list[str]] = {
         "payment_status",
         "reason",
     ],
+    "Leave Cancellation Request": [
+        "workflow_state",
+        "leave_application",
+        "rejection_reason",
+        "creation",
+    ],
 }
 
 
@@ -201,6 +213,11 @@ def _normalise_row(row: dict, transaction_type: str, approver: str) -> dict:
         out.setdefault("work_date", out.get("posting_date"))
         # Surface a single amount for the FE's summary tile (hrStatus ADVANCE).
         out["advance_amount"] = out.get("requested_amount")
+    if transaction_type == "Leave Cancellation Request":
+        # No natural date column — surface creation day for the FE date display.
+        # `creation` is a datetime; coerce to str before slicing.
+        out.setdefault("work_date", str(out.get("creation") or "")[:10])
+        out.setdefault("leave_application_ref", out.get("leave_application"))
     # Unify the human reason/description onto a single ``reason`` field so the
     # approval-inbox card always has something to show the manager. Leave
     # Application stores its reason in ``description`` (Frappe has no ``reason``
@@ -276,23 +293,245 @@ def _write_log(
         )
 
 
-def _delegate_leave(name: str, request_type: str, comment: str | None, *, approved: bool) -> dict:
-    """Leave Application approve/reject that actually persists.
+# --------------------------------------------------------------------------- #
+# Overtime → Work Session recalc on approval state change (BUG-1 fix, plan T1)
+# --------------------------------------------------------------------------- #
+# Workflow states the calculation engine treats as "approved/usable" — must stay
+# in sync with ``calc.get_approved_ot_requests`` (workflow_state in [Approved,
+# Confirmed]). A request entering OR leaving this set must recompute the Work
+# Session so ``approved_overtime_hours`` reflects reality immediately.
+_OT_ENGINE_STATES = ("Approved", "Confirmed")
 
-    Core Frappe Leave Application derives ``status`` from ``docstatus`` and
-    HRMS's ``validate`` recomputes it on every ``save()`` — so a plain
-    ``doc.status = "Approved"; doc.save()`` on a submitted (docstatus 1) leave
-    is silently reverted and the request stays ``Open`` (reappearing in the
-    inbox). The unified inbox filters on the ``status`` column, so we persist
-    the decision there directly (bypassing the recomputing validate), stamp the
-    approver, and run the leave-specific audit + notify hooks best-effort.
+
+def _shift_instance_for_day(employee: str, work_date) -> str | None:
+    """The ``VN Employee Shift Instance`` covering ``work_date`` for ``employee``.
+
+    Prefer an exact ``work_date`` match; fall back to the planned-window bound.
+    Returns ``None`` when the doctype is absent or no instance covers the day
+    (the approved OT will then be picked up when the shift is later submitted /
+    a check-in lands — it is already persisted as ``Approved`` in the DB).
+    """
+    if not employee or not work_date:
+        return None
+    try:
+        if not frappe.db.table_exists("VN Employee Shift Instance"):  # type: ignore[attr-defined]
+            return None
+    except Exception:
+        return None
+    name = frappe.db.get_value(
+        "VN Employee Shift Instance",
+        {"employee": employee, "work_date": work_date},
+        "name",
+    )
+    if name:
+        return name
+    rows = frappe.db.get_all(
+        "VN Employee Shift Instance",
+        filters={
+            "employee": employee,
+            "planned_start": ["<=", f"{work_date} 23:59:59"],
+            "planned_end": [">=", f"{work_date} 00:00:00"],
+        },
+        fields=["name"],
+        order_by="planned_start asc",
+        limit=1,
+    )
+    return rows[0]["name"] if rows else None
+
+
+def _recalc_ot_shift_instance(employee, work_date, shift_instance=None) -> None:
+    """Recompute the Work Session for an OT day (enqueue on ``short``; inline
+    fallback). Best-effort: a failure is logged but never raised, so it can never
+    abort an approve/reject. Mirrors the enqueue the check-in hook uses
+    (``attendance.on_employee_checkin_create``)."""
+    from gege_hr.gege_hr.utils import calc
+
+    si = shift_instance or _shift_instance_for_day(employee, work_date)
+    if not si:
+        return  # No shift yet → nothing to recompute; OT picked up later.
+    try:
+        frappe.enqueue(
+            "gege_hr.gege_hr.utils.calc.persist_work_session",
+            queue="short",
+            shift_instance_name=si,
+            calculate_mode="recalculate",
+        )
+        return
+    except Exception:
+        pass  # Enqueue unavailable (e.g. in tests) → compute inline below.
+    try:
+        calc.persist_work_session(si, calculate_mode="recalculate")
+    except Exception:
+        frappe.log_error(
+            title="OT recalc inline failed",
+            message=f"shift_instance={si} employee={employee} work_date={work_date}",
+        )
+
+
+def _after_ot_state_change(doc, *, from_state, to_state) -> None:
+    """Recompute the Work Session when a ``VN Overtime Request`` enters or leaves
+    the engine-active state set (Approved/Confirmed).
+
+    Called from ``approve_request`` / ``reject_request`` (and the OT cancel path)
+    so the Work Session's ``approved_overtime_hours`` stays in sync with the
+    request lifecycle the moment a manager decides — not only on the next
+    check-in. No-op for non-OT doctypes and for intermediate pending→pending
+    transitions. Always best-effort (plan T1 / BUG-1)."""
+    try:
+        if getattr(doc, "doctype", None) != "VN Overtime Request":
+            return
+        # Fire only when membership in the engine-active set (Approved/Confirmed)
+        # actually flips — an enter (Pending → Approved/Confirmed) or a leave
+        # (Approved/Confirmed → Rejected). A stay inside the set (e.g. Approved →
+        # Confirmed) or a pending→pending move changes nothing w.r.t. the engine,
+        # so no recalc is needed (idempotency + no redundant jobs).
+        in_before = from_state in _OT_ENGINE_STATES
+        in_after = to_state in _OT_ENGINE_STATES
+        if in_before == in_after:
+            return
+        _recalc_ot_shift_instance(
+            doc.get("employee"),
+            doc.get("work_date"),
+            doc.get("shift_instance"),
+        )
+    except Exception:
+        try:
+            frappe.log_error(
+                title="OT recalc on state change failed",
+                message=f"{doc.get('doctype')} {doc.get('name')} {from_state}->{to_state}",
+            )
+        except Exception:
+            pass
+
+
+def _after_correction_state_change(doc, *, from_state, to_state) -> None:
+    """Sync a ``VN Checkout Miss`` ticket when its Correction Request is approved.
+
+    BUG-5 fix (plans/checkout-miss-fix-plan.md §BUG-5): a correction request
+    opened from a checkout-miss explanation carries ``vn_checkout_miss``. When
+    it reaches ``Approved`` with a real ``requested_checkout_time``:
+
+      1. synthesise the real ``OUT`` Employee Checkin,
+      2. delete the auto-generated (fake) OUT at planned_end so payroll's
+         IN/OUT pairing doesn't double-count,
+      3. repoint the Work Session to the real OUT,
+      4. auto-waive the ticket (the real checkout is now evidenced).
+
+    No-op for non-correction docs / non-Approved transitions / CRs without a
+    ticket link. Always best-effort — never aborts the approval itself.
+    """
+    try:
+        if getattr(doc, "doctype", None) != "VN Attendance Correction Request":
+            return
+        if to_state != "Approved":
+            return
+        miss_name = doc.get("vn_checkout_miss")
+        if not miss_name:
+            return
+
+        miss = frappe.db.get_value(
+            "VN Checkout Miss",
+            miss_name,
+            ["name", "employee", "employee_name", "auto_checkout", "shift_instance", "status"],
+            as_dict=True,
+        )
+        if not miss:
+            return
+
+        real_out = doc.get("requested_checkout_time")
+        new_log_name = None
+        if real_out:
+            from frappe.utils import get_datetime
+
+            out_log = frappe.get_doc(
+                {
+                    "doctype": "Employee Checkin",
+                    "employee": miss.employee,
+                    "employee_name": miss.employee_name,
+                    "time": get_datetime(real_out),
+                    "log_type": "OUT",
+                    "vn_source_type": "Correction",
+                    "vn_auto_generated": 0,
+                    "vn_checkout_miss": miss_name,
+                }
+            )
+            out_log.insert(ignore_permissions=True)
+            new_log_name = out_log.name
+            frappe.db.set_value(
+                "VN Attendance Correction Request",
+                doc.get("name"),
+                "generated_checkin",
+                new_log_name,
+            )
+            # Replace the fake OUT at planned_end with the real one.
+            if miss.auto_checkout:
+                frappe.delete_doc(
+                    "Employee Checkin", miss.auto_checkout, ignore_permissions=True
+                )
+            if miss.shift_instance:
+                frappe.db.set_value(
+                    "VN Attendance Work Session",
+                    {"shift_instance": miss.shift_instance},
+                    {
+                        "actual_checkout": get_datetime(real_out),
+                        "last_checkout_log": new_log_name,
+                    },
+                    update_modified=False,
+                )
+
+        if (miss.status or "").strip() in ("Pending", "Explained", "Penalised"):
+            ticket = frappe.get_doc("VN Checkout Miss", miss_name)
+            ticket.status = "Waived"
+            ticket.penalty_waived = 1
+            if new_log_name:
+                ticket.auto_checkout = new_log_name
+            ticket.resolved_by = frappe.session.user
+            ticket.resolved_on = frappe.utils.now()
+            ticket.note = (
+                (ticket.note or "")
+                + f"\nTự động miễn phạt: CR {doc.get('name')} được duyệt"
+                + (f" (OUT thật {real_out})." if real_out else ".")
+            ).strip()
+            ticket.save(ignore_permissions=True)
+    except Exception:
+        try:
+            frappe.log_error(
+                title="checkout_miss correction sync failed",
+                message=f"{doc.get('name')} {from_state}->{to_state}",
+            )
+        except Exception:
+            pass
+
+
+def _delegate_leave(name: str, request_type: str, comment: str | None, *, approved: bool) -> dict:
+    """Leave Application approve/reject — delegated to the HRMS-aware leave handler.
+
+    Phase 0 of the inbox-centric migration
+    (plans/leave_approval_inbox_centric_plan.md §1.2): the unified inbox must
+    persist a leave decision through the SAME path the self-service leave
+    endpoints use — ``leave._approve_one`` / ``leave._reject_one`` — so HRMS
+    ``validate`` runs and the **Leave Ledger Entry is created** (leave balance
+    actually deducted). The previous raw ``frappe.db.set_value`` bypassed
+    ``on_submit`` and left the leave ledger stale.
+
+    The VN Approval Log row is still appended (matrix-history parity with the
+    OT/Correction/Advance path). Validation failures (insufficient balance,
+    blackout) are intentionally allowed to propagate so the inbox can surface
+    the real reason instead of silently no-op'ing (plan R2).
     """
     from gege_hr.gege_hr.api import leave as leave_api
 
     action = "Approve" if approved else "Reject"
     target_state = "Approved" if approved else "Rejected"
-    doc = frappe.get_doc("Leave Application", name)
-    current = doc.get("status")
+
+    # Capture the current state BEFORE the decision so the VN Approval Log records
+    # an accurate from→to transition. A direct db.get_value avoids a second
+    # Document.load() (and its read-perm check); authorization is already enforced
+    # by _user_can_act() in the calling endpoint.
+    try:
+        current = frappe.db.get_value("Leave Application", name, "status") or ""
+    except Exception:
+        current = ""
     if current == target_state:
         return {
             "name": name,
@@ -300,65 +539,144 @@ def _delegate_leave(name: str, request_type: str, comment: str | None, *, approv
             "status": target_state,
             "message": _("Đơn nghỉ phép {0} đã ở trạng thái {1}.").format(name, target_state),
         }
-    if current not in ("Open", "Draft"):
-        frappe.throw(
-            _("Đơn nghỉ đang ở trạng thái {0} — không thể xử lý.").format(current),
-            frappe.PermissionError,
+
+    # Persist via the single HRMS-aware source of truth: _approve_one / _reject_one
+    # set status + leave_approver, call _save_or_submit (which submits a Draft →
+    # creates the Leave Ledger Entry so the balance is deducted), then fire
+    # _after_leave_decision audit + notify. State/idempotency checks live there.
+    # Let exceptions propagate so the inbox sees real validation errors.
+    if approved:
+        result = leave_api._approve_one(name)
+    else:
+        result = leave_api._reject_one(name, comment)
+
+    # Matrix history (best-effort — never abort a successful decision over a log
+    # write; mirrors the _write_log guard in approve_request).
+    try:
+        _write_log(
+            transaction_type=request_type,
+            name=name,
+            action=action,
+            from_state=current,
+            to_state=target_state,
+            comment=comment,
+            actor=_user(),
+        )
+    except Exception:
+        frappe.log_error(
+            title="VN Approval Log write failed",
+            message=f"Leave Application {name} {action}",
         )
 
-    # Stamp the approver when the field exists, then persist the decision on the
-    # status column the inbox reads (db.set_value skips HRMS's recomputing validate).
-    updates = {"status": target_state}
-    try:
-        if approved and doc.meta.has_field("leave_approver"):
-            updates["leave_approver"] = _user()
-    except Exception:
-        pass
-    frappe.db.set_value("Leave Application", name, updates, update_modified=False)
-
-    # Best-effort: notify the employee + append a leave comment (never abort).
-    try:
-        leave_api._after_leave_decision(doc, approved=approved, reason=(comment or ""))
-    except Exception:
-        pass
-    try:
-        if not approved and comment:
-            doc.add_comment("Comment", _("Lý do từ chối: {0}").format(comment))
-    except Exception:
-        pass
-
-    _write_log(
-        transaction_type=request_type,
-        name=name,
-        action=action,
-        from_state=current,
-        to_state=target_state,
-        comment=comment,
-        actor=_user(),
-    )
+    # Normalise the return shape so the inbox keeps seeing request_type + message.
     return {
         "name": name,
         "request_type": request_type,
-        "status": target_state,
-        "message": _("Đã duyệt đơn nghỉ phép {0}.").format(name)
-        if approved
-        else _("Đã từ chối đơn nghỉ phép {0}.").format(name),
+        "status": result.get("status", target_state),
+        "message": result.get("message"),
+    }
+
+
+def _delegate_leave_cancellation(
+    name: str, request_type: str, comment: str | None, *, approved: bool
+) -> dict:
+    """Leave *cancellation* approve/reject — delegated to the HRMS-aware handler.
+
+    Phase 2A of the inbox-centric migration: a ``VN Leave Cancellation Request``
+    is approved/rejected through ``leave._approve_cancellation_one`` /
+    ``leave._reject_cancellation_one`` (the path that cancels the linked Leave
+    Application and restores the leave balance). Mirrors ``_delegate_leave``: a
+    VN Approval Log row is still appended; validation failures propagate so the
+    inbox can surface the real reason (plan R2).
+    """
+    from gege_hr.gege_hr.api import leave as leave_api
+
+    action = "Approve" if approved else "Reject"
+    target_state = "Approved" if approved else "Rejected"
+
+    try:
+        current = (
+            frappe.db.get_value("VN Leave Cancellation Request", name, "workflow_state") or ""
+        )
+    except Exception:
+        current = ""
+    if current == target_state:
+        return {
+            "name": name,
+            "request_type": request_type,
+            "status": target_state,
+            "message": _("Yêu cầu hủy {0} đã ở trạng thái {1}.").format(name, target_state),
+        }
+
+    if approved:
+        result = leave_api._approve_cancellation_one(name)
+    else:
+        result = leave_api._reject_cancellation_one(name, comment)
+
+    try:
+        _write_log(
+            transaction_type=request_type,
+            name=name,
+            action=action,
+            from_state=current,
+            to_state=target_state,
+            comment=comment,
+            actor=_user(),
+        )
+    except Exception:
+        frappe.log_error(
+            title="VN Approval Log write failed",
+            message=f"Leave Cancellation {name} {action}",
+        )
+
+    return {
+        "name": name,
+        "request_type": request_type,
+        "status": result.get("status", target_state),
+        "message": result.get("message"),
     }
 
 
 # --------------------------------------------------------------------------- #
 # Endpoints
 # --------------------------------------------------------------------------- #
+def _matches_search(row: dict, search: str | None) -> bool:
+    """Server-side free-text match across a request row's text fields.
+
+    Applied after the rows are fetched — the searchable columns differ per
+    transaction DocType, so we match on the loaded row rather than risk an
+    ``or_filters`` "column does not exist" error. DNA §6.6 D — HR-BL-07.
+    """
+    q = (search or "").strip().lower()
+    if not q:
+        return True
+    for key in ("employee", "employee_name", "reason", "description", "name", "department"):
+        val = row.get(key)
+        if val is not None and q in str(val).lower():
+            return True
+    return False
+
+
 @frappe.whitelist()
 def get_pending_approvals(
     approver: str | None = None,
     request_type: str | None = None,
     date: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    search: str | None = None,
 ) -> dict:
     """Plan §10.6 — pending requests the approver can act on, grouped by type.
 
-    Returns ``{ groups: [{ request_type, label, count, requests: [] }] }``. An
-    empty ``request_type`` returns every supported type.
+    ``from_date``/``to_date`` narrow each request type on its own ``date_field``
+    (``>= from`` / ``<= to``) — applied server-side as two LIST filters so both
+    bounds can coexist on the same field (a dict cannot hold two keys —
+    DNA §6.6 B). ``date`` is kept for backward-compat (single ``>=``).
+    ``search`` OR-matches a free-text query across each request's text fields
+    (employee / employee_name / reason / description / name / department),
+    applied server-side (DNA §6.6 D, HR-BL-07). Returns
+    ``{ groups: [{ request_type, label, count, requests: [] }] }``. An empty
+    ``request_type`` returns every supported type.
     """
     user = _resolve_approver(approver)
     types = [request_type] if request_type else rules.supported_types()
@@ -368,16 +686,27 @@ def get_pending_approvals(
         cfg = rules.TRANSACTION_CONFIG.get(ttype)
         if not cfg:
             continue
-        filters = {cfg["status_field"]: ["in", cfg["pending_states"]]}
+        # LIST filters (not dict) so two bounds on the same date_field can
+        # coexist — DNA §6.6 B (HR-BL-approvals-date).
+        filters = [[cfg["status_field"], "in", cfg["pending_states"]]]
+        date_field = cfg["date_field"]
         if date:
-            filters[cfg["date_field"]] = [">=", date]
+            filters.append([date_field, ">=", date])
+        if from_date:
+            filters.append([date_field, ">=", from_date])
+        if to_date:
+            filters.append([date_field, "<=", to_date])
         try:
             rows = frappe.db.get_all(cfg["doctype"], filters=filters, fields=_row_fields(ttype))
         except Exception:
             rows = []
 
-        # Keep only the rows the approver may actually act on.
-        actionable = [_normalise_row(r, ttype, user) for r in rows if _user_can_act(r, ttype, user)]
+        # Keep only the rows the approver may actually act on (and match search).
+        actionable = [
+            _normalise_row(r, ttype, user)
+            for r in rows
+            if _user_can_act(r, ttype, user) and _matches_search(r, search)
+        ]
         if not actionable:
             continue
         groups.append(
@@ -407,14 +736,20 @@ def approve_request(
     cfg = _config(request_type)
     user = _user()
 
+    # Proper Frappe flow: load via get_doc — the approver's role MUST grant read
+    # on the request DocType. We no longer use the raw db.get_value bypass (that
+    # skipped the read-permission check). If a 403 occurs, grant the role
+    # read/write on the DocType via Role Permissions Manager — do NOT bypass in
+    # code, or validate/on_update and the request's own audit/hooks won't run.
     doc = frappe.get_doc(cfg["doctype"], name)
+    _data = doc.as_dict()
     current = doc.get(cfg["status_field"])
     if current not in cfg["pending_states"]:
         frappe.throw(
             _("Yêu cầu không ở trạng thái chờ duyệt ({0}).").format(current),
             frappe.PermissionError,
         )
-    if not _user_can_act(doc.as_dict(), request_type, user):
+    if not _user_can_act(_data, request_type, user):
         frappe.throw(
             _("Bạn không phải người duyệt ở bước này."),
             frappe.PermissionError,
@@ -425,17 +760,35 @@ def approve_request(
     # submit/cancel correctly (the matrix step states don't apply here).
     if request_type == "Leave Application":
         return _delegate_leave(name, request_type, comment, approved=True)
+    if request_type == "Leave Cancellation Request":
+        return _delegate_leave_cancellation(name, request_type, comment, approved=True)
 
     # Resolve the next state from the matrix (→ Approved when last step done).
-    matrices = _load_matrices(request_type, doc.get("company"))
-    attrs = _employee_attrs(doc.get("employee"))
+    matrices = _load_matrices(request_type, _data.get("company"))
+    attrs = _employee_attrs(_data.get("employee"))
     matrix = rules.pick_matrix(matrices, attrs) if matrices else None
     next_state = (
         rules.next_state_after(current, matrix.get("steps") or []) if matrix else cfg["approve_state"]
     )
 
+    # Proper Frappe flow: set the workflow_state then save() — this runs the
+    # DocType's validate + on_update (so the request's own hooks/audit and any
+    # downstream side-effects fire) and respects the approver's write permission.
+    # We no longer raw-write the status column (that skipped validate/on_update).
+    # If a 403 occurs, grant the approver role write on the DocType.
     doc.set(cfg["status_field"], next_state)
     doc.save()
+    _data[cfg["status_field"]] = next_state
+
+    # OT only: recompute the Work Session the moment the request enters the
+    # engine-active set (Approved/Confirmed) so approved_overtime_hours stays in
+    # sync immediately (BUG-1 fix, plan T1). Best-effort — never aborts.
+    _after_ot_state_change(doc, from_state=current, to_state=next_state)
+
+    # Correction only: when a CR opened from a checkout-miss explanation is
+    # finally Approved, replace the fake OUT with the real one and auto-waive
+    # the ticket (BUG-5 fix). Best-effort — never aborts.
+    _after_correction_state_change(doc, from_state=current, to_state=next_state)
 
     _write_log(
         transaction_type=request_type,
@@ -458,7 +811,7 @@ def approve_request(
         notify.push_request_outcome(
             transaction_type=request_type,
             name=name,
-            employee=doc.get("employee"),
+            employee=_data.get("employee"),
             outcome="approved",
             state=next_state,
         )
@@ -470,7 +823,7 @@ def approve_request(
     if audit_type:
         audit_api.log(
             audit_type,
-            doc=doc.as_dict(),
+            doc=_data,
             description=f"{current} → {next_state}",
             old_value=current,
             new_value=next_state,
@@ -499,14 +852,17 @@ def reject_request(
     cfg = _config(request_type)
     user = _user()
 
+    # Proper Frappe flow: load via get_doc (read permission checked). See
+    # approve_request — no raw db.get_value bypass.
     doc = frappe.get_doc(cfg["doctype"], name)
+    _data = doc.as_dict()
     current = doc.get(cfg["status_field"])
     if current not in cfg["pending_states"]:
         frappe.throw(
             _("Yêu cầu không ở trạng thái chờ duyệt ({0}).").format(current),
             frappe.PermissionError,
         )
-    if not _user_can_act(doc.as_dict(), request_type, user):
+    if not _user_can_act(_data, request_type, user):
         frappe.throw(
             _("Bạn không phải người duyệt ở bước này."),
             frappe.PermissionError,
@@ -515,9 +871,18 @@ def reject_request(
     # Leave Application: delegate to the HRMS-aware reject (see approve_request).
     if request_type == "Leave Application":
         return _delegate_leave(name, request_type, comment, approved=False)
+    if request_type == "Leave Cancellation Request":
+        return _delegate_leave_cancellation(name, request_type, comment, approved=False)
 
     doc.set(cfg["status_field"], cfg["reject_state"])
+    # Proper Frappe flow: save() runs validate + on_update (the request's own
+    # hooks/audit fire) and respects the approver's write permission. No
+    # ignore_permissions bypass — grant the role write on the DocType if 403.
     doc.save()
+
+    # OT only: if the request was engine-active (Approved/Confirmed) before the
+    # reject, recompute the Work Session so the OT is removed (BUG-1 fix, T1).
+    _after_ot_state_change(doc, from_state=current, to_state=cfg["reject_state"])
 
     _write_log(
         transaction_type=request_type,

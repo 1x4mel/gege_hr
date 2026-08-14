@@ -339,12 +339,20 @@ def _hours_per_day(emp: str) -> float:
 # --------------------------------------------------------------------------- #
 @frappe.whitelist()
 def apply(**kwargs) -> dict:
-    """Plan §10.5 — create (and submit) a Leave Application.
+    """Plan §10.5 — create a Leave Application as a **Draft** (pending approval).
 
     Accepts: ``employee``, ``leave_type``, ``from_date``, ``to_date``,
     ``half_day``, ``half_day_date``, ``description`` (optional ``follow_up``
     / ``attach``). Validation (date sanity, balance) runs in Frappe's Leave
     Application ``validate``.
+
+    The application is created as a Draft (``docstatus=0``, ``status='Open'``)
+    so it sits in the approval pipeline PENDING. Approval is then the proper
+    HRMS action ``doc.submit()`` (see :func:`_approve_one`), which runs
+    ``on_submit`` → creates the **Leave Ledger Entry** (balance deducted) +
+    sets ``status='Approved'`` + fires the audit hooks. (Previously this
+    submitted on apply, leaving submitted+Open docs that Frappe cannot
+    re-save/submit — making proper approval impossible.)
 
     Returns ``{ name, status, message }``.
     """
@@ -381,17 +389,22 @@ def apply(**kwargs) -> dict:
     if kwargs.get("attach"):
         doc.attach = kwargs["attach"]
 
+    # Designate the approver so HRMS shares the doc with them on insert (HRMS
+    # ``share_doc_with_approver`` runs on save) — the approver can then submit
+    # (approve) via the proper Frappe flow without any ignore_permissions bypass.
+    try:
+        from hrms.hr.doctype.leave_application.leave_application import get_leave_approver
+
+        doc.leave_approver = get_leave_approver(emp)
+    except Exception:
+        doc.leave_approver = frappe.db.get_value("Employee", emp, "leave_approver") or None
+
     doc.insert()
     _stamp_blackout_decision(doc, leave_type=leave_type, from_date=from_date, to_date=to_date, employee=emp)
-    status = doc.status
-    # Submit so the application enters the approval pipeline (status "Open").
-    # Best-effort: stay as Draft if the site disallows self-submit.
-    try:
-        doc.submit()
-        status = doc.status or "Open"
-    except Exception:
-        frappe.log_error(title="Leave Application submit failed")
-        status = doc.status or "Open"
+    # Keep the application as a Draft (docstatus=0, status 'Open') so it is
+    # PENDING approval. Approval = doc.submit() in _approve_one (proper HRMS:
+    # on_submit creates the Leave Ledger Entry + sets Approved + audit logs).
+    status = doc.status or "Open"
 
     audit_api.log("Leave Submit", doc=doc.as_dict(), description=f"status → {status}")
 
@@ -474,6 +487,26 @@ def request_cancellation(name: str | None = None, reason: str | None = None) -> 
     cr.insert()
     send_for_approval(cr)
     cancellation_request = cr.name
+
+    # Share the cancellation request with the employee's approver so they can act
+    # on it via the unified inbox (proper Frappe DocShare — the owner shares; the
+    # approver then has read/write). Mirrors HRMS ``share_doc_with_approver`` and
+    # avoids the doc-level permission gap (HR Manager role grant alone is not
+    # sufficient at doc level for this doctype).
+    try:
+        from hrms.hr.doctype.leave_application.leave_application import get_leave_approver
+
+        approver = get_leave_approver(cr.employee)
+        if approver and not frappe.db.exists(
+            "DocShare",
+            {"share_doctype": "VN Leave Cancellation Request", "share_name": cr.name, "user": approver},
+        ):
+            frappe.share.add_docshare(
+                "VN Leave Cancellation Request", cr.name, approver,
+                read=1, write=1, submit=1, share=1,
+            )
+    except Exception:
+        frappe.log_error(title="share cancellation request with approver failed")
 
     # Back-link + flag on the Leave Application when the custom fields exist.
     _stamp_cancellation_link(name, cancellation_request, reason)
@@ -828,6 +861,9 @@ def _approve_one(name: str) -> dict:
 
     doc.status = "Approved"
     try:
+        # The approver is the session user; ``leave.apply`` already designated +
+        # HRMS-shared the doc with the approver at creation, so the submit's
+        # permission check passes (proper Frappe — no ignore_permissions).
         doc.leave_approver = frappe.session.user
     except Exception:
         pass
@@ -1015,21 +1051,25 @@ def cancellation_options() -> dict:
 
 
 def _save_or_submit(doc) -> None:
-    """Persist a leave decision: submit a Draft, otherwise save.
+    """Persist a leave decision through the **proper Frappe flow** (no bypass).
 
-    Wrapped so a Frappe HR version that disallows re-submit / has stricter
-    validation still records the status change rather than aborting the inbox
-    action; any failure is re-raised so the endpoint surfaces a clear error.
+    * ``docstatus=0`` (Draft) → ``doc.submit()`` — runs ``validate`` + ``on_submit``:
+      HRMS creates the **Leave Ledger Entry** (balance deducted) AND fires the
+      hooks that write the audit trail (Activity/VN Audit Event). ``submit`` also
+      derives ``status='Approved'`` correctly.
+    * ``docstatus>=1`` (already submitted) → ``doc.save()`` — runs ``validate``.
+
+    We deliberately do NOT use ``ignore_permissions`` or raw ``db.set_value``:
+    those skip ``validate``/``on_submit`` so the ledger + audit logs would never
+    be written, and the action would not be recorded against a properly
+    permission-checked approver. If a 403 occurs the correct fix is to grant the
+    approver's role the write/submit permission on Leave Application (Role
+    Permissions Manager) — that keeps the permission audit trail intact. Any
+    failure is re-raised so the endpoint surfaces the real error.
     """
     if getattr(doc, "docstatus", 0) == 0:
-        try:
-            doc.submit()
-            return
-        except Exception:
-            # Fall through to a plain save — some sites configure leave approval
-            # without the submit flow; the status flag is what the inbox reads.
-            doc.db_update()
-            return
+        doc.submit()
+        return
     doc.save()
 
 

@@ -68,6 +68,14 @@ TRANSACTION_CONFIG: dict[str, dict[str, Any]] = {
         "approve_state": APPROVED,
         "reject_state": REJECTED,
     },
+    "Leave Cancellation Request": {
+        "doctype": "VN Leave Cancellation Request",
+        "status_field": "workflow_state",
+        "date_field": "creation",
+        "pending_states": [PENDING_MANAGER, PENDING_HR],
+        "approve_state": APPROVED,
+        "reject_state": REJECTED,
+    },
 }
 
 # Human labels per type for the inbox grouping (FE falls back to its own map,
@@ -77,6 +85,7 @@ TYPE_LABELS = {
     "Overtime Request": "Tăng ca",
     "Correction Request": "Điều chỉnh công",
     "Salary Advance Request": "Tạm ứng lương",
+    "Leave Cancellation Request": "Hủy đơn nghỉ",
 }
 
 # ``approver_type`` → the Frappe role that implies it (for HR-style steps).

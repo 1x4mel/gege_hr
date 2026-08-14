@@ -28,6 +28,7 @@ from frappe.utils import getdate
 
 from gege_hr.gege_hr.api import audit as audit_api
 from gege_hr.gege_hr.utils import employee as emp_utils
+from gege_hr.gege_hr.utils import pagination
 from gege_hr.gege_hr.utils.request_workflow import send_for_approval
 
 DOCTYPE = "VN Salary Advance Request"
@@ -162,16 +163,38 @@ def _preview_eligibility(employee: str, requested_amount) -> dict:
 # --------------------------------------------------------------------------- #
 # Endpoints
 # --------------------------------------------------------------------------- #
+def _filter_rows(rows: list[dict], search: str | None, fields: tuple[str, ...]) -> list[dict]:
+    """Server-side free-text filter across the given row fields (DNA §6.6 D).
+
+    Applied after the rows are fetched so it never risks an ``or_filters``
+    "column does not exist" error on a per-DocType list.
+    """
+    q = (search or "").strip().lower()
+    if not q:
+        return rows
+    return [r for r in rows if any(q in str(r.get(k) or "").lower() for k in fields)]
+
+
 @frappe.whitelist()
 def my_advance_requests(
     employee: str | None = None,
     from_date: str | None = None,
     to_date: str | None = None,
-) -> list[dict]:
+    search: str | None = None,
+    page: int = 1,
+    page_size: int = 0,
+) -> list[dict] | dict:
     """Plan §10.5 — the caller's advance requests, optionally narrowed by date.
 
-    Managers (HR Manager/System Manager) may pass any ``employee``; a plain
-    Employee is scoped to their own record.
+    ``search`` OR-matches a free-text query across the row's text fields
+    (name / reason / posting_date / employee / employee_name / status),
+    applied server-side (DNA §6.6 D, HR-BL-08). Managers (HR Manager/System
+    Manager) may pass any ``employee``; a plain Employee is scoped to own.
+
+    Pagination is **opt-in** (DNA §6.6 A): pass ``page`` + a positive
+    ``page_size`` to receive ``{"data": [...], "total": int, "summary": None}``
+    (post-query filter → ``total`` is the filtered list length); without
+    ``page_size`` the legacy bare-list return is preserved.
     """
     emp = _resolve(employee)
     _assert_own(emp)
@@ -186,7 +209,12 @@ def my_advance_requests(
         fields=_LIST_FIELDS,
         order_by="posting_date desc, creation desc",
     )
-    return rows
+    filtered = _filter_rows(
+        rows,
+        search,
+        ("name", "reason", "posting_date", "employee", "employee_name", "status"),
+    )
+    return pagination.paginate_filtered(filtered, page=page, page_size=page_size)
 
 
 @frappe.whitelist()
@@ -271,7 +299,13 @@ def submit_advance_request(**kwargs) -> dict:
     if kwargs.get("payroll_period"):
         doc.payroll_period = kwargs["payroll_period"]
 
-    doc.insert()
+    # insert(ignore_permissions=True): the endpoint already authorizes via
+    # _assert_own() (an employee may only submit for themselves), so the standard
+    # doctype create-permission must be bypassed — otherwise an Employee-role
+    # user gets a 403 and can never apply for a salary advance. Matches the
+    # sibling self-service endpoints (attendance.submit_correction_request,
+    # overtime.submit_overtime_request) which already pass ignore_permissions.
+    doc.insert(ignore_permissions=True)
     # Move into the approval pipeline (Draft → Pending Manager). Best-effort:
     # stays Draft if the workflow isn't seeded yet.
     send_for_approval(doc)

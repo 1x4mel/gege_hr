@@ -129,6 +129,43 @@ def test_compute_line_salary_advance_deduction():
     assert line["net_pay"] == 8_000_000
 
 
+# --------------------------------------------------------------------------- #
+# Checkout-miss penalty (GĐ2 — folds into total_deduction / net_pay)
+# --------------------------------------------------------------------------- #
+def test_compute_line_checkout_miss_penalty_added_to_deduction():
+    # B9: config checkout_miss_penalty increases total_deduction + reduces net.
+    agg = P.aggregate_work_sessions([{"payable_day": 26.0, "regular_hours": 208.0}])
+    line_base = P.compute_line(agg, base_salary=10_000_000, config=P.default_config())
+    cfg = P.default_config()
+    cfg["checkout_miss_penalty"] = 50_000
+    line = P.compute_line(agg, base_salary=10_000_000, config=cfg)
+    assert line["checkout_miss_penalty"] == 50_000
+    assert line["total_deduction"] == line_base["total_deduction"] + 50_000
+    assert line["net_pay"] == line_base["net_pay"] - 50_000
+
+
+def test_compute_line_checkout_miss_penalty_default_zero():
+    # B10: absent config → 0, total_deduction unchanged.
+    agg = P.aggregate_work_sessions([{"payable_day": 26.0, "regular_hours": 208.0}])
+    line = P.compute_line(agg, base_salary=10_000_000)
+    assert line["checkout_miss_penalty"] == 0
+    assert line["total_deduction"] == 0
+
+
+def test_compute_hourly_line_checkout_miss_penalty():
+    # Active payroll path: penalty folded into total_deduction + net.
+    base = P.compute_hourly_line({1.0: 160.0}, hourly_rate=50_000, deduction_rates={"BHXH": 8})
+    out = P.compute_hourly_line(
+        {1.0: 160.0},
+        hourly_rate=50_000,
+        deduction_rates={"BHXH": 8},
+        checkout_miss_penalty=50_000,
+    )
+    assert out["checkout_miss_penalty"] == 50_000
+    assert out["total_deduction"] == base["total_deduction"] + 50_000
+    assert out["net_pay"] == base["net_pay"] - 50_000
+
+
 def test_compute_line_net_never_negative_clamped():
     # Huge deduction beyond gross → net goes negative (we do NOT clamp; the
     # caller decides policy). Verify the arithmetic is honest.
@@ -373,3 +410,31 @@ def test_loaders_safe_without_frappe(monkeypatch):
     assert P.load_component_map("C1") == {}
     assert P.resolve_base_salary("EMP-1") == 0.0
     assert P.employee_advance_deductions("C1", ["EMP-1"], "2026-01-01", "2026-01-31") == {}
+    assert P.load_checkout_miss_penalty("EMP-1", "2026-01-01", "2026-01-31") == 0.0
+
+
+def test_load_checkout_miss_penalty_sums_penalised(fake_frappe):
+    fake_frappe.db.register(
+        "VN Checkout Miss",
+        [
+            {"employee": "EMP-1", "status": "Penalised", "penalty_waived": 0, "docstatus": 1,
+             "work_date": "2026-06-05", "penalty_amount": 100_000},
+            {"employee": "EMP-1", "status": "Penalised", "penalty_waived": 0, "docstatus": 1,
+             "work_date": "2026-06-20", "penalty_amount": 100_000},
+            # excluded: waived
+            {"employee": "EMP-1", "status": "Penalised", "penalty_waived": 1, "docstatus": 1,
+             "work_date": "2026-06-10", "penalty_amount": 100_000},
+            # excluded: still Pending
+            {"employee": "EMP-1", "status": "Pending", "penalty_waived": 0, "docstatus": 1,
+             "work_date": "2026-06-12", "penalty_amount": 100_000},
+            # excluded: other employee
+            {"employee": "EMP-2", "status": "Penalised", "penalty_waived": 0, "docstatus": 1,
+             "work_date": "2026-06-12", "penalty_amount": 100_000},
+        ],
+    )
+    P.frappe = fake_frappe
+    try:
+        total = P.load_checkout_miss_penalty("EMP-1", "2026-06-01", "2026-06-30")
+        assert total == 200_000.0
+    finally:
+        P.frappe = None

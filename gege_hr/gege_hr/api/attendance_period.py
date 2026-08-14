@@ -403,7 +403,13 @@ def confirm_all_lines(period: str) -> dict:
 
 @frappe.whitelist()
 def lock_period(name: str, reason: str | None = None) -> dict:
-    """Lock a period — every line must be Confirmed/Adjusted (§16)."""
+    """Lock a period — every line must be Confirmed/Adjusted (§16).
+
+    SPA-first: the portal has no per-line confirm button, so remaining
+    ``Draft`` lines are auto-confirmed here (audited) before the gate —
+    ``confirm_line`` / ``confirm_all_lines`` remain available for the explicit
+    review flow.
+    """
     _assert_closer()
     period = _get_period(name)
     if period.status == "Locked":
@@ -416,6 +422,16 @@ def lock_period(name: str, reason: str | None = None) -> dict:
         filters={"attendance_period": name, "docstatus": ["<", 2]},
         fields=["name", "status"],
     )
+    if not lines:
+        frappe.throw(_("Kỳ chưa sinh dòng công nào, không thể khoá."))
+    drafts = [ln["name"] for ln in lines if ln["status"] == "Draft"]
+    if drafts:
+        confirm_all_lines(name)
+        lines = frappe.db.get_all(
+            LINE_DOCTYPE,
+            filters={"attendance_period": name, "docstatus": ["<", 2]},
+            fields=["name", "status"],
+        )
     if not ap.can_lock(lines):
         frappe.throw(_("Phải xác nhận tất cả dòng công trước khi khoá."))
 
@@ -436,19 +452,105 @@ def lock_period(name: str, reason: str | None = None) -> dict:
         old_value=old_status,
         new_value="Locked",
     )
-    return {"name": name, "status": "Locked", "message": _("Đã khoá kỳ công.")}
+
+    # Auto-create the Draft payroll review period (plan §10.8 + FE contract:
+    # /hr/payroll/periods is a read-only list — "Khi HR chốt công tháng, kỳ
+    # lương sẽ xuất hiện tại đây"). Reuse an existing review for the month;
+    # a failure here must never block the lock itself.
+    payroll_review = None
+    try:
+        from gege_hr.gege_hr.api import payroll as payroll_api
+
+        exists = frappe.db.exists(
+            "VN Payroll Review Period",
+            {
+                "company": period.company,
+                "payroll_month": period.payroll_month,
+                "payroll_year": period.payroll_year,
+                "docstatus": ["<", 2],
+            },
+        )
+        if not exists:
+            rev = payroll_api.create_payroll_review(
+                company=period.company,
+                payroll_month=period.payroll_month,
+                payroll_year=period.payroll_year,
+                from_date=period.from_date,
+                to_date=period.to_date,
+                attendance_period=name,
+            )
+            payroll_review = rev.get("name") if isinstance(rev, dict) else None
+        else:
+            payroll_review = exists
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "lock_period: auto payroll review")
+
+    msg = _("Đã khoá kỳ công.")
+    if payroll_review:
+        msg = _("Đã khoá kỳ công và tạo kỳ lương {0}.").format(payroll_review)
+    return {
+        "name": name,
+        "status": "Locked",
+        "payroll_review": payroll_review,
+        "message": msg,
+    }
 
 
 @frappe.whitelist()
 def unlock_period(name: str, reason: str | None = None) -> dict:
-    """Unlock a locked period — HR Manager only (§16). Creates a Lock Log."""
+    """Unlock a locked period — HR Manager only (§16). Creates a Lock Log.
+
+    Referential guard: a payroll review derived from this period must be
+    deleted first — unlocking would let the underlying attendance data drift
+    away from an already-calculated payroll (delete it on the Kỳ lương page,
+    then unlock, then re-lock to get a fresh review).
+    """
     _assert_closer()
     period = _get_period(name)
     if period.status != "Locked":
         frappe.throw(_("Chỉ kỳ đang khoá mới có thể mở khoá."))
+
+    dep = frappe.db.get_value(
+        "VN Payroll Review Period",
+        {"attendance_period": name, "docstatus": ["<", 2]},
+        ["name", "status"],
+        as_dict=True,
+    )
+    if not dep:
+        dep = frappe.db.get_value(
+            "VN Payroll Review Period",
+            {
+                "company": period.company,
+                "payroll_month": period.payroll_month,
+                "payroll_year": period.payroll_year,
+                "docstatus": ["<", 2],
+            },
+            ["name", "status"],
+            as_dict=True,
+        )
+    if dep:
+        frappe.throw(
+            _(
+                "Kỳ lương {0} ({1}) đang phụ thuộc kỳ công này. "
+                "Hãy xoá kỳ lương đó ở trang Kỳ lương trước khi mở khóa."
+            ).format(dep.name, dep.status)
+        )
+
     old_status = period.status
     period.status = "Unlocked"
     period.save()
+
+    # Inverse of the lock step: lock marks every line ``Locked``, so unlock
+    # restores them to ``Confirmed`` — otherwise the period can never be
+    # re-locked (``can_lock`` only accepts Confirmed/Adjusted).
+    unlocked_lines = frappe.db.get_all(
+        LINE_DOCTYPE,
+        filters={"attendance_period": name, "status": "Locked", "docstatus": ["<", 2]},
+        pluck="name",
+    )
+    for ln in unlocked_lines:
+        frappe.db.set_value(LINE_DOCTYPE, ln, "status", "Confirmed", update_modified=False)
+
     _write_lock_log(name, "Unlock", old_status, "Unlocked", reason)
     audit_api.log(
         "Monthly Unlock",

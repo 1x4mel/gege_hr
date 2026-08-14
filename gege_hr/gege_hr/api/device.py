@@ -36,6 +36,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from gege_hr.gege_hr.utils import employee as emp_utils
+from gege_hr.gege_hr.utils import pagination
 from gege_hr.gege_hr.utils import tz as tz_utils
 
 
@@ -342,14 +343,91 @@ def _enrich(devices: list[dict]) -> list[dict]:
     return out
 
 
+# Broad-search fields for the device list (DNA §6.6 D — OR-combined free text).
+_DEVICE_SEARCH_FIELDS = (
+    "name",
+    "device_name",
+    "device_code",
+    "device_type",
+    "work_location",
+    "company",
+    "ip_address",
+)
+
+
+def _device_search_or_filters(search: str | None) -> list | None:
+    """Frappe ``or_filters`` (list form) for a free-text device search, or None."""
+    q = (search or "").strip()
+    if not q:
+        return None
+    like = f"%{q}%"
+    return [[field, "like", like] for field in _DEVICE_SEARCH_FIELDS]
+
+
+_DEVICE_SUMMARY_FIELDS = ["name", "is_active"]
+
+
+def _device_summary(light_rows) -> dict:
+    """Aggregate counts over the full filtered set (SPA summary tiles)."""
+    active = sum(1 for r in light_rows or [] if int(r.get("is_active") or 0) == 1)
+    return {"total": len(light_rows or []), "active": active}
+
+
 @frappe_whitelist()
-def list_devices() -> list[dict]:
-    """GET device.list_devices — device directory + last-sync status (HR-only)."""
+def list_devices(
+    search: str | None = None,
+    page: int = 1,
+    page_size: int = 0,
+) -> list[dict] | dict:
+    """GET device.list_devices — device directory + last-sync status (HR-only).
+
+    ``search`` performs a server-side broad LIKE across the device's text fields
+    (DNA §6.6 D, HR-BL device) so the SPA broad-search box no longer re-filters
+    an already-loaded list client-side.
+
+    Pagination is **opt-in** (DNA §6.6 A): pass ``page`` + a positive
+    ``page_size`` to receive ``{"data": [...], "total": int, "summary": {...}}``
+    where ``total`` is counted via ``get_all().len`` (``db.count`` ignores
+    ``or_filters``) and ``summary`` aggregates the *full* filtered set so the SPA
+    summary tiles stay correct under pagination. Without ``page_size`` the legacy
+    bare-list return is preserved.
+    """
     import frappe
 
     _assert_hr_manager()
+    or_filters = _device_search_or_filters(search)
+
+    if page_size:
+        summary = _device_summary(
+            pagination.all_rows(
+                "VN Attendance Device",
+                fields=_DEVICE_SUMMARY_FIELDS,
+                or_filters=or_filters,
+            )
+        )
+        page = max(1, pagination.as_int(page, 1))
+        page_size = max(1, pagination.as_int(page_size, 20))
+        start = (page - 1) * page_size
+        try:
+            rows = (
+                frappe.db.get_all(
+                    "VN Attendance Device",
+                    or_filters=or_filters,
+                    fields=_device_fields(),
+                    order_by="is_active desc, modified desc",
+                    limit_start=start,
+                    limit_page_length=page_size,
+                )
+                or []
+            )
+        except Exception:
+            frappe.log_error(title="device.list_devices failed")
+            return {"data": [], "total": summary["total"], "summary": summary}
+        return {"data": _enrich(rows), "total": summary["total"], "summary": summary}
+
     devices = frappe.db.get_all(
         "VN Attendance Device",
+        or_filters=or_filters,
         fields=_device_fields(),
         order_by="is_active desc, modified desc",
     )
@@ -624,6 +702,37 @@ def _process_raw_log(raw_log_name: str) -> str | None:
     )
     if not raw or not raw.get("employee") or not raw.get("is_valid"):
         return None
+
+    # Lock guard: a punch inside a Locked monthly period must not create a new
+    # checkin — the closed attendance would silently drift away from its locked
+    # lines. Mark the raw log Skipped so HR can see (and re-process after an
+    # unlock) instead of failing the whole sync batch.
+    try:
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        from gege_hr.gege_hr.api.attendance import _is_date_locked
+
+        _portal_date = (
+            _dt.strptime(str(raw["log_time"])[:19], "%Y-%m-%d %H:%M:%S")
+            .replace(tzinfo=ZoneInfo("UTC"))
+            .astimezone(ZoneInfo("Asia/Ho_Chi_Minh"))
+            .date()
+        )
+        if _is_date_locked(_portal_date.isoformat()):
+            frappe.db.set_value(
+                "VN Attendance Raw Log",
+                raw_log_name,
+                {
+                    "processing_status": "Skipped",
+                    "validation_message": "Ngày {} thuộc kỳ công đã khoá.".format(
+                        _portal_date.isoformat()
+                    ),
+                },
+            )
+            return None
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "device lock guard")
 
     device_code = None
     if raw.get("device"):

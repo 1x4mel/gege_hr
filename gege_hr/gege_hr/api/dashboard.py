@@ -281,11 +281,122 @@ def _require_hr_user() -> None:
         )
 
 
+# Broad-search fields for the per-employee report (DNA §6.6 A — Law #3):
+# the free-text query OR-matches any of these identifying columns, INCLUDING
+# numeric columns (gõ số → khớp giá trị cột đó, e.g. "5" match present_days=5/15).
+_REPORT_SEARCH_KEYS = (
+    "employee",
+    "employee_name",
+    "department",
+    "branch",
+    "company",
+    # numeric columns also match the free-text query (DNA §6.6 A)
+    "present_days",
+    "absent_days",
+    "leave_days",
+    "overtime_hours",
+    "late_minutes",
+    "payable_days",
+)
+
+
+def _filter_report_employees(employees: list[dict], search: str | None) -> list[dict]:
+    """Server-side free-text filter across a report row's text + numeric fields.
+
+    Applied after the report is built so the returned ``employees`` + ``totals``
+    always agree with the visible (filtered) rows.
+    """
+    q = (search or "").strip().lower()
+    if not q:
+        return employees
+    out: list[dict] = []
+    for row in employees or []:
+        for key in _REPORT_SEARCH_KEYS:
+            val = row.get(key)
+            if val is not None and q in str(val).lower():
+                out.append(row)
+                break
+    return out
+
+
+def _parse_float(value):
+    """Best-effort float parse; returns ``None`` for empty/invalid input."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+# Numeric columns that support a popover min/max range filter (DNA §6.6 B — Law #2).
+_REPORT_RANGE_KEYS = (
+    "present_days",
+    "absent_days",
+    "leave_days",
+    "overtime_hours",
+    "late_minutes",
+    "payable_days",
+)
+
+
+def _filter_report_ranges(employees: list[dict], ranges: dict) -> list[dict]:
+    """Apply server-side numeric min/max ranges to the built report rows.
+
+    ``ranges`` maps a numeric column name to a ``(min, max)`` tuple where either
+    bound may be ``None`` (open-ended). Rows whose value lies outside the range
+    are dropped; totals recompute over the survivors upstream (DNA §6.6 B — two
+    separate ``>=``/``<=`` bounds, never a single ``between``).
+    """
+    if not ranges or not employees:
+        return employees
+    out: list[dict] = []
+    for row in employees:
+        keep = True
+        for key, bounds in ranges.items():
+            lo, hi = bounds
+            if lo is None and hi is None:
+                continue
+            val = row.get(key)
+            if val is None:
+                keep = False
+                break
+            try:
+                num = float(val)
+            except (TypeError, ValueError):
+                continue
+            if lo is not None and num < lo:
+                keep = False
+                break
+            if hi is not None and num > hi:
+                keep = False
+                break
+        if keep:
+            out.append(row)
+    return out
+
+
 @frappe_whitelist()
 def get_attendance_report(
     company: str | None = None,
     period_month: str | None = None,
     period_year: str | None = None,
+    search: str | None = None,
+    # Numeric range filters (DNA §6.6 B — Law #2). Each column takes an
+    # open-ended min/max; either bound may be omitted. Param names mirror the
+    # column field with a ``_min``/``_max`` suffix so the FE can map generically.
+    present_days_min: float | None = None,
+    present_days_max: float | None = None,
+    absent_days_min: float | None = None,
+    absent_days_max: float | None = None,
+    leave_days_min: float | None = None,
+    leave_days_max: float | None = None,
+    overtime_hours_min: float | None = None,
+    overtime_hours_max: float | None = None,
+    late_minutes_min: float | None = None,
+    late_minutes_max: float | None = None,
+    payable_days_min: float | None = None,
+    payable_days_max: float | None = None,
 ) -> dict:
     """Plan §10.9 / §13 — per-employee attendance / OT / leave report for a
     calendar month (the HR "Báo cáo theo nhân viên" table).
@@ -334,6 +445,17 @@ def get_attendance_report(
     leave_rows = report_utils.load_leave_applications(company, from_str, to_str)
 
     employees = report_utils.build_employee_report(ws_rows, leave_rows)
+    employees = _filter_report_employees(employees, search)
+    employees = _filter_report_ranges(
+        employees,
+        {
+            key: (
+                _parse_float(locals().get(f"{key}_min")),
+                _parse_float(locals().get(f"{key}_max")),
+            )
+            for key in _REPORT_RANGE_KEYS
+        },
+    )
     totals = report_utils.report_totals(employees)
     return {
         "company": company or "",

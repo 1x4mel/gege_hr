@@ -17,6 +17,33 @@ app_email = "dev@gege.local"
 app_license = "MIT"
 
 # --------------------------------------------------------------------------- #
+# Doctype permission hooks (inbox-centric migration): the gege_hr approval
+# matrix authorises HR Manager / HR User to act on ANY pending request of these
+# doctypes (regardless of which employee filed it). Frappe's default per-employee
+# User Permission / permission_query_conditions would block the unified inbox
+# (approve_request / reject_request load via get_doc + persist via doc.save — both
+# permission-checked). These hooks grant the matrix-authorised roles
+# access-to-all so the inbox runs through the PROPER Frappe flow (validate +
+# on_update/on_submit → logs / ledger), with no ignore_permissions bypass.
+# The shared implementation lives in gege_hr.gege_hr.permissions.
+# --------------------------------------------------------------------------- #
+_MATRIX_DOCTYPES = [
+    "VN Salary Advance Request",
+    "VN Overtime Request",
+    "VN Attendance Correction Request",
+    "VN Leave Cancellation Request",
+    "Expense Claim",
+    "Employee Grievance",
+    "Travel Request",
+    "Leave Encashment",
+    "Compensatory Leave Request",
+]
+has_permission = {dt: "gege_hr.gege_hr.permissions.has_permission" for dt in _MATRIX_DOCTYPES}
+permission_query_conditions = {
+    dt: "gege_hr.gege_hr.permissions.permission_query_conditions" for dt in _MATRIX_DOCTYPES
+}
+
+# --------------------------------------------------------------------------- #
 # Modules owned by this app (must match modules.txt).
 # --------------------------------------------------------------------------- #
 app_modules = [
@@ -71,6 +98,13 @@ app_doctypes = [
     {"doctype": "VN Leave Staffing Rule"},
     {"doctype": "VN Leave Blackout Period"},
     {"doctype": "VN Leave Handover Task"},
+    # Onboarding (FIX-2 / I-2) — custom gege_hr process + template + task child.
+    {"doctype": "VN Employee Onboarding"},
+    {"doctype": "VN Onboarding Template"},
+    {"doctype": "VN Onboarding Task"},
+    # Checkout-miss auto-close (Chính sách A) — ticket per forgotten checkout.
+    {"doctype": "VN Checkout Miss"},
+    {"doctype": "VN Payroll Adjustment"},
 ]
 
 # --------------------------------------------------------------------------- #
@@ -93,6 +127,34 @@ def sync_custom_fields():
     from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 
     create_custom_fields(_vn_custom_fields())
+    _seed_checkout_miss_defaults()
+
+
+def _seed_checkout_miss_defaults():
+    """Seed the checkout-miss config on VN HR Portal Setting if unset.
+
+    Custom-field defaults on a Single doctype are NOT auto-written to
+    ``tabSingles`` during migrate, so ``get_single_value`` returns 0 for unset
+    Check/Int fields (which would wrongly read as 'disabled'). This idempotent
+    step writes the documented defaults so a fresh install works out-of-box.
+    """
+    try:
+        import frappe
+
+        defaults = {
+            "vn_cm_enabled": "1",
+            "vn_cm_grace_hours": "24",
+            "vn_cm_free_first_n": "2",
+            "vn_cm_penalty_amount": "100000",
+            "vn_cm_window_days": "90",
+            "vn_cm_buffer_minutes": "360",
+        }
+        for field, value in defaults.items():
+            current = frappe.db.get_single_value("VN HR Portal Setting", field)
+            if current in (None, "", 0, "0"):
+                frappe.db.set_single_value("VN HR Portal Setting", field, value)
+    except Exception:
+        pass
 
 
 def create_seed_data():
@@ -123,6 +185,9 @@ scheduler_events = {
     "cron": {
         # 02:00 portal time → auto-mark absent (stubbed; full engine in M2).
         "0 2 * * *": ["gege_hr.gege_hr.api.attendance.auto_mark_absent_job"],
+        # Every hour: auto-close forgotten checkouts (employees who didn't
+        # return) + flip expired Pending tickets to Penalised. Chính sách A.
+        "0 * * * *": ["gege_hr.gege_hr.utils.checkout_miss.run_hourly"],
     },
 }
 
@@ -130,6 +195,21 @@ scheduler_events = {
 # DocType lifecycle hooks (wired progressively as backends ship).
 # --------------------------------------------------------------------------- #
 doc_events = {
+    # Mirror gege_hr custom check-in/out windows into Frappe-native Shift Type
+    # fields on every save, so native auto-attendance pairs overnight shifts
+    # the same way the Work-Session engine does (vn_max_checkout_after_end_minutes
+    # → allow_check_out_after_shift_end_time, etc.).
+    "Shift Type": {
+        "validate": [
+            "gege_hr.gege_hr.api.shift.sync_native_shift_windows",
+            # Keep the per-shift OT review threshold ≤ the policy's OT cap
+            # (the global ceiling) — "ca không vượt mức tổng" (plan §11.5).
+            "gege_hr.gege_hr.api.overtime_settings.validate_shift_ot_threshold",
+            # Keep the two "check-out after shift" knobs consistent: the normal
+            # check-out window must end before the late-checkout warning threshold.
+            "gege_hr.gege_hr.api.overtime_settings.validate_shift_checkout_window",
+        ],
+    },
     # Shift instance naming + recalc trigger.
     "VN Employee Shift Instance": {
         "before_insert": "gege_hr.gege_hr.utils.naming.set_yymmdd_name",
@@ -143,6 +223,12 @@ doc_events = {
     "Leave Application": {
         "on_submit": "gege_hr.gege_hr.api.leave.on_leave_submit",
         "on_cancel": "gege_hr.gege_hr.api.leave.on_leave_cancel",
+    },
+    # FIX-1 (hr-gap-audit I-1): upsert a core ``Attendance`` row whenever a Work
+    # Session is saved, so Frappe HR's standard reports/dashboards stay in sync
+    # with the portal's Work Session (idempotent; submit only on Locked period).
+    "VN Attendance Work Session": {
+        "on_update": "gege_hr.gege_hr.api.attendance_sync.on_work_session_update",
     },
 }
 

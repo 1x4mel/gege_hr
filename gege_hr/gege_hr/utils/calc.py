@@ -110,9 +110,24 @@ def _night_band(policy: dict) -> tuple[time, time]:
     def _parse(s):
         if hasattr(s, "strftime"):
             return s  # already a time
-        h, m, *rest = str(s).split(":")
-        sec = int(rest[0]) if rest else 0
-        return time(int(h), int(m), sec)
+        parts = str(s).split(":")
+        if len(parts) < 2:
+            return time(0, 0)
+        # Frappe/pymysql can hand back Time values with fractional seconds
+        # ("22:00:04.271516") or as timedelta strings — int() on "04.271516"
+        # raised ValueError and aborted the whole Work-Session calculation.
+        # Parse via float and clamp to a valid time so night-band detection
+        # degrades gracefully instead of crashing.
+        def _i(x):
+            try:
+                return int(float(x))
+            except (TypeError, ValueError):
+                return 0
+
+        h = min(23, max(0, _i(parts[0])))
+        m = min(59, max(0, _i(parts[1])))
+        sec = min(59, max(0, _i(parts[2]))) if len(parts) > 2 else 0
+        return time(h, m, sec)
 
     return _parse(ns), _parse(ne)
 
@@ -239,6 +254,35 @@ def match_overtime_request(actual_ot_windows: list[dict] | None, ot_requests: li
     return round(approved, 4)
 
 
+def match_overtime_request_detailed(
+    actual_ot_windows: list[dict] | None, ot_requests: list[dict] | None
+) -> dict:
+    """Per-request overlap (hours) of actual OT windows with approved OT requests.
+
+    Sibling of :func:`match_overtime_request` — same overlap math, but the result
+    is broken down per request ``name`` so the persistence layer can stamp
+    ``actual_hours`` / ``approved_hours`` back onto each ``VN Overtime Request``
+    (plan T3 / BUG-2). Requests without a ``name`` are aggregated under ``""``.
+
+    Contract: the summed values always equal :func:`match_overtime_request` over
+    the same inputs (TC-U-07) — this keeps the pure function testable in isolation.
+    """
+    per_name: dict[str, float] = {}
+    for win in actual_ot_windows or []:
+        ws = _as_dt(win.get("start"))
+        we = _as_dt(win.get("end"))
+        if not ws or not we:
+            continue
+        for req in ot_requests or []:
+            rs = _as_dt(req.get("from_datetime") or req.get("start"))
+            re_ = _as_dt(req.get("to_datetime") or req.get("end"))
+            overlap = calculate_overlap(ws, we, rs, re_)
+            if overlap:
+                key = req.get("name") or ""
+                per_name[key] = per_name.get(key, 0.0) + overlap
+    return {k: round(v, 4) for k, v in per_name.items()}
+
+
 def round_overtime(hours: float, policy: dict) -> float:
     """Apply the Policy ``overtime_rounding_method`` (plan §9.4.1). Pure.
 
@@ -327,18 +371,23 @@ def calculate_work_session(
     safe_in = actual_checkin or planned_start
     safe_out = actual_checkout or planned_start
 
-    # --- 3. late_minutes (minus grace) -------------------------------------
+    # --- 3. late_minutes (only when the employee checked in) ----------------
     grace_late = int(_num(policy.get("grace_late_minutes"), 5))
-    late_minutes = max(
-        0.0,
-        tz_utils.minutes_between(planned_start, safe_in) - grace_late,
+    late_minutes = (
+        max(0.0, tz_utils.minutes_between(planned_start, safe_in) - grace_late)
+        if actual_checkin
+        else 0.0
     )
 
-    # --- 4. early_leave_minutes (minus grace) ------------------------------
+    # --- 4. early_leave_minutes (only when the employee checked out) --------
+    # When there's no checkout, early_leave MUST be 0 — otherwise safe_out
+    # falls back to planned_start, giving minutes_between(planned_start,
+    # planned_end) = full shift = 720' for a 12h shift → wrongly "Về sớm".
     grace_early = int(_num(policy.get("grace_early_leave_minutes"), 0))
-    early_leave_minutes = max(
-        0.0,
-        tz_utils.minutes_between(safe_out, planned_end) - grace_early,
+    early_leave_minutes = (
+        max(0.0, tz_utils.minutes_between(safe_out, planned_end) - grace_early)
+        if actual_checkout
+        else 0.0
     )
 
     # --- 5. Total actual hours ---------------------------------------------
@@ -408,6 +457,11 @@ def calculate_work_session(
         approved_hours = payable_raw_ot
     approved_overtime_hours = round_overtime(approved_hours, policy)
 
+    # Per-request OT breakdown for write-back to the VN Overtime Request rows
+    # (actual_hours / approved_hours — plan T3 / BUG-2). Uncapped overlap per
+    # request; the aggregate cap/rounding above still governs the WS total.
+    ot_request_breakdown = match_overtime_request_detailed(actual_ot_windows, ot_requests)
+
     # --- 11. Threshold checks → need_review --------------------------------
     max_total = _num(shift_instance.get("vn_max_total_work_hours"), 20.0)
     max_ot = _num(shift_instance.get("vn_max_overtime_hours"), 4.0)
@@ -457,6 +511,8 @@ def calculate_work_session(
     result["_planned_end"] = planned_end
     result["_actual_checkin"] = actual_checkin
     result["_actual_checkout"] = actual_checkout
+    # Per-request OT breakdown consumed by persist_work_session write-back (T3).
+    result["_ot_request_breakdown"] = ot_request_breakdown
     result["_policy"] = policy
     result["_shift_instance"] = shift_instance
     result["_actual_ot_windows"] = actual_ot_windows
@@ -750,12 +806,62 @@ def load_shift_instance(shift_instance_name: str) -> dict:
         "vn_max_overtime_hours": st_attr("vn_max_overtime_hours", 4.0),
         "vn_max_total_work_hours": st_attr("vn_max_total_work_hours", 20.0),
         "vn_max_checkout_after_end_minutes": st_attr("vn_max_checkout_after_end_minutes", 360),
+        # SI check-in/out windows (set by _ensure_shift_instance in shift.py;
+        # used by _filter_logs_to_window to avoid pulling adjacent-day checkins).
+        "checkin_window_start": getattr(si, "checkin_window_start", None),
+        "checkout_window_end": getattr(si, "checkout_window_end", None),
+        "max_checkout_time": getattr(si, "max_checkout_time", None),
     }
 
 
 # ---------------------------------------------------------------------------
 # §9.5  Holiday List + OT Request loaders (bench-required; import-safe outside)
 # ---------------------------------------------------------------------------
+
+
+def _resolve_holiday_list(emp) -> str | None:
+    """Resolve an employee's Holiday List WITHOUT crashing session calculation.
+
+    Priority: ``Department.holiday_list`` → ``Company.default_holiday_list``.
+
+    Some sites ship a ``tabDepartment`` whose doctype has no ``holiday_list``
+    column (custom/minimal Department). Querying it raised
+    ``OperationalError(1054, "Unknown column 'holiday_list'")`` which aborted
+    the ENTIRE Work-Session calculation — so a brand-new check-in never became a
+    Work Session and stayed invisible in the HR admin view. Holiday detection is
+    non-essential (a payable-day flag), so each lookup is guarded: a missing
+    field/column or any DB error simply yields ``None`` ("no holiday list")
+    instead of propagating.
+    """
+    try:
+        import frappe
+    except Exception:
+        return None
+    if not emp:
+        return None
+
+    def _safe(doctype, name, field):
+        if not name:
+            return None
+        try:
+            # Skip the query entirely when the field isn't part of the doctype
+            # meta (covers a custom Department without `holiday_list`).
+            meta = frappe.get_meta(doctype)
+            if meta and not meta.has_field(field):
+                return None
+            return frappe.db.get_value(doctype, name, field)
+        except Exception:
+            return None
+
+    if emp.department:
+        hl = _safe("Department", emp.department, "holiday_list")
+        if hl:
+            return hl
+    if emp.company:
+        hl = _safe("Company", emp.company, "default_holiday_list")
+        if hl:
+            return hl
+    return None
 
 
 def is_holiday(day: date, employee: str | None) -> bool:
@@ -772,9 +878,7 @@ def is_holiday(day: date, employee: str | None) -> bool:
     emp = frappe.db.get_value("Employee", employee, ["department", "company"], as_dict=True)
     if not emp:
         return False
-    holiday_list = (
-        frappe.db.get_value("Department", emp.department, "holiday_list") if emp.department else None
-    ) or (frappe.db.get_value("Company", emp.company, "default_holiday_list") if emp.company else None)
+    holiday_list = _resolve_holiday_list(emp)
     if not holiday_list:
         return False
     return bool(frappe.db.exists("Holiday", {"parent": holiday_list, "holiday_date": day}))
@@ -800,9 +904,7 @@ def load_holiday_dates(
     emp = frappe.db.get_value("Employee", employee, ["department", "company"], as_dict=True)
     if not emp:
         return set()
-    holiday_list = (
-        frappe.db.get_value("Department", emp.department, "holiday_list") if emp.department else None
-    ) or (frappe.db.get_value("Company", emp.company, "default_holiday_list") if emp.company else None)
+    holiday_list = _resolve_holiday_list(emp)
     if not holiday_list:
         return set()
     rows = frappe.db.get_all(
@@ -825,7 +927,11 @@ def get_approved_ot_requests(employee: str | None, work_date) -> list[dict]:
         return []
     if not employee or not work_date:
         return []
-    if not frappe.db.table_exists("tabVN Overtime Request"):  # type: ignore[attr-defined]
+    # NOTE: ``db.table_exists`` takes the bare DocType name here — passing the
+    # ``tab``-prefixed table name returns False on this Frappe build, which used
+    # to short-circuit this function to [] and silently drop EVERY approved OT
+    # request (root cause of "approved_overtime_hours always 0"). See E2E probe.
+    if not frappe.db.table_exists("VN Overtime Request"):  # type: ignore[attr-defined]
         return []
     rows = (
         frappe.db.get_all(
@@ -866,7 +972,7 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
         or []
     )
     # Narrow to logs inside the planned window ± 24h to avoid pulling history.
-    logs = _filter_logs_to_window(logs, si["planned_start"], si["planned_end"])
+    logs = _filter_logs_to_window(logs, si["planned_start"], si["planned_end"], si)
 
     policy = load_policy(si.get("attendance_policy"), si["employee"])
 
@@ -912,17 +1018,75 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
         ws.insert(ignore_permissions=True)
         ws_name = ws.name
 
+    # Stamp actual/approved hours back onto the day's OT requests so /hr/overtime
+    # reflects how much of each request was actually served (BUG-2 / plan T3).
+    # Best-effort: a failure here never aborts the Work Session save.
+    _writeback_ot_request_hours(si, calc, ot_requests)
+
     _maybe_raise_exceptions(ws_name, calc, si)
     return ws_name
 
 
-def _filter_logs_to_window(logs: list[dict], planned_start, planned_end) -> list[dict]:
+def _writeback_ot_request_hours(shift_instance, calc_result, ot_requests) -> None:
+    """Write ``actual_hours`` / ``approved_hours`` onto the day's OT requests.
+
+    Reads the per-request overlap breakdown stashed by ``calculate_work_session``
+    (``_ot_request_breakdown``). Matched requests get the served overlap; any
+    approved-but-unserved request for the day is zeroed so the per-request view
+    stays honest. No-op outside a bench / when the doctype is absent. Pure
+    side-effect: safe to call from any persist path (plan T3 / BUG-2).
+    """
+    import frappe  # calc.py lazy-imports frappe per-function (no module-level import)
+
+    try:
+        breakdown = (calc_result or {}).get("_ot_request_breakdown") or {}
+        if not breakdown and not (ot_requests or []):
+            return
+        if not frappe.db.table_exists("VN Overtime Request"):  # type: ignore[attr-defined]
+            return
+        matched = set()
+        for name, hours in breakdown.items():
+            if not name:
+                continue
+            matched.add(name)
+            frappe.db.set_value(
+                "VN Overtime Request",
+                name,
+                {"actual_hours": hours, "approved_hours": hours},
+            )
+        # Approved requests the employee did NOT serve OT for → 0.
+        for req in ot_requests or []:
+            name = req.get("name")
+            if name and name not in matched:
+                frappe.db.set_value(
+                    "VN Overtime Request",
+                    name,
+                    {"actual_hours": 0, "approved_hours": 0},
+                )
+    except Exception:
+        si_name = shift_instance.get("name") if isinstance(shift_instance, dict) else shift_instance
+        frappe.log_error(
+            title="OT request hours write-back failed",
+            message=f"shift_instance={si_name}",
+        )
+
+
+def _filter_logs_to_window(
+    logs: list[dict], planned_start, planned_end, si: dict | None = None
+) -> list[dict]:
     ps = _as_dt(planned_start)
     pe = _as_dt(planned_end)
     if not ps or not pe:
         return logs
-    lo = ps - timedelta(hours=24)
-    hi = pe + timedelta(hours=24)
+    # Use the Shift Instance's configured check-in/out window (tight — avoids
+    # pulling checkins from ADJACENT DAYS which caused cross-day OT/hours bugs
+    # with the old ±24h margin). Fall back to ±2h if SI window fields are missing.
+    lo = _as_dt(si.get("checkin_window_start")) if si else None
+    hi = _as_dt(si.get("max_checkout_time")) if si else None
+    if not lo:
+        lo = ps - timedelta(hours=2)
+    if not hi:
+        hi = pe + timedelta(hours=2)
     return [lg for lg in logs if lo <= _as_dt(lg.get("time")) <= hi]
 
 

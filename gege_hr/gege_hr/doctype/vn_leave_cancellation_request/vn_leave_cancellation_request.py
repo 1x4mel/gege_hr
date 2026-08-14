@@ -4,6 +4,39 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+# HR roles that the gege_hr approval matrix authorises to act on ANY cancellation
+# request (read + write + submit), regardless of ownership. Without these hooks
+# doc-level permission resolves False for them (User Permission / link
+# restrictions override the bare role grant), which blocked the matrix-driven
+# approval inbox. The employee (owner) keeps Frappe's default owner permission.
+_HR_APPROVER_ROLES = {"HR Manager", "HR User"}
+
+
+def has_permission(doc, ptype="read", user=None):
+    if not user:
+        user = frappe.session.user
+    if user == "Administrator":
+        return True
+    try:
+        roles = set(frappe.get_roles(user))
+    except Exception:
+        return None
+    if roles & _HR_APPROVER_ROLES:
+        return True
+    return None  # defer to Frappe's default (owner / role) for everyone else
+
+
+def get_permission_query_conditions(user):
+    if not user:
+        user = frappe.session.user
+    try:
+        roles = set(frappe.get_roles(user))
+    except Exception:
+        roles = set()
+    if roles & (_HR_APPROVER_ROLES | {"Administrator"}):
+        return ""  # no extra restriction — sees every request
+    return ""  # others fall back to the standard owner-scoped role permission
+
 
 class VNLeaveCancellationRequest(Document):
     """Request to cancel an already-approved Leave Application

@@ -27,6 +27,8 @@
   {"fieldname": "workflow_state", "default": "Draft", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Workflow State", "options": "Draft\nPending Manager\nPending HR\nApproved\nRejected"},
   {"fieldname": "approver", "fieldtype": "Link", "label": "Approver", "options": "User", "read_only": 1},
   {"fieldname": "approved_at", "fieldtype": "Datetime", "label": "Approved At", "read_only": 1},
+  {"fieldname": "correction_source_break", "fieldtype": "Section Break", "label": "Source"},
+  {"fieldname": "vn_checkout_miss", "fieldtype": "Link", "label": "Checkout Miss", "options": "VN Checkout Miss", "read_only": 1, "no_copy": 1, "description": "Ticket quên checkout sinh ra yêu cầu này (nếu có) — duyệt CR sẽ thay OUT giả và tự miễn phạt."},
   {"fieldname": "result_break", "fieldtype": "Section Break", "label": "Result"},
   {"fieldname": "generated_checkin", "fieldtype": "Link", "label": "Generated Check-in", "options": "Employee Checkin", "read_only": 1},
   {"fieldname": "generated_attendance", "fieldtype": "Link", "label": "Generated Attendance", "options": "Attendance", "read_only": 1}

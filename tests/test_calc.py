@@ -342,6 +342,107 @@ class TestCalculateWorkSession:
 
 
 # =========================================================================== #
+# match_overtime_request_detailed — per-request overlap (plan T3 / BUG-2)
+# =========================================================================== #
+def _win(start, end):
+    return {"start": start, "end": end}
+
+
+def _req(name, start, end):
+    return {"name": name, "from_datetime": start, "to_datetime": end}
+
+
+class TestMatchOvertimeRequestDetailed:
+    def test_actual_inside_request(self):
+        # TC-U-01: actual OT window fully inside the approved request.
+        out = calc.match_overtime_request_detailed(
+            [_win(_vn(2026, 6, 20, 8, 0), _vn(2026, 6, 20, 10, 0))],
+            [_req("OR-1", _vn(2026, 6, 20, 7, 0), _vn(2026, 6, 20, 11, 0))],
+        )
+        assert out == {"OR-1": 2.0}
+
+    def test_request_inside_actual(self):
+        # TC-U-02: request fully inside the actual OT window.
+        out = calc.match_overtime_request_detailed(
+            [_win(_vn(2026, 6, 20, 7, 0), _vn(2026, 6, 20, 11, 0))],
+            [_req("OR-1", _vn(2026, 6, 20, 8, 0), _vn(2026, 6, 20, 10, 0))],
+        )
+        assert out == {"OR-1": 2.0}
+
+    def test_partial_overlap(self):
+        # TC-U-03: only the intersection counts.
+        out = calc.match_overtime_request_detailed(
+            [_win(_vn(2026, 6, 20, 9, 0), _vn(2026, 6, 20, 12, 0))],
+            [_req("OR-1", _vn(2026, 6, 20, 8, 0), _vn(2026, 6, 20, 10, 0))],
+        )
+        assert out == {"OR-1": 1.0}
+
+    def test_disjoint_returns_empty(self):
+        # TC-U-04: no overlap → request absent from the breakdown (not 0).
+        out = calc.match_overtime_request_detailed(
+            [_win(_vn(2026, 6, 20, 8, 0), _vn(2026, 6, 20, 9, 0))],
+            [_req("OR-1", _vn(2026, 6, 20, 10, 0), _vn(2026, 6, 20, 11, 0))],
+        )
+        assert out == {}
+
+    def test_multiple_windows_requests_no_double_count(self):
+        # TC-U-05: pre-OT + post-OT, each matched to its own request.
+        windows = [
+            _win(_vn(2026, 6, 20, 6, 0), _vn(2026, 6, 20, 8, 0)),
+            _win(_vn(2026, 6, 20, 20, 0), _vn(2026, 6, 20, 22, 0)),
+        ]
+        reqs = [
+            _req("OR-PRE", _vn(2026, 6, 20, 6, 0), _vn(2026, 6, 20, 8, 0)),
+            _req("OR-POST", _vn(2026, 6, 20, 20, 0), _vn(2026, 6, 20, 22, 0)),
+        ]
+        assert calc.match_overtime_request_detailed(windows, reqs) == {
+            "OR-PRE": 2.0,
+            "OR-POST": 2.0,
+        }
+
+    def test_sum_equals_aggregate(self):
+        # TC-U-07: contract — Σ detailed == match_overtime_request (pre-cap).
+        windows = [
+            _win(_vn(2026, 6, 20, 6, 0), _vn(2026, 6, 20, 8, 0)),
+            _win(_vn(2026, 6, 20, 20, 0), _vn(2026, 6, 20, 22, 0)),
+        ]
+        reqs = [
+            _req("OR-PRE", _vn(2026, 6, 20, 6, 0), _vn(2026, 6, 20, 8, 0)),
+            _req("OR-POST", _vn(2026, 6, 20, 20, 0), _vn(2026, 6, 20, 22, 0)),
+        ]
+        total = calc.match_overtime_request(windows, reqs)
+        detailed = calc.match_overtime_request_detailed(windows, reqs)
+        assert round(sum(detailed.values()), 4) == total
+
+    def test_tz_same_instant_different_zone(self):
+        # TC-U-09: 20:00+07 == 13:00Z → overlap is the full hour (not 0, not 8).
+        out = calc.match_overtime_request_detailed(
+            [_win("2026-06-20 13:00:00+00:00", "2026-06-20 14:00:00+00:00")],
+            [_req("OR-1", _vn(2026, 6, 20, 20, 0), _vn(2026, 6, 20, 21, 0))],
+        )
+        assert out == {"OR-1": 1.0}
+
+    def test_fe_offset_string_matches_local_instant(self):
+        # The +07:00 string the FE now sends resolves to the same instant as the
+        # tz-aware local datetime (locks down EC-3 / plan T5).
+        assert calc._as_dt("2026-08-14 18:00:00+07:00") == calc._as_dt(_vn(2026, 8, 14, 18, 0))
+
+    def test_breakdown_stamped_on_work_session_result(self):
+        # The calc result now carries the per-request breakdown for write-back.
+        si = base_shift(
+            _vn(2026, 6, 20, 8, 0), _vn(2026, 6, 20, 20, 0),
+            vn_allow_overtime_after_shift=True,
+        )
+        logs = [log(_vn(2026, 6, 20, 8, 0), "IN"), log(_vn(2026, 6, 20, 22, 0), "OUT")]
+        reqs = [_req("OR-1", _vn(2026, 6, 20, 20, 0), _vn(2026, 6, 20, 21, 0))]
+        r = calc.calculate_work_session(
+            si, logs, base_policy(require_overtime_approval=True), ot_requests=reqs
+        )
+        assert r["_ot_request_breakdown"] == {"OR-1": 1.0}
+        assert r["approved_overtime_hours"] == 1.0
+
+
+# =========================================================================== #
 # §9.2  generate_segments
 # =========================================================================== #
 class TestGenerateSegments:

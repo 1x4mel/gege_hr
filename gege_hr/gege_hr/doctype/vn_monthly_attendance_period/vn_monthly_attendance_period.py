@@ -28,7 +28,9 @@ class VNMonthlyAttendancePeriod(Document):
         STATUS_DRAFT: {STATUS_GENERATED},
         STATUS_GENERATED: {STATUS_LOCKED, STATUS_DRAFT},
         STATUS_LOCKED: {STATUS_UNLOCKED},
-        STATUS_UNLOCKED: {STATUS_LOCKED},
+        # Unlocked may re-lock directly, or go back to Generated to refresh
+        # its aggregated lines (``generate_lines`` after an unlock).
+        STATUS_UNLOCKED: {STATUS_LOCKED, STATUS_GENERATED},
     }
 
     def before_insert(self):

@@ -27,6 +27,7 @@ from frappe.utils import add_days, flt, get_datetime, getdate
 from gege_hr.gege_hr.api import audit as audit_api
 from gege_hr.gege_hr.utils import employee as emp_utils
 from gege_hr.gege_hr.utils import gamification as game
+from gege_hr.gege_hr.utils import pagination
 from gege_hr.gege_hr.utils import tz as tz_utils
 from gege_hr.gege_hr.utils.ratelimit import rate_limit
 from gege_hr.gege_hr.utils.request_workflow import send_for_approval
@@ -306,12 +307,23 @@ def _session_context(shift: dict | None, checkins: list[dict], now_local: dateti
 
 
 def _is_date_locked(work_date: str) -> bool:
-    """True when a VN Monthly Attendance Period covering ``work_date`` is locked."""
+    """True when a VN Monthly Attendance Period covering ``work_date`` is Locked.
+
+    Schema note: the period stores its window in ``from_date``/``to_date`` and
+    its lock state in ``status == "Locked"`` — the historic filter on
+    ``start_date``/``end_date``/``is_locked`` matched no column, so the query
+    always failed (and the ``except`` silently returned False), leaving every
+    lock guard in the portal permissive.
+    """
     try:
         return bool(
             frappe.db.exists(
                 "VN Monthly Attendance Period",
-                {"start_date": ["<=", work_date], "end_date": [">=", work_date], "is_locked": 1},
+                {
+                    "from_date": ["<=", work_date],
+                    "to_date": [">=", work_date],
+                    "status": "Locked",
+                },
             )
         )
     except Exception:
@@ -400,7 +412,28 @@ def mobile_checkin(
     # Rate limit: max 1 request / 3s per employee (plan §Security).
     rate_limit(f"checkin:{emp}", max_requests=1, window_seconds=3)
 
+    # Close any prior session the employee forgot to check out of (overnight or
+    # day) BEFORE deciding this check-in's parity — so a forgotten checkout is
+    # auto-closed at its planned_end instead of dropping the whole shift's hours
+    # (Chính sách A). Safe + idempotent; no-op when disabled.
+    try:
+        from gege_hr.gege_hr.utils import checkout_miss
+
+        checkout_miss.auto_close_missed_checkouts(emp)
+    except Exception:
+        frappe.log_error(title="checkout_miss.auto_close on checkin failed")
+
     day = tz_utils.now_in_portal().date()
+
+    # Lock guard (defense-in-depth): a date inside a Locked monthly period is
+    # closed for new punches — the FE already renders the LOCKED button state
+    # via ``today_status``; enforce it server-side too.
+    if _is_date_locked(day.isoformat()):
+        frappe.throw(
+            _("Hôm nay ({0}) thuộc kỳ công đã khoá — không thể chấm công. Liên hệ HR để mở khóa kỳ.")
+            .format(day.isoformat())
+        )
+
     shift = _today_shift(emp, day)
     checkins = _checkins_for(emp, day)
     log_type = "OUT" if _has_in_only(checkins) else "IN"
@@ -478,6 +511,35 @@ def mobile_checkin(
     refreshed["log_type"] = log_type
     if game_result and not game_result.get("skipped"):
         refreshed["gamification"] = game_result
+
+    # OT reminder: if checkout is after planned_end and no approved OT request
+    # exists for today, surface a prompt so the employee submits one.
+    if log_type == "OUT" and shift:
+        try:
+            pe = tz_utils.to_portal(
+                datetime.fromisoformat(shift["planned_end"].replace("Z", "+00:00"))
+            )
+            now_p = tz_utils.to_portal(server_now)
+            if now_p > pe:
+                ot_hours = round((now_p - pe).total_seconds() / 3600.0, 1)
+                if ot_hours > 0:
+                    has_ot = frappe.db.exists(
+                        "VN Overtime Request",
+                        {"employee": emp, "docstatus": 1, "work_date": day},
+                    )
+                    if not has_ot:
+                        refreshed["ot_pending_hours"] = ot_hours
+                        refreshed["ot_message"] = (
+                            f"Bạn có {ot_hours}h OT chưa duyệt. Hãy nộp "
+                            "Overtime Request (kèm lý do) để HR duyệt và tính lương OT."
+                        )
+                        # Pre-fill data for the OT form (VN-local datetime-local).
+                        refreshed["ot_from"] = pe.strftime("%Y-%m-%dT%H:%M")
+                        refreshed["ot_to"] = now_p.strftime("%Y-%m-%dT%H:%M")
+                        refreshed["ot_work_date"] = day.isoformat()
+        except Exception:
+            pass
+
     return refreshed
 
 
@@ -665,93 +727,80 @@ def my_logs(
     start = getdate(from_date) if from_date else add_days(today, -30)
     end = getdate(to_date) if to_date else today
 
-    att_rows = frappe.db.get_all(
-        "Attendance",
+    # ── SOURCE OF TRUTH: VN Attendance Work Session ────────────────────────
+    # The Work Session is computed by the gege_hr engine (calc.py) from raw
+    # Employee Checkins. It carries actual_checkin/checkout, late/early (with
+    # grace + OT-compensation rules), raw_overtime_hours, approved_overtime_hours,
+    # payable_day, absent/has_leave/need_review/missing_* flags — ALL the fields
+    # the SPA needs. Reading it directly (instead of the core Attendance doctype)
+    # guarantees the portal shows the SAME values the engine computed, including
+    # OT (which Attendance does not carry).
+    ws_rows = frappe.db.get_all(
+        "VN Attendance Work Session",
         filters={
             "employee": emp,
-            "attendance_date": ["between", [start, end]],
-            "docstatus": 1,
+            "work_date": ["between", [start, end]],
+            "docstatus": ["!=", 2],
         },
         fields=[
             "name",
-            "attendance_date",
-            "status",
-            "shift",
-            "in_time",
-            "out_time",
-            "late_entry",
-            "early_exit",
-            "working_hours",
+            "work_date",
+            "shift_type",
+            "planned_start",
+            "planned_end",
+            "actual_checkin",
+            "actual_checkout",
+            "late_minutes",
+            "early_leave_minutes",
+            "regular_hours",
+            "total_actual_hours",
+            "raw_overtime_hours",
+            "approved_overtime_hours",
+            "payable_day",
+            "absent",
+            "has_leave",
+            "need_review",
+            "missing_checkin",
+            "missing_checkout",
         ],
-        order_by="attendance_date desc",
+        order_by="work_date desc",
         limit_page_length=500,
     )
 
-    # Cache Shift Type → (start_time, end_time) so per-day planned windows are
-    # computed with a single query regardless of month size.
-    shift_names = {r.get("shift") for r in att_rows if r.get("shift")}
-    shift_window: dict[str, tuple] = {}
-    if shift_names:
-        for st in frappe.db.get_all(
-            "Shift Type",
-            {"name": ["in", list(shift_names)]},
-            ["name", "start_time", "end_time"],
-        ):
-            shift_window[st.name] = (st.start_time, st.end_time)
-
     out: list[dict] = []
-    for r in att_rows:
-        day = getdate(r.attendance_date)
-        status = (r.status or "").strip()
-        shift_name = r.get("shift") or ""
-        stime, etime = shift_window.get(shift_name, (None, None))
-
-        planned_start_iso = planned_end_iso = None
-        late_min = early_min = 0
-        if stime and etime:
-            # Planned window as naive local wall-clock strings, the same shape
-            # as the raw in_time/out_time so the SPA's formatTime() (which
-            # treats naive datetimes as local) renders both consistently in
-            # every browser timezone.
-            planned_in = datetime.combine(day, datetime.min.time()) + stime
-            planned_out = datetime.combine(day, datetime.min.time()) + etime
-            # Overnight shifts end on the next calendar day.
-            if tz_utils.is_overnight(stime, etime):
-                planned_out += timedelta(days=1)
-            planned_start_iso = planned_in.strftime("%Y-%m-%d %H:%M:%S")
-            planned_end_iso = planned_out.strftime("%Y-%m-%d %H:%M:%S")
-            if r.in_time:
-                late_min = max(0, int((get_datetime(r.in_time) - planned_in).total_seconds() // 60))
-            if r.out_time:
-                early_min = max(0, int((planned_out - get_datetime(r.out_time)).total_seconds() // 60))
-
-        has_leave = status == "On Leave"
-        is_absent = status == "Absent"
-        is_half = status == "Half Day"
-        payable = 1.0 if status == "Present" else (0.5 if is_half else 0.0)
+    for r in ws_rows:
+        # Derive a Frappe-compatible status from the Work Session flags.
+        if r.absent:
+            status = "Absent"
+        elif r.has_leave:
+            status = "On Leave"
+        elif flt(r.payable_day or 0) == 0.5:
+            status = "Half Day"
+        else:
+            status = "Present"
 
         out.append(
             {
                 "name": r.name,
-                "work_date": str(day),
-                "shift_type": shift_name or "",
+                "work_date": str(r.work_date),
+                "shift_type": r.shift_type or "",
                 "status": status,
-                "planned_start": planned_start_iso,
-                "planned_end": planned_end_iso,
-                "actual_checkin": r.in_time,
-                "actual_checkout": r.out_time,
-                "late_minutes": late_min if r.late_entry else 0,
-                "early_leave_minutes": early_min if r.early_exit else 0,
-                "regular_hours": flt(r.working_hours or 0, 2),
-                "total_actual_hours": flt(r.working_hours or 0, 2),
-                "raw_overtime_hours": 0.0,
-                "approved_overtime_hours": 0.0,
-                "payable_day": payable,
-                "has_leave": has_leave,
-                "absent": is_absent,
-                "missing_checkin": status == "Present" and not r.in_time,
-                "missing_checkout": status == "Present" and r.in_time and not r.out_time,
-                "need_review": False,
+                "planned_start": str(r.planned_start) if r.planned_start else None,
+                "planned_end": str(r.planned_end) if r.planned_end else None,
+                "actual_checkin": str(r.actual_checkin) if r.actual_checkin else None,
+                "actual_checkout": str(r.actual_checkout) if r.actual_checkout else None,
+                "late_minutes": int(r.late_minutes or 0),
+                "early_leave_minutes": int(r.early_leave_minutes or 0),
+                "regular_hours": flt(r.regular_hours or 0, 2),
+                "total_actual_hours": flt(r.total_actual_hours or 0, 2),
+                "raw_overtime_hours": flt(r.raw_overtime_hours or 0, 4),
+                "approved_overtime_hours": flt(r.approved_overtime_hours or 0, 4),
+                "payable_day": flt(r.payable_day or 0, 2),
+                "has_leave": bool(r.has_leave),
+                "absent": bool(r.absent),
+                "missing_checkin": bool(r.missing_checkin),
+                "missing_checkout": bool(r.missing_checkout),
+                "need_review": bool(r.need_review),
             }
         )
     return out
@@ -800,16 +849,16 @@ def _monthly_overtime_hours(rows: list[dict]) -> float:
     if not rows:
         return 0.0
 
-    # Cache Shift Type → end_time (time-of-day) to avoid per-row lookups.
+    # Cache Shift Type → (start_time, end_time) so the overnight-aware planned
+    # window can be rebuilt per row with a single query regardless of month size.
     shift_names = {r.get("shift") for r in rows if r.get("shift")}
-    end_times: dict[str, object] = {}
+    shift_windows: dict[str, tuple] = {}
     if shift_names:
         for st in frappe.db.get_all(
-            "Shift Type", {"name": ["in", list(shift_names)]}, ["name", "end_time"]
+            "Shift Type", {"name": ["in", list(shift_names)]}, ["name", "start_time", "end_time"]
         ):
-            end_times[st.name] = st.end_time
+            shift_windows[st.name] = (st.start_time, st.end_time)
 
-    tz = tz_utils.get_tzinfo()
     total_minutes = 0.0
     for r in rows:
         out_time = r.get("out_time")
@@ -817,25 +866,19 @@ def _monthly_overtime_hours(rows: list[dict]) -> float:
         d = r.get("attendance_date")
         if not out_time or not shift or not d:
             continue
-        shift_end = end_times.get(shift)
-        if not shift_end:
+        win = shift_windows.get(shift)
+        if not win or not win[1]:
             continue
         try:
             if isinstance(d, str):
                 d = getdate(d)
-            # Frappe stores Shift Type "Time" fields as datetime.timedelta
-            # (not datetime.time); normalise to seconds so the planned-end
-            # wall-clock can be built reliably for both types.
-            if isinstance(shift_end, timedelta):
-                end_secs = shift_end.total_seconds()
-            else:
-                end_secs = shift_end.hour * 3600 + shift_end.minute * 60 + shift_end.second
-            out_dt = get_datetime(out_time)
-            planned_end = datetime.combine(d, datetime.min.time()) + timedelta(seconds=end_secs)
-            # Shift end by noon means the shift crosses midnight (overnight).
-            if end_secs <= 12 * 3600:
-                planned_end += timedelta(days=1)
-            delta = (out_dt - planned_end).total_seconds()
+            # Portal-aware planned end (overnight handled by planned_window()).
+            # as_time() inside planned_window() normalises both timedelta
+            # (MariaDB TIME) and datetime.time (Frappe Time) inputs.
+            _, pe_local = tz_utils.planned_window(d, win[0], win[1])
+            # Compare in the SAME portal frame: out_time is naive UTC per Frappe.
+            out_local = tz_utils.to_portal(get_datetime(out_time))
+            delta = (out_local - pe_local).total_seconds()
             if delta > 0:
                 total_minutes += delta / 60.0
         except Exception:
@@ -858,7 +901,12 @@ def my_monthly_summary(
     now = tz_utils.now_in_portal()
     y, m = _parse_year_month(year, month, now)
     start = date(y, m, 1)
-    end = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
+    # Inclusive end = LAST day of the month. Frappe's ``between`` is inclusive on
+    # both bounds, so using the first day of the next month pulls in one extra
+    # day (e.g. 2026-08-01) and inflates the counts (32 "worked days" for July,
+    # which only has 31). Subtract one day to land on the actual month end.
+    next_first = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
+    end = next_first - timedelta(days=1)
 
     def _count(status):
         return frappe.db.count(
@@ -884,23 +932,41 @@ def my_monthly_summary(
         "Attendance",
         {"employee": emp, "early_exit": 1, "attendance_date": ["between", [start, end]]},
     )
+    # Totals are exposed at the TOP LEVEL because the SPA's MonthlyAttendanceView
+    # reads ``summary.worked_days`` / ``payable_days`` / ``late_count`` /
+    # ``absent_count`` / ``leave_days`` / ``overtime_hours`` directly off the
+    # response object. Previously they were nested under ``summary`` (and used
+    # different keys: late_days/absent/leave) so every tile resolved to 0.
+    worked_days = _count("Present") + 0.5 * _count("Half Day")
+    late_count = frappe.db.count(
+        "Attendance",
+        {"employee": emp, "late_entry": 1, "attendance_date": ["between", [start, end]]},
+    )
+    absent_count = _count("Absent")
+    leave_days = _count("On Leave")
+    overtime_hours = _monthly_overtime_hours(rows)
     return {
         "employee": emp,
         "year": y,
         "month": m,
+        # Top-level totals — the SPA contract (MonthlyAttendanceView tiles).
+        "worked_days": worked_days,
+        "payable_days": worked_days,
+        "late_count": late_count,
+        "absent_count": absent_count,
+        "leave_days": leave_days,
+        "overtime_hours": overtime_hours,
+        # Nested view kept for other consumers / future use (key names unchanged).
         "summary": {
             "present": _count("Present"),
-            "absent": _count("Absent"),
-            "leave": _count("On Leave"),
+            "absent": absent_count,
+            "leave": leave_days,
             "half_day": _count("Half Day"),
-            "worked_days": _count("Present") + 0.5 * _count("Half Day"),
-            "payable_days": _count("Present") + 0.5 * _count("Half Day"),
-            "late_days": frappe.db.count(
-                "Attendance",
-                {"employee": emp, "late_entry": 1, "attendance_date": ["between", [start, end]]},
-            ),
+            "worked_days": worked_days,
+            "payable_days": worked_days,
+            "late_days": late_count,
             "early_exit_days": early_exit_days,
-            "overtime_hours": _monthly_overtime_hours(rows),
+            "overtime_hours": overtime_hours,
         },
         "rows": rows,
     }
@@ -1001,10 +1067,16 @@ def team_attendance(
             fields=["name", "employee_name", "designation"],
         )
 
-    # Only employees with an active Shift Assignment overlapping [start, end]
-    # are relevant for a shift-based roster. Resolve each member's primary
-    # shift_type from the earliest such assignment so the grid can be split into
-    # one table per shift. ``end_date`` may be null (open-ended assignment).
+    # Roster membership for [start, end]:
+    #   (a) employees with an ACTIVE, effective Shift Assignment covering the
+    #       period — the current team; OR
+    #   (b) employees who have an Attendance row in the period — so historical
+    #       months still show people who worked then even if their assignment has
+    #       since been set Inactive.
+    # An Inactive assignment ALONE (no attendance this month, not Active) does
+    # NOT show: ending a shift hides the employee going forward but never
+    # retroactively removes their past attendance from the grid. ``end_date`` may
+    # be null (open-ended assignment).
     primary_shift: dict[str, str] = {}
     if members:
         assignments = frappe.db.get_all(
@@ -1024,17 +1096,69 @@ def team_attendance(
                 continue
             if a.employee not in primary_shift:
                 primary_shift[a.employee] = a.shift_type
-    members = [m for m in members if m["name"] in primary_shift]
+
+    # Employees with real check-in history in this period (membership case b).
+    # Only "Present" days count as history — late days are stored as
+    # status="Present" (with late_entry=1) so they are included, but pure
+    # Absent / On-Leave markers do NOT force an Inactive employee to appear.
+    # Keep each one's attendance shifts to label the row when there is no Active
+    # assignment (most frequent shift wins).
+    att_shifts: dict[str, list] = {}
+    if members:
+        for r in frappe.db.get_all(
+            "Attendance",
+            filters={
+                "employee": ["in", [m["name"] for m in members]],
+                "attendance_date": ["between", [start, end]],
+                "docstatus": 1,
+                "status": "Present",
+            },
+            fields=["employee", "shift"],
+        ):
+            att_shifts.setdefault(r.employee, []).append(r.shift or "")
+
+    def _shift_for_member(m):
+        if m["name"] in primary_shift:
+            return primary_shift[m["name"]]
+        shifts = [s for s in att_shifts.get(m["name"], []) if s]
+        if shifts:
+            return max(set(shifts), key=shifts.count)
+        return m.get("default_shift") or "Khác"
+
+    member_shift = {m["name"]: _shift_for_member(m) for m in members}
+    roster = set(primary_shift.keys()) | set(att_shifts.keys())
+    members = [m for m in members if m["name"] in roster]
+
+    # Approved Leave Applications per member/day — so leave days show correctly
+    # even when the Work Session's has_leave flag isn't set by the engine.
+    leave_by_emp_date: dict[str, dict[str, str]] = {}
+    if members:
+        for la in frappe.db.get_all(
+            "Leave Application",
+            filters={
+                "employee": ["in", [m["name"] for m in members]],
+                "from_date": ["<=", end],
+                "to_date": [">=", start],
+                "docstatus": 1,
+                "status": "Approved",
+            },
+            fields=["employee", "from_date", "to_date", "leave_type"],
+        ):
+            d = getdate(la.from_date)
+            while d <= getdate(la.to_date):
+                leave_by_emp_date.setdefault(la.employee, {})[str(d)] = la.leave_type or ""
+                d += timedelta(days=1)
 
     # Shift Type start/end windows — used both for the per-group header and to
     # translate the raw Attendance row (status="Present" even when late) into a
     # UI-friendly per-day status + real late/early minutes.
-    shift_names = sorted({s for s in primary_shift.values()})
+    shift_names = sorted(set(member_shift.values()))
     shift_meta: dict[str, dict] = {}
-    if shift_names:
+    real_shift_names = [s for s in shift_names if s and s != "Khác"]
+    if real_shift_names:
         for st in frappe.db.get_all(
             "Shift Type",
-            {"name": ["in", shift_names]},
+            {"name": ["in", real_shift_names]},
             ["name", "start_time", "end_time"],
         ):
             shift_meta[st.name] = {"start_time": st.start_time, "end_time": st.end_time}
@@ -1052,7 +1176,7 @@ def team_attendance(
             )
         return shift_window_cache[shift_name]
 
-    summary = {"present": 0, "late": 0, "absent": 0, "on_leave": 0}
+    summary = {"present": 0, "late": 0, "early": 0, "overtime": 0, "absent": 0, "on_leave": 0}
     grouped: dict[str, list] = {sn: [] for sn in shift_names}
     out_members = []
     for m in members:
@@ -1067,11 +1191,32 @@ def team_attendance(
             order_by="attendance_date asc",
         )
         by_date = {str(r.attendance_date): r for r in rows}
+        # Work Session is the portal's source of truth for the PAIRED IN/OUT:
+        # calc.py matches punches to the shift's planned window, so overnight
+        # checkouts land on the correct (start-day) row. The core Attendance
+        # in_time/out_time is frequently scrambled for overnight shifts (previous
+        # night's OUT, or a 1-day offset), so prefer the Work Session for the
+        # displayed times + late/early and only fall back to Attendance below.
+        ws_rows = frappe.db.get_all(
+            "VN Attendance Work Session",
+            filters={"employee": m.name, "work_date": ["between", [start, end]]},
+            fields=[
+                "work_date",
+                "actual_checkin",
+                "actual_checkout",
+                "late_minutes",
+                "early_leave_minutes",
+                "approved_overtime_hours",
+                "raw_overtime_hours",
+            ],
+        )
+        ws_map = {str(r.work_date): r for r in ws_rows}
         days = []
         cur = start
         while cur <= end:
             att = by_date.get(str(cur))
-            if not att:
+            ws = ws_map.get(str(cur))
+            if not att and not ws:
                 days.append(
                     {
                         "work_date": str(cur),
@@ -1085,41 +1230,104 @@ def team_attendance(
                 cur += timedelta(days=1)
                 continue
 
-            # Core Attendance keeps status="Present" even on late/early days;
-            # promote to a display status the SPA grid recognises (⏰ Late).
-            disp_status = att.status
+            # Approved Leave Application for this day → "On Leave" (sync with
+            # /hr/schedule which reads Leave Application directly).
+            la_type = leave_by_emp_date.get(m["name"], {}).get(str(cur))
+            if la_type is not None:
+                days.append(
+                    {
+                        "work_date": str(cur),
+                        "status": "On Leave",
+                        "checkin_time": None,
+                        "checkout_time": None,
+                        "late_minutes": 0,
+                        "early_leave_minutes": 0,
+                        "raw_overtime_hours": 0.0,
+                    }
+                )
+                summary["on_leave"] += 1
+                cur += timedelta(days=1)
+                continue
+
+            # Work Session is the source of truth; Attendance is fallback for
+            # days where the engine hasn't run yet. Handle att=None gracefully.
+            disp_status = (att.status if att else "Present")
             late_min = 0
             early_min = 0
+            ot_hours = 0.0
+            raw_ot = 0.0
+            checkin_time = (att.in_time if att else None)
+            checkout_time = (att.out_time if att else None)
             shift_start, shift_end = _shift_window(getattr(att, "shift", None))
-            if att.late_entry:
-                disp_status = "Late"
-                if att.in_time and shift_start is not None:
-                    planned = datetime.combine(cur, datetime.min.time()) + shift_start
-                    late_min = max(0, int((get_datetime(att.in_time) - planned).total_seconds() // 60))
-            if att.early_exit and att.out_time and shift_end is not None:
-                planned = datetime.combine(cur, datetime.min.time()) + shift_end
-                early_min = max(0, int((planned - get_datetime(att.out_time)).total_seconds() // 60))
+            if ws and (ws.actual_checkin or ws.actual_checkout):
+                # Authoritative Work Session: correct overnight pairing, and
+                # late/early already computed by calc.py (with grace/OT rules).
+                checkin_time = ws.actual_checkin
+                checkout_time = ws.actual_checkout
+                late_min = int(ws.late_minutes or 0)
+                early_min = int(ws.early_leave_minutes or 0)
+                # Work Session is the portal's source of truth for approved OT
+                # (calc.py applies the policy/approval rules); carry it through
+                # so the team grid + summary chips can show "Tăng ca".
+                # Only APPROVED OT shows in the team view (correct for payroll).
+                # Raw OT (unapproved) is visible to the employee on /hr/schedule.
+                ot_hours = flt(ws.approved_overtime_hours or 0, 2)
+                raw_ot = flt(getattr(ws, "raw_overtime_hours", 0) or 0, 4)
+                if late_min > 0:
+                    disp_status = "Late"
+            elif shift_start is not None and shift_end is not None:
+                # No Work Session — fall back to Attendance times, compared in the
+                # portal frame (overnight-aware). A punch outside this shift's
+                # window is a stray/wrong-day one (common with overnight auto-
+                # attendance) → hide it so we never show the previous night's
+                # checkout nor a false "về sớm".
+                ps_local, pe_local = tz_utils.planned_window(cur, shift_start, shift_end)
+                if att.in_time:
+                    in_local = tz_utils.to_portal(get_datetime(att.in_time))
+                    if ps_local <= in_local <= pe_local:
+                        if att.late_entry:
+                            disp_status = "Late"
+                        late_min = max(0, int((in_local - ps_local).total_seconds() // 60))
+                    else:
+                        checkin_time = None
+                if att.out_time:
+                    out_local = tz_utils.to_portal(get_datetime(att.out_time))
+                    if out_local >= ps_local:
+                        early_min = max(0, int((pe_local - out_local).total_seconds() // 60))
+                    else:
+                        checkout_time = None
 
             days.append(
                 {
                     "work_date": str(cur),
                     "status": disp_status,
-                    "checkin_time": att.in_time,
-                    "checkout_time": att.out_time,
+                    "checkin_time": checkin_time,
+                    "checkout_time": checkout_time,
                     "late_minutes": late_min,
                     "early_leave_minutes": early_min,
+                    "approved_overtime_hours": ot_hours,
+                    "raw_overtime_hours": raw_ot,
                 }
             )
-            if att.status == "Present":
+            # Summary chips: count by the DERIVED late/early/OT values (not just
+            # the raw Attendance flags) so the totals match what the cells show.
+            # Work-Session-derived late/early are not reflected in att.late_entry,
+            # so the minute thresholds are authoritative here.
+            att_status = (att.status if att else disp_status)
+            if att_status == "Present":
                 summary["present"] += 1
-                if att.late_entry:
+                if (getattr(att, "late_entry", 0) if att else 0) or late_min > 0:
                     summary["late"] += 1
-            elif att.status == "Absent":
+                if early_min > 0:
+                    summary["early"] += 1
+            elif att_status == "Absent":
                 summary["absent"] += 1
-            elif att.status == "On Leave":
+            elif att_status == "On Leave":
                 summary["on_leave"] += 1
+            if ot_hours > 0:
+                summary["overtime"] += 1
             cur += timedelta(days=1)
-        out = {**m, "days": days, "shift_type": primary_shift[m["name"]]}
+        out = {**m, "days": days, "shift_type": member_shift[m["name"]]}
         out_members.append(out)
         grouped.setdefault(out["shift_type"], []).append(out)
 
@@ -1147,6 +1355,254 @@ def team_attendance(
     }
 
 
+_EXCEPTION_FIELDS = [
+    "name",
+    "employee",
+    "employee_name",
+    "work_date",
+    "shift_instance",
+    "work_session",
+    "attendance",
+    "exception_type",
+    "severity",
+    "description",
+    "status",
+    "assigned_to",
+    "resolution_type",
+    "resolution_note",
+    "resolved_by",
+    "resolved_at",
+]
+# Lightweight fields for the server-side summary aggregate (DNA §6.6 A).
+_EXCEPTION_SUMMARY_FIELDS = ["name", "status"]
+
+
+def _exception_summary(light_rows) -> dict:
+    """Per-status bucket counts over the full filtered set (SPA summary tiles)."""
+    buckets = pagination.bucket_counts(light_rows, "status")
+    return {
+        "total": len(light_rows or []),
+        "open": buckets.get("Open", 0),
+        "in_progress": buckets.get("In Progress", 0),
+        "escalated": buckets.get("Escalated", 0),
+        "resolved": buckets.get("Resolved", 0),
+        "ignored": buckets.get("Ignored", 0),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# HR admin "Chấm công" — VN Attendance Work Session directory (DNA §6.6 A)
+# --------------------------------------------------------------------------- #
+_WORK_SESSION_DOCTYPE = "VN Attendance Work Session"
+# Fields mirror the SPA projection (useAdmin SESSION_FIELDS) — the corrected,
+# real column names that the legacy getList read already used successfully.
+_WORK_SESSION_FIELDS = [
+    "name",
+    "employee",
+    "employee_name",
+    "work_date",
+    "shift_type",
+    "shift_instance",
+    "calculation_status",
+    "actual_checkin",
+    "actual_checkout",
+    "planned_start",
+    "planned_end",
+    "actual_within_shift_hours",
+    "late_minutes",
+    "early_leave_minutes",
+    "approved_overtime_hours",
+    "payable_day",
+]
+_WORK_SESSION_SUMMARY_FIELDS = [
+    "name",
+    "late_minutes",
+    "early_leave_minutes",
+    "approved_overtime_hours",
+]
+
+
+def _ws_float(value) -> float:
+    """Best-effort numeric coerce for a threshold summary (never raises)."""
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _work_session_summary(light_rows) -> dict:
+    """Threshold counts over the full filtered set (SPA summary tiles)."""
+    rows = light_rows or []
+    return {
+        "total": len(rows),
+        "late": sum(1 for r in rows if _ws_float(r.get("late_minutes")) > 0),
+        "early": sum(1 for r in rows if _ws_float(r.get("early_leave_minutes")) > 0),
+        "overtime": sum(1 for r in rows if _ws_float(r.get("approved_overtime_hours")) > 0),
+    }
+
+
+# Candidate broad-search columns (DNA §6.6 A). Text + numeric are LIKE-matched
+# so typing a value/number still finds rows; datetime columns
+# (actual_checkin/actual_checkout/planned_*) are deliberately excluded — Frappe
+# casts the ``%q%`` literal to datetime → ``ParserError`` (DNA §6.6 A pitfall).
+_WORK_SESSION_SEARCH_FIELDS = [
+    "name",
+    "employee",
+    "employee_name",
+    "shift_type",
+    "late_minutes",
+    "early_leave_minutes",
+    "approved_overtime_hours",
+    "payable_day",
+]
+
+
+def _ws_search_or_filters(search: str | None) -> list | None:
+    """Broad-search ``or_filters`` (list form) for the work-session directory.
+
+    Columns are intersected with the DocType's real columns so an unmigrated
+    bench never raises "column does not exist" (DNA §6.6 A — ``_safe_fields``
+    philosophy). Falls back to the always-present text fields when the meta
+    lookup is unavailable (e.g. doctype not yet shipped).
+    """
+    q = (search or "").strip()
+    if not q:
+        return None
+    try:
+        valid = set(frappe.meta.get_table_columns(_WORK_SESSION_DOCTYPE) or [])
+    except Exception:
+        valid = set()
+    cols = [c for c in _WORK_SESSION_SEARCH_FIELDS if c in valid] if valid else [
+        "name",
+        "employee",
+        "employee_name",
+        "shift_type",
+    ]
+    _like = f"%{q}%"
+    return [[c, "like", _like] for c in cols] or None
+
+
+@frappe.whitelist()
+def list_work_sessions(
+    employee: str | None = None,
+    search: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    status: str | None = None,
+    shift_type: str | None = None,
+    limit: int = 100,
+    page: int = 1,
+    page_size: int = 0,
+    include_absent: int = 0,
+) -> list[dict] | dict:
+    """HR admin "Chấm công" list — ``VN Attendance Work Session`` rows.
+
+    Filters by employee + ``work_date`` window + ``calculation_status`` +
+    ``shift_type`` (DNA §6.2 — every content field has a popover filter, Law #2),
+    or a free-text ``search`` (OR-matched across employee / employee_name /
+    shift_type + numeric metrics — DNA §6.6 A, HR-BL-02) so the SPA broad-search
+    box no longer filters an already-loaded list client-side.
+
+    Pagination is **opt-in** (DNA §6.6 A): pass ``page`` + a positive
+    ``page_size`` to receive ``{"data": [...], "total": int, "summary": {...}}``
+    where ``total`` is counted via ``get_all().len`` (``db.count`` ignores
+    ``or_filters``) and ``summary`` aggregates the *full* filtered set so the
+    SPA summary tiles stay correct under pagination. Without ``page_size`` the
+    legacy bare-list return is preserved.
+    """
+    frappe.only_for(["HR Manager", "HR User", "System Manager"])
+    filters = []
+    if employee:
+        filters.append(["employee", "=", emp_utils.emp_name(employee)])
+    if from_date:
+        filters.append(["work_date", ">=", getdate(from_date)])
+    if to_date:
+        filters.append(["work_date", "<=", getdate(to_date)])
+    if status and status.strip():
+        filters.append(["calculation_status", "=", status.strip()])
+    if shift_type and shift_type.strip():
+        filters.append(["shift_type", "=", shift_type.strip()])
+    # By default hide sessions an employee never clocked into (absent / off-day /
+    # future-generated) — pass include_absent=1 to see them.
+    if not int(include_absent or 0):
+        filters.append(["actual_checkin", "is", "set"])
+    or_filters = _ws_search_or_filters(search)
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 100
+
+    if page_size:
+        summary = _work_session_summary(
+            pagination.all_rows(
+                _WORK_SESSION_DOCTYPE,
+                fields=_WORK_SESSION_SUMMARY_FIELDS,
+                filters=filters or None,
+                or_filters=or_filters or None,
+            )
+        )
+        page = max(1, pagination.as_int(page, 1))
+        page_size = max(1, pagination.as_int(page_size, 20))
+        start = (page - 1) * page_size
+        try:
+            rows = (
+                frappe.get_all(
+                    _WORK_SESSION_DOCTYPE,
+                    fields=_WORK_SESSION_FIELDS,
+                    filters=filters or None,
+                    or_filters=or_filters or None,
+                    order_by="work_date desc",
+                    limit_start=start,
+                    limit_page_length=page_size,
+                )
+                or []
+            )
+        except Exception:
+            frappe.log_error(title="attendance.list_work_sessions failed")
+            return {"data": [], "total": summary["total"], "summary": summary}
+        return {"data": rows, "total": summary["total"], "summary": summary}
+
+    return frappe.get_all(
+        _WORK_SESSION_DOCTYPE,
+        fields=_WORK_SESSION_FIELDS,
+        filters=filters or None,
+        or_filters=or_filters or None,
+        order_by="work_date desc",
+        limit_page_length=limit,
+    )
+
+
+@frappe.whitelist()
+def get_work_session_filter_options() -> dict:
+    """Distinct dropdown values for the gear popover (DNA §6.3 / §6.4 step 2).
+
+    Returns ``calculation_status`` buckets + the ``Shift Type`` catalogue so the
+    SPA ``SearchableSelect`` lists never render empty. Degrades to empty lists
+    when the Work Session DocType / Shift Type table is not shipped yet.
+    """
+    frappe.only_for(["HR Manager", "HR User", "System Manager"])
+    statuses: list[str] = []
+    try:
+        rows = frappe.get_all(
+            _WORK_SESSION_DOCTYPE,
+            fields=["calculation_status"],
+            filters={"calculation_status": ["is", "set"]},
+            group_by="calculation_status",
+            order_by="calculation_status asc",
+            limit_page_length=0,
+        )
+        statuses = [r.get("calculation_status") for r in rows if r.get("calculation_status")]
+    except Exception:
+        statuses = []
+    shift_types: list[dict] = []
+    try:
+        for name in frappe.get_all("Shift Type", pluck="name", order_by="name asc") or []:
+            shift_types.append({"label": name, "value": name})
+    except Exception:
+        shift_types = []
+    return {"statuses": statuses, "shift_types": shift_types}
+
+
 @frappe.whitelist()
 def get_exceptions(
     status: str = "",
@@ -1154,12 +1610,25 @@ def get_exceptions(
     work_date: str = "",
     from_date: str = "",
     to_date: str = "",
+    exception_type: str = "",
+    severity: str = "",
+    assigned_to: str = "",
+    search: str = "",
     limit: int = 200,
-) -> list[dict]:
+    page: int = 1,
+    page_size: int = 0,
+) -> list[dict] | dict:
     """Plan §2.6.7 — list ``VN Attendance Exception`` rows for the HR screen.
 
     Honours Frappe role permissions (HR Manager / HR User have read via the
     doctype JSON). Gated by ``frappe.only_for`` (no permission bypass).
+
+    Pagination is **opt-in** (DNA §6.6 A): pass ``page`` + a positive
+    ``page_size`` to receive ``{"data": [...], "total": int, "summary": {...}}``
+    where ``total`` is counted via ``get_all().len`` (``db.count`` ignores
+    ``or_filters``) and ``summary`` aggregates the *full* filtered set so the
+    SPA summary tiles stay correct under pagination. Without ``page_size`` the
+    legacy bare-list return is preserved.
     """
     frappe.only_for(["HR Manager", "HR User", "System Manager"])
     filters = []
@@ -1173,31 +1642,66 @@ def get_exceptions(
         filters.append(["work_date", ">=", getdate(from_date)])
     if to_date:
         filters.append(["work_date", "<=", getdate(to_date)])
+    # Popover filters (DNA §6.2 — gear covers every content field, server-side).
+    if exception_type:
+        filters.append(["exception_type", "=", exception_type])
+    if severity:
+        filters.append(["severity", "=", severity])
+    if assigned_to:
+        filters.append(["assigned_to", "=", assigned_to])
+    # Broad search (DNA §6.6 D) — OR-match across the exception's text fields.
+    or_filters = None
+    _q = (search or "").strip()
+    if _q:
+        _like = f"%{_q}%"
+        or_filters = [
+            ["name", "like", _like],
+            ["employee", "like", _like],
+            ["employee_name", "like", _like],
+            ["exception_type", "like", _like],
+            ["description", "like", _like],
+            ["assigned_to", "like", _like],
+        ]
     try:
         limit = int(limit)
     except (TypeError, ValueError):
         limit = 200
+
+    if page_size:
+        summary = _exception_summary(
+            pagination.all_rows(
+                "VN Attendance Exception",
+                fields=_EXCEPTION_SUMMARY_FIELDS,
+                filters=filters or None,
+                or_filters=or_filters or None,
+            )
+        )
+        page = max(1, pagination.as_int(page, 1))
+        page_size = max(1, pagination.as_int(page_size, 20))
+        start = (page - 1) * page_size
+        try:
+            rows = (
+                frappe.get_all(
+                    "VN Attendance Exception",
+                    fields=_EXCEPTION_FIELDS,
+                    filters=filters or None,
+                    or_filters=or_filters or None,
+                    order_by="work_date desc",
+                    limit_start=start,
+                    limit_page_length=page_size,
+                )
+                or []
+            )
+        except Exception:
+            frappe.log_error(title="attendance.get_exceptions failed")
+            return {"data": [], "total": summary["total"], "summary": summary}
+        return {"data": rows, "total": summary["total"], "summary": summary}
+
     return frappe.get_all(
         "VN Attendance Exception",
-        fields=[
-            "name",
-            "employee",
-            "employee_name",
-            "work_date",
-            "shift_instance",
-            "work_session",
-            "attendance",
-            "exception_type",
-            "severity",
-            "description",
-            "status",
-            "assigned_to",
-            "resolution_type",
-            "resolution_note",
-            "resolved_by",
-            "resolved_at",
-        ],
+        fields=_EXCEPTION_FIELDS,
         filters=filters or None,
+        or_filters=or_filters or None,
         order_by="work_date desc",
         limit_page_length=limit,
     )
@@ -1613,16 +2117,38 @@ def _assert_own_correction(employee: str) -> None:
         )
 
 
+def _filter_correction_rows(rows: list[dict], search: str | None, fields: tuple[str, ...]) -> list[dict]:
+    """Server-side free-text filter across the given row fields (DNA §6.6 D).
+
+    Applied after the rows are fetched so it never risks an ``or_filters``
+    "column does not exist" error on the correction list.
+    """
+    q = (search or "").strip().lower()
+    if not q:
+        return rows
+    return [r for r in rows if any(q in str(r.get(k) or "").lower() for k in fields)]
+
+
 @frappe.whitelist()
 def my_correction_requests(
     employee: str | None = None,
     from_date: str | None = None,
     to_date: str | None = None,
-) -> list[dict]:
+    search: str | None = None,
+    page: int = 1,
+    page_size: int = 0,
+) -> list[dict] | dict:
     """Plan §10.2 — the caller's correction requests, narrowed by work_date.
 
-    Managers (HR Manager/System Manager) may pass any ``employee``; a plain
-    Employee is scoped to their own record.
+    ``search`` OR-matches a free-text query across the row's text fields
+    (name / correction_type / reason / work_date / employee / employee_name),
+    applied server-side (DNA §6.6 D, HR-BL-08). Managers (HR Manager/System
+    Manager) may pass any ``employee``; a plain Employee is scoped to own.
+
+    Pagination is **opt-in** (DNA §6.6 A): pass ``page`` + a positive
+    ``page_size`` to receive ``{"data": [...], "total": int, "summary": None}``
+    (post-query filter → ``total`` is the filtered list length); without
+    ``page_size`` the legacy bare-list return is preserved.
     """
     emp = _resolve_employee(employee)
     _assert_own_correction(emp)
@@ -1631,12 +2157,18 @@ def my_correction_requests(
     if from_date or to_date:
         filters["work_date"] = ["between", [from_date or to_date, to_date or from_date]]
 
-    return frappe.db.get_all(
+    rows = frappe.db.get_all(
         CR_DOCTYPE,
         filters=filters,
         fields=_CR_LIST_FIELDS,
         order_by="work_date desc, creation desc",
     )
+    filtered = _filter_correction_rows(
+        rows,
+        search,
+        ("name", "correction_type", "reason", "work_date", "employee", "employee_name"),
+    )
+    return pagination.paginate_filtered(filtered, page=page, page_size=page_size)
 
 
 @frappe.whitelist()
@@ -1746,8 +2278,16 @@ def get_monthly_period_detail(name):
 
 @frappe.whitelist()
 def generate_monthly_period(**kwargs):
-    """FE contract → :func:`attendance_period.generate_monthly_period`."""
-    return _ap.generate_monthly_period(**kwargs)
+    """FE contract → :func:`attendance_period.generate_monthly_period`.
+
+    The RPC payload includes Frappe-internal keys (``cmd``…) that the real
+    function's strict signature rejects — forward only the parameters it
+    actually accepts.
+    """
+    import inspect
+
+    accepted = set(inspect.signature(_ap.generate_monthly_period).parameters)
+    return _ap.generate_monthly_period(**{k: v for k, v in kwargs.items() if k in accepted})
 
 
 @frappe.whitelist()

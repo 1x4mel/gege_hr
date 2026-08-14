@@ -46,11 +46,14 @@ AUDIT_TYPES = (
     "Payroll Approve",
     "Payroll Publish",
     "Manual Override",
+    "Checkout Miss Explain",
+    "Checkout Miss Resolve",
 )
 
 # Coarse category groupings, useful for the audit-list filter UI.
 AUDIT_CATEGORIES = {
     "attendance": ("Check-in", "Check-out", "Work Session Recalculate"),
+    "checkout_miss": ("Checkout Miss Explain", "Checkout Miss Resolve"),
     "leave": ("Leave Submit", "Leave Cancel", "Leave Approve", "Leave Reject"),
     "overtime": ("OT Submit", "OT Approve"),
     "correction": ("Correction Submit", "Correction Approve"),

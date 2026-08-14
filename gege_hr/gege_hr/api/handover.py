@@ -21,6 +21,7 @@ from frappe.utils import now
 from gege_hr.gege_hr.utils import employee as emp_utils
 from gege_hr.gege_hr.utils import handover as handover_utils
 from gege_hr.gege_hr.utils import notify
+from gege_hr.gege_hr.utils import pagination
 
 DOCTYPE = "VN Leave Handover Task"
 _LIST_FIELDS = [
@@ -68,21 +69,55 @@ def _table_ready() -> bool:
 # --------------------------------------------------------------------------- #
 # Read endpoints
 # --------------------------------------------------------------------------- #
+def _match_handover_row(row: dict, search: str | None) -> bool:
+    """Generic server-side free-text match across a handover row's values
+    (DNA §6.6 D, HR-BL-09)."""
+    q = (search or "").strip().lower()
+    if not q:
+        return True
+    return any(q in str(v).lower() for v in row.values() if v is not None)
+
+
 @frappe.whitelist()
-def my_handovers(status: str | None = None) -> list[dict]:
-    """Tasks handed *to* the caller (the receiver must action them)."""
+def my_handovers(
+    status: str | None = None,
+    search: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    page: int = 1,
+    page_size: int = 0,
+) -> list[dict] | dict:
+    """Tasks handed *to* the caller (the receiver must action them).
+
+    ``search`` OR-matches a free-text query across the normalised row's values,
+    applied server-side (DNA §6.6 D, HR-BL-09) — ready for the SPA broad search.
+
+    Pagination is **opt-in** (DNA §6.6 A): pass ``page`` + a positive
+    ``page_size`` to receive ``{"data": [...], "total": int, "summary": None}``
+    (post-query filter → ``total`` is the filtered list length); without
+    ``page_size`` the legacy bare-list return is preserved.
+    """
     emp = _current_employee()
     if not emp or not _table_ready():
-        return []
-    filters: dict = {"to_employee": emp}
+        return {"data": [], "total": 0, "summary": None} if page_size else []
+    # List filters (DNA §6.6 B): a dict cannot hold two conditions on the same
+    # field, so the handover_date range is expressed as separate >= / <= entries.
+    filters: list = [["to_employee", "=", emp]]
     if status:
-        filters["status"] = status
+        filters.append(["status", "=", status])
+    if date_from:
+        filters.append(["handover_date", ">=", date_from])
+    if date_to:
+        filters.append(["handover_date", "<=", date_to])
     try:
         rows = frappe.db.get_all(DOCTYPE, filters=filters, fields=_LIST_FIELDS, order_by="handover_date desc")
     except Exception:
         frappe.log_error(title="handover.my_handovers failed")
-        return []
-    return [handover_utils.handover_row(r) for r in rows]
+        return {"data": [], "total": 0, "summary": None} if page_size else []
+    out = [handover_utils.handover_row(r) for r in rows]
+    return pagination.paginate_filtered(
+        [r for r in out if _match_handover_row(r, search)], page=page, page_size=page_size
+    )
 
 
 @frappe.whitelist()
@@ -90,43 +125,44 @@ def leave_handovers(
     leave_application: str | None = None,
     employee: str | None = None,
     status: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    search: str | None = None,
 ) -> list[dict]:
-    """Manager list. HR sees all; otherwise scoped to the caller's involvement."""
+    """Manager list. HR sees all; otherwise scoped to the caller's involvement.
+
+    ``search`` OR-matches a free-text query across the normalised row's values,
+    applied server-side (DNA §6.6 D) — the same broad-search contract as
+    ``my_handovers``.
+    """
     if not _table_ready():
         return []
-    filters: dict = {}
+    # List filters (DNA §6.6 B): handover_date range as separate >= / <= entries.
+    filters: list = []
     if leave_application:
-        filters["leave_application"] = leave_application
+        filters.append(["leave_application", "=", leave_application])
     if status:
-        filters["status"] = status
+        filters.append(["status", "=", status])
     if employee:
-        filters["employee"] = employee
-    if not _is_manager():
-        emp = _current_employee()
-        # A non-HR user may only see rows where they are from or to.
-        if not emp:
-            return []
-        try:
-            rows = frappe.db.get_all(
-                DOCTYPE,
-                filters=filters,
-                fields=_LIST_FIELDS,
-                order_by="handover_date desc",
-            )
-        except Exception:
-            frappe.log_error(title="handover.leave_handovers failed")
-            return []
-        return [
-            handover_utils.handover_row(r)
-            for r in rows
-            if r.get("from_employee") == emp or r.get("to_employee") == emp
-        ]
+        filters.append(["employee", "=", employee])
+    if date_from:
+        filters.append(["handover_date", ">=", date_from])
+    if date_to:
+        filters.append(["handover_date", "<=", date_to])
     try:
         rows = frappe.db.get_all(DOCTYPE, filters=filters, fields=_LIST_FIELDS, order_by="handover_date desc")
     except Exception:
         frappe.log_error(title="handover.leave_handovers failed")
         return []
-    return [handover_utils.handover_row(r) for r in rows]
+    # Broad search (DNA §6.6 D) over the normalised row's values, then scope.
+    out = [r for r in (handover_utils.handover_row(r) for r in rows) if _match_handover_row(r, search)]
+    if _is_manager():
+        return out
+    # A non-HR user may only see rows where they are from or to.
+    emp = _current_employee()
+    if not emp:
+        return []
+    return [r for r in out if r.get("from_employee") == emp or r.get("to_employee") == emp]
 
 
 @frappe.whitelist()
