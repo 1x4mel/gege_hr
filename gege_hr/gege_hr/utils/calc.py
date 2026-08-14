@@ -962,6 +962,17 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
     if not si:
         return None
 
+    # H2 race guard: checkin hook, OT-approval write-back and manual recalc can
+    # all enqueue persist_work_session for the SAME shift instance at once.
+    # Both used to read ws=None → both INSERT → duplicate Work Session (double
+    # hours in payroll). Serialize on the Shift Instance row itself (FOR UPDATE,
+    # held until the request/job commits): the second runner re-reads the WS
+    # created by the first and takes the update path instead.
+    frappe.db.sql(
+        "SELECT name FROM `tabShift Instance` WHERE name = %(name)s FOR UPDATE",
+        {"name": shift_instance_name},
+    )
+
     logs = (
         frappe.db.get_all(
             "Employee Checkin",
@@ -994,8 +1005,9 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
 
     if ws_name:
         ws = frappe.get_doc("VN Attendance Work Session", ws_name)
-        # CAS lock (plan §19.3): refuse to overwrite a Locked / Recalculating session.
-        if ws.calculation_status in ("Locked",):
+        # CAS lock (plan §19.3): refuse to overwrite a Locked / Recalculating
+        # session (the comment always said both — the code now matches it).
+        if ws.calculation_status in ("Locked", "Recalculating"):
             return ws_name
         for k, v in payload.items():
             if k == "segments":

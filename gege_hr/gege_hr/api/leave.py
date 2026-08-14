@@ -19,6 +19,8 @@ here are guarded so a missing Frappe HR table degrades gracefully rather than
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import frappe
 from frappe import _
 from frappe.utils import cint, getdate
@@ -1066,11 +1068,43 @@ def _save_or_submit(doc) -> None:
     approver's role the write/submit permission on Leave Application (Role
     Permissions Manager) — that keeps the permission audit trail intact. Any
     failure is re-raised so the endpoint surfaces the real error.
+
+    Concurrency: two approvers clicking at the same moment both read the OLD
+    balance (the other's ledger entry not yet committed) and both submit →
+    balance goes negative. Serialize per-employee by taking a row lock on the
+    employee's Leave Allocation rows (SELECT ... FOR UPDATE) for the duration
+    of the submit: the second request blocks until the first commits, then
+    HRMS validate() sees the fresh balance and throws the insufficient-balance
+    error instead of letting both through.
     """
-    if getattr(doc, "docstatus", 0) == 0:
-        doc.submit()
-        return
-    doc.save()
+    with _employee_leave_lock(doc.employee):
+        if getattr(doc, "docstatus", 0) == 0:
+            doc.reload()
+            if getattr(doc, "docstatus", 0) != 0:
+                frappe.throw(
+                    _("Đơn nghỉ đã được duyệt bởi người khác — không duyệt 2 lần."),
+                    frappe.ValidationError,
+                )
+            doc.submit()
+            return
+        doc.save()
+
+
+@contextmanager
+def _employee_leave_lock(employee: str):
+    """Row-lock the employee's leave allocations (FOR UPDATE) inside the open
+    transaction. Locks are held until COMMIT/ROLLBACK — i.e. until the request
+    finishes — so concurrent approve/submit for the SAME employee serialize
+    here, while different employees never block each other. Uses the shared
+    db.sql transaction of the request (no autocommit)."""
+    if employee:
+        frappe.db.sql(
+            "SELECT name FROM `tabLeave Allocation`"
+            " WHERE employee = %(employee)s AND docstatus < 2"
+            " FOR UPDATE",
+            {"employee": employee},
+        )
+    yield
 
 
 def _after_leave_decision(doc, *, approved: bool, reason: str = "") -> None:
