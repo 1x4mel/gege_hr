@@ -110,6 +110,27 @@ def _get_period(name: str):
         frappe.throw(_("Kỳ lương {0} không tồn tại.").format(name))
 
 
+def _claim_period_for_calculation(period_name: str) -> None:
+    """Atomic claim: only one request at a time may run the calculation loop.
+
+    Without this, two concurrent "Tính lương" requests both read status=Draft,
+    both loop employees, and both insert review lines → duplicate pay per
+    employee (double Salary Slip). Guarded UPDATE: the loser sees 0 rows and
+    aborts before touching any line.
+    """
+    claimed = frappe.db.sql(
+        "UPDATE `tabVN Payroll Review Period` SET status = 'Calculating'"
+        " WHERE name = %(name)s AND status IN ('Draft', 'Calculated', 'Calculating')",
+        {"name": period_name},
+    )
+    frappe.db.commit()
+    if not claimed:
+        frappe.throw(
+            _("Kỳ lương đang được tính hoặc đã chốt — không thể tính lại lúc này."),
+            frappe.ValidationError,
+        )
+
+
 def _resolve(employee: str | None) -> str:
     if employee:
         # The SPA may echo the whole Employee object; coerce to its name string
@@ -482,6 +503,7 @@ def calculate_payroll_review(name: str | None = None) -> dict:
     """
     _assert_closer()
     period = _get_period(name)
+    _claim_period_for_calculation(period.name)
 
     # Load configurable settings ONCE (plan: payroll-hourly-rate-design).
     time_brackets = calc.load_time_brackets()

@@ -13,7 +13,7 @@
   {"fieldname": "to_date", "fieldtype": "Date", "label": "To Date", "reqd": 1},
   {"fieldname": "col1", "fieldtype": "Column Break"},
   {"fieldname": "attendance_period", "fieldtype": "Link", "label": "Attendance Period", "options": "VN Monthly Attendance Period"},
-  {"fieldname": "status", "default": "Draft", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Status", "options": "Draft\nCalculated\nApproved\nSlips Generated\nPublished\nCancelled"},
+  {"fieldname": "status", "default": "Draft", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Status", "options": "Draft\nCalculating\nCalculated\nApproved\nSlips Generated\nPublished\nCancelled"},
   {"fieldname": "totals_break", "fieldtype": "Section Break", "label": "Totals"},
   {"fieldname": "total_employees", "default": "0", "fieldtype": "Int", "in_list_view": 1, "label": "Total Employees", "read_only": 1},
   {"fieldname": "total_gross_pay", "default": "0", "fieldtype": "Currency", "in_list_view": 1, "label": "Total Gross Pay", "options": "Company:company:default_currency", "read_only": 1},

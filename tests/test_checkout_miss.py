@@ -60,6 +60,7 @@ class StubFrappe:
         self._settings = settings or {}
         self.created_docs = []          # payloads passed to get_doc
         self.set_values = []            # (doctype, name, updates)
+        self.sql_claims = []            # (query, params) — guarded UPDATE claims
         self.committed = False
 
     class db:  # noqa: N801 — mimic frappe.db namespace
@@ -70,6 +71,12 @@ class StubFrappe:
 
         class _DB:
             def sql(inner, query, params=None, as_dict=False, **_kw):
+                # Guarded UPDATE claims (H3) must report "1 row affected" so the
+                # caller believes it won the claim; other statements return rows.
+                q = (query or "").strip().upper()
+                if q.startswith("UPDATE"):
+                    outer.sql_claims.append((query, params))
+                    return [[1]] if not as_dict else [{"affected": 1}]
                 return list(outer._sessions)
 
             def get_all(inner, doctype, filters=None, fields=None, **_kw):
@@ -186,9 +193,13 @@ def test_t2_day_in_only_autocloses_at_planned_end(cm):
     assert tickets[0]["status"] == "Pending"
     assert tickets[0]["occurrence_no"] == 1
     assert tickets[0]["penalty_amount"] == 0
-    # work session marked closed + auto flag
+    # work session claimed via guarded UPDATE (vn_auto_checkout 0 → 1), then
+    # stamped closed via set_value
+    claims = [c for c in stub.sql_claims if "vn_auto_checkout" in (c[0] or "")]
+    assert claims, "expected a guarded UPDATE claim on vn_auto_checkout"
+    assert claims[0][1] == {"name": sess["name"]}
     sv = [s for s in stub.set_values if s[0] == "VN Attendance Work Session"]
-    assert sv and sv[0][2]["vn_auto_checkout"] == 1
+    assert sv and "vn_auto_checkout" not in sv[0][2]
     assert sv[0][2]["actual_checkout"] == sess["planned_end"]
 
 

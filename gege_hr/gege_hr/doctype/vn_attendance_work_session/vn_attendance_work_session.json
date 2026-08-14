@@ -9,7 +9,7 @@
   {"fieldname": "employee", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Employee", "options": "Employee", "reqd": 1},
   {"fieldname": "employee_name", "fieldtype": "Data", "in_list_view": 1, "label": "Employee Name", "read_only": 1},
   {"fieldname": "work_date", "fieldtype": "Date", "in_list_view": 1, "in_standard_filter": 1, "label": "Work Date", "reqd": 1},
-  {"fieldname": "shift_instance", "fieldtype": "Link", "label": "Shift Instance", "options": "VN Employee Shift Instance"},
+  {"fieldname": "shift_instance", "fieldtype": "Link", "label": "Shift Instance", "options": "VN Employee Shift Instance", "unique": 1},
   {"fieldname": "shift_type", "fieldtype": "Link", "label": "Shift Type", "options": "Shift Type"},
   {"fieldname": "col1", "fieldtype": "Column Break"},
   {"fieldname": "company", "fieldtype": "Link", "label": "Company", "options": "Company", "reqd": 1},
