@@ -70,6 +70,11 @@ class _FakeDoc:
     def submit(self):
         self.docstatus = 1
 
+    def reload(self):
+        # Real Frappe re-reads the row; the stub is already "fresh" (C2's
+        # double-submit re-check stays a no-op here).
+        return self
+
     def db_update(self):
         pass
 
@@ -107,6 +112,12 @@ class _FakeDB:
         self.calls.append((doctype, dict(filters or {})))
         rows = self.rows_by_doctype.get(doctype, self.get_all_rows)
         return [dict(r) for r in rows]
+
+    def sql(self, query, params=None, **_kw):
+        # SELECT ... FOR UPDATE lock taken by _save_or_submit's per-employee
+        # serialization (C2): no-op in the stub (single "connection").
+        self.calls.append(("_sql_", {"q": str(query)[:60], "params": params}))
+        return []
 
 
 @pytest.fixture
