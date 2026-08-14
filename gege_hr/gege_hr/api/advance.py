@@ -208,6 +208,7 @@ def my_advance_requests(
         filters=filters,
         fields=_LIST_FIELDS,
         order_by="posting_date desc, creation desc",
+        limit_page_length=pagination.MAX_PAGE_SIZE * 10,  # newest-first bound
     )
     filtered = _filter_rows(
         rows,
@@ -246,6 +247,7 @@ def all_advance_requests(
         filters=filters,
         fields=_LIST_FIELDS,
         order_by="posting_date desc, creation desc",
+        limit_page_length=pagination.MAX_PAGE_SIZE * 10,
     )
     return rows
 

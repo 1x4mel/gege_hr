@@ -26,6 +26,7 @@ from gege_hr.gege_hr.api.admin import (
     _default_company,
     _require_hr_admin,
 )
+from gege_hr.gege_hr.utils import pagination
 
 EARNING_COMPONENTS = "earnings"
 DEDUCTION_COMPONENTS = "deductions"
@@ -99,7 +100,7 @@ def list_salary_structures(company: str = "", is_active: int = 1, limit: int = 2
         "Salary Structure",
         fields=["name", "company", "payroll_frequency", "is_active", "currency"],
         filters=filters,
-        limit_page_length=limit,
+        limit_page_length=pagination.clamp_limit(limit, default=200),
         order_by="name asc",
     )
     return rows
@@ -309,7 +310,7 @@ def list_salary_assignments(employee: str = "", limit: int = 200) -> list[dict]:
         # 1054 "Unknown column 'to_date'". Removed.
         fields=["name", "employee", "employee_name", "salary_structure", "from_date", "base", "company"],
         filters=filters,
-        limit_page_length=limit,
+        limit_page_length=pagination.clamp_limit(limit, default=200),
         order_by="from_date desc",
     )
     return rows
@@ -329,7 +330,7 @@ def list_leave_periods(company: str = "", is_active: int = 1, limit: int = 100) 
         "Leave Period",
         fields=["name", "from_date", "to_date", "company", "is_active"],
         filters=filters,
-        limit_page_length=limit,
+        limit_page_length=pagination.clamp_limit(limit, default=200),
         order_by="from_date desc",
     )
     return rows
@@ -388,7 +389,10 @@ def list_leave_policies(limit: int = 200) -> list[dict]:
     """Return Leave Policies + their annual allocation lines."""
     _require_hr_admin()
     rows = frappe.get_all(
-        "Leave Policy", fields=["name", "docstatus"], limit_page_length=limit, order_by="name asc"
+        "Leave Policy",
+        fields=["name", "docstatus"],
+        limit_page_length=pagination.clamp_limit(limit, default=200),
+        order_by="name asc",
     )
     out = []
     for r in rows:
@@ -545,7 +549,7 @@ def list_leave_policy_assignments(employee: str = "", limit: int = 200) -> list[
             "company",
         ],
         filters=filters,
-        limit_page_length=limit,
+        limit_page_length=pagination.clamp_limit(limit, default=200),
         order_by="effective_from desc",
     )
     return rows

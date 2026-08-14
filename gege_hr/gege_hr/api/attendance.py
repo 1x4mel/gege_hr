@@ -1527,10 +1527,7 @@ def list_work_sessions(
     if not int(include_absent or 0):
         filters.append(["actual_checkin", "is", "set"])
     or_filters = _ws_search_or_filters(search)
-    try:
-        limit = int(limit)
-    except (TypeError, ValueError):
-        limit = 100
+    limit = pagination.clamp_limit(limit, default=100)
 
     if page_size:
         summary = _work_session_summary(
@@ -1542,7 +1539,7 @@ def list_work_sessions(
             )
         )
         page = max(1, pagination.as_int(page, 1))
-        page_size = max(1, pagination.as_int(page_size, 20))
+        page_size = pagination.clamp_limit(page_size, default=20)
         start = (page - 1) * page_size
         try:
             rows = (
@@ -1551,7 +1548,7 @@ def list_work_sessions(
                     fields=_WORK_SESSION_FIELDS,
                     filters=filters or None,
                     or_filters=or_filters or None,
-                    order_by="work_date desc",
+                    order_by="work_date desc, name desc",
                     limit_start=start,
                     limit_page_length=page_size,
                 )
@@ -1567,7 +1564,7 @@ def list_work_sessions(
         fields=_WORK_SESSION_FIELDS,
         filters=filters or None,
         or_filters=or_filters or None,
-        order_by="work_date desc",
+        order_by="work_date desc, name desc",
         limit_page_length=limit,
     )
 
@@ -1662,10 +1659,7 @@ def get_exceptions(
             ["description", "like", _like],
             ["assigned_to", "like", _like],
         ]
-    try:
-        limit = int(limit)
-    except (TypeError, ValueError):
-        limit = 200
+    limit = pagination.clamp_limit(limit, default=200)
 
     if page_size:
         summary = _exception_summary(
@@ -1686,7 +1680,7 @@ def get_exceptions(
                     fields=_EXCEPTION_FIELDS,
                     filters=filters or None,
                     or_filters=or_filters or None,
-                    order_by="work_date desc",
+                    order_by="work_date desc, name desc",
                     limit_start=start,
                     limit_page_length=page_size,
                 )
@@ -1702,7 +1696,7 @@ def get_exceptions(
         fields=_EXCEPTION_FIELDS,
         filters=filters or None,
         or_filters=or_filters or None,
-        order_by="work_date desc",
+        order_by="work_date desc, name desc",
         limit_page_length=limit,
     )
 
@@ -2162,6 +2156,7 @@ def my_correction_requests(
         filters=filters,
         fields=_CR_LIST_FIELDS,
         order_by="work_date desc, creation desc",
+        limit_page_length=pagination.MAX_PAGE_SIZE * 10,  # newest-first bound
     )
     filtered = _filter_correction_rows(
         rows,

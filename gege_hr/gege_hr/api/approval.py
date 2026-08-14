@@ -140,6 +140,11 @@ def _config(transaction_type: str) -> dict:
 # second lookup (matches the row docstring in hr-ui/src/api/index.js).
 # Fields common to every request row (none of these are type-specific, so they
 # never risk a "column does not exist" error on a given DocType).
+# Upper bound of pending rows fetched per request type in the unified inbox.
+# Unbounded fetches over the five request DocTypes could load the whole table
+# into one HTTP response (the inbox endpoint previously had NO limit at all).
+_PENDING_INBOX_ROW_CAP = 200
+
 _BASE_FIELDS = [
     "name",
     "employee",
@@ -231,17 +236,33 @@ def _normalise_row(row: dict, transaction_type: str, approver: str) -> dict:
     return out
 
 
-def _user_can_act(doc_dict: dict, transaction_type: str, user: str) -> bool:
-    """Does ``user`` hold the active approval step for this request?"""
+def _user_can_act(doc_dict: dict, transaction_type: str, user: str, _cache: dict | None = None) -> bool:
+    """Does ``user`` hold the active approval step for this request?
+
+    ``_cache`` (optional) memoizes matrix + employee lookups per request — pass
+    the same dict for every row of an inbox list to avoid the N×M query storm
+    (each row used to re-load its matrix + 3 employee queries)."""
     company = doc_dict.get("company")
-    matrices = _load_matrices(transaction_type, company)
+    if _cache is None:
+        matrices = _load_matrices(transaction_type, company)
+    else:
+        mkey = ("mat", transaction_type, company)
+        if mkey not in _cache:
+            _cache[mkey] = _load_matrices(transaction_type, company)
+        matrices = _cache[mkey]
     if not matrices:
         # No matrix configured → fall back to coarse role gating: HR/Line Manager
         # roles may act on any pending request of that type.
         roles = set(emp_utils.get_user_roles() or [])
         return bool(roles & (emp_utils.HR_MANAGER_ROLES | {"HR User", "Line Manager"}))
 
-    attrs = _employee_attrs(doc_dict.get("employee"))
+    if _cache is not None:
+        ekey = ("emp", doc_dict.get("employee"))
+        if ekey not in _cache:
+            _cache[ekey] = _employee_attrs(doc_dict.get("employee"))
+        attrs = _cache[ekey]
+    else:
+        attrs = _employee_attrs(doc_dict.get("employee"))
     matrix = rules.pick_matrix(matrices, attrs)
     if not matrix:
         return False
@@ -697,15 +718,24 @@ def get_pending_approvals(
         if to_date:
             filters.append([date_field, "<=", to_date])
         try:
-            rows = frappe.db.get_all(cfg["doctype"], filters=filters, fields=_row_fields(ttype))
+            rows = frappe.db.get_all(
+                cfg["doctype"],
+                filters=filters,
+                fields=_row_fields(ttype),
+                order_by="creation desc",
+                limit_page_length=_PENDING_INBOX_ROW_CAP,
+            )
         except Exception:
             rows = []
 
         # Keep only the rows the approver may actually act on (and match search).
+        # ``_act_cache`` memoizes matrix/employee lookups across rows (without it
+        # each row cost 3-4 queries — an inbox storm on busy days).
+        _act_cache: dict = {}
         actionable = [
             _normalise_row(r, ttype, user)
             for r in rows
-            if _user_can_act(r, ttype, user) and _matches_search(r, search)
+            if _user_can_act(r, ttype, user, _cache=_act_cache) and _matches_search(r, search)
         ]
         if not actionable:
             continue

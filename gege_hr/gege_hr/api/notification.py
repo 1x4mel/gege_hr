@@ -154,7 +154,7 @@ def get_notifications(
             fields=_NOTIFICATION_FIELDS,
             order_by="creation desc",
             limit_start=_coerce_int(offset, 0),
-            limit_page_length=_coerce_int(limit, 50),
+            limit_page_length=min(_coerce_int(limit, 50), 200),
         )
         or []
     )
