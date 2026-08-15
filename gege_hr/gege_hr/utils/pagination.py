@@ -20,6 +20,11 @@ from __future__ import annotations
 
 from typing import Any, Callable, Iterable, Sequence
 
+# Hard cap for any client-supplied page/limit (DNA §6.6 A). Without it a single
+# ``page_size=1000000`` dumps an entire table (audit logs, work sessions...)
+# through one HTTP response.
+MAX_PAGE_SIZE = 200
+
 
 def as_int(value: Any, default: int) -> int:
     """Coerce a whitelist arg (Frappe passes strings) to int with a fallback."""
@@ -27,6 +32,15 @@ def as_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def clamp_limit(value: Any, default: int = 100, maximum: int = MAX_PAGE_SIZE) -> int:
+    """Coerce a client ``limit``/``page_size`` and clamp it into [1, maximum].
+
+    Used by every list endpoint that reads a raw ``limit`` kwarg (legacy
+    non-enveloped paths) so a malicious/hungry client cannot bypass pagination.
+    """
+    return max(1, min(as_int(value, default), maximum))
 
 
 def count_all(
@@ -105,7 +119,7 @@ def page_slice(
     import frappe
 
     page = max(1, as_int(page, 1))
-    page_size = max(1, as_int(page_size, 20))
+    page_size = clamp_limit(page_size, default=20)
     total = count_all(doctype, filters=filters, or_filters=or_filters)
     start = (page - 1) * page_size
     try:
@@ -154,7 +168,7 @@ def paginate_filtered(
     if not page_size:
         return rows
     page = max(1, as_int(page, 1))
-    page_size = max(1, as_int(page_size, 20))
+    page_size = clamp_limit(page_size, default=20)
     start = (page - 1) * page_size
     return {"data": rows[start : start + page_size], "total": len(rows), "summary": summary}
 

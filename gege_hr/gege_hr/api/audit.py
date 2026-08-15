@@ -179,7 +179,7 @@ def audit_events(
             )
         )
         page = max(1, pagination.as_int(page, 1))
-        page_size = max(1, pagination.as_int(page_size, 20))
+        page_size = pagination.clamp_limit(page_size, default=20)
         start = (page - 1) * page_size
         try:
             rows = (
@@ -188,7 +188,7 @@ def audit_events(
                     filters=filters,
                     or_filters=or_filters,
                     fields=_LIST_FIELDS,
-                    order_by="created_at desc",
+                    order_by="created_at desc, name desc",
                     limit_start=start,
                     limit_page_length=page_size,
                 )
@@ -209,8 +209,8 @@ def audit_events(
             filters=filters,
             or_filters=or_filters,
             fields=_LIST_FIELDS,
-            order_by="created_at desc",
-            limit_page_length=int(limit or 200),
+            order_by="created_at desc, name desc",
+            limit_page_length=pagination.clamp_limit(limit, default=200),
         )
     except Exception:
         frappe.log_error(title="audit.audit_events failed")
@@ -258,8 +258,8 @@ def approval_logs(
                 "comment",
                 "action_at",
             ],
-            order_by="action_at desc",
-            limit_page_length=int(limit or 200),
+            order_by="action_at desc, name desc",
+            limit_page_length=pagination.clamp_limit(limit, default=200),
         )
     except Exception:
         frappe.log_error(title="audit.approval_logs failed")

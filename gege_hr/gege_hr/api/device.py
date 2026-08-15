@@ -307,17 +307,18 @@ def _enrich(devices: list[dict]) -> list[dict]:
         return []
     names = [d["name"] for d in devices]
 
-    # Latest punch per device (one query, group in Python).
+    # Latest punch per device — aggregated in SQL (MAX per device). The old
+    # "ORDER BY log_time DESC LIMIT 500 + first-per-device in Python" missed
+    # quiet devices whenever 500 recent logs all belonged to a few hot ones.
     last_log_map: dict[str, str] = {}
     for row in frappe.db.get_all(
         "VN Attendance Raw Log",
         filters={"device": ["in", names], "log_time": ["is", "set"]},
-        fields=["device", "log_time"],
-        order_by="log_time desc",
-        limit_page_length=500,
+        fields=["device", "max(log_time) as log_time"],
+        group_by="device",
     ):
         dev = row.get("device")
-        if dev and dev not in last_log_map:
+        if dev:
             last_log_map[dev] = row.get("log_time")
 
     # Active employee-mapping count per device.
@@ -498,23 +499,32 @@ def _process_pending_logs(device_name: str) -> int:
     """
     import frappe
 
-    pending = frappe.db.get_all(
-        "VN Attendance Raw Log",
-        filters={"device": device_name, "processing_status": "Pending"},
-        fields=["name"],
-        limit_page_length=500,
-    )
     count = 0
-    for row in pending:
-        try:
-            _process_raw_log(row["name"])
-            count += 1
-        except Exception as exc:  # noqa: BLE001 - log + continue, don't abort the batch
-            frappe.db.set_value(
-                "VN Attendance Raw Log",
-                row["name"],
-                {"processing_status": "Error", "validation_message": str(exc)[:300]},
-            )
+    # Page through the backlog instead of taking one 500-row slice: without the
+    # loop, anything past 500 pending rows stayed stuck until the next sync.
+    while True:
+        pending = frappe.db.get_all(
+            "VN Attendance Raw Log",
+            filters={"device": device_name, "processing_status": "Pending"},
+            fields=["name"],
+            limit_start=count,
+            limit_page_length=500,
+        )
+        if not pending:
+            break
+        for row in pending:
+            try:
+                _process_raw_log(row["name"])
+                count += 1
+            except Exception as exc:  # noqa: BLE001 - log + continue, don't abort the batch
+                frappe.db.set_value(
+                    "VN Attendance Raw Log",
+                    row["name"],
+                    {"processing_status": "Error", "validation_message": str(exc)[:300]},
+                )
+                count += 1  # errored rows also leave the Pending set
+        if len(pending) < 500:
+            break
     return count
 
 

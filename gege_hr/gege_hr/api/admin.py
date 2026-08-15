@@ -847,10 +847,7 @@ def list_employees(
         or_filters = [[c, "like", _like] for c in _EMPLOYEE_SEARCH_FIELDS if c in valid]
         if not or_filters:
             or_filters = None
-    try:
-        limit = int(limit)
-    except (TypeError, ValueError):
-        limit = 100
+    limit = pagination.clamp_limit(limit, default=100)
 
     if page_size:
         summary = _employee_summary(
@@ -1104,10 +1101,7 @@ def list_users(
             ["full_name", "like", _like],
             ["email", "like", _like],
         ]
-    try:
-        limit = int(limit)
-    except (TypeError, ValueError):
-        limit = 100
+    limit = pagination.clamp_limit(limit, default=100)
     fields = _safe_fields("User", _USER_LIST_FIELDS)
 
     if page_size:
@@ -1409,7 +1403,7 @@ def list_shift_assignments(
                 or_filters=or_filters,
                 fields=fields,
                 order_by="start_date desc",
-                limit_page_length=int(limit or 100),
+                limit_page_length=pagination.clamp_limit(limit, default=100),
             )
             or []
         )
@@ -1725,7 +1719,7 @@ def list_shift_requests(
             or_filters=or_filters,
             fields=fields,
             order_by="modified desc",
-            limit_page_length=int(limit or 100),
+            limit_page_length=pagination.clamp_limit(limit, default=100),
         )
     except Exception:
         return []

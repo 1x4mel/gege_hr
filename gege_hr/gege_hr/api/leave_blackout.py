@@ -199,7 +199,7 @@ def blackout_periods(
             or_filters=or_filters,
             fields=_LIST_FIELDS,
             order_by="from_date desc",
-            limit_page_length=int(limit or 200),
+            limit_page_length=pagination.clamp_limit(limit, default=200),
         )
     except Exception:
         frappe.log_error(title="blackout.blackout_periods failed")

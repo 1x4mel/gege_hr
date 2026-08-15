@@ -1432,7 +1432,8 @@ def my_payslips(
             "Salary Slip",
             filters=filters,
             fields=_PAYSLIP_FIELDS,
-            order_by="start_date desc",
+            order_by="start_date desc, name desc",
+            limit_page_length=pagination.MAX_PAGE_SIZE * 10,  # newest-first bound
         )
     except Exception:
         return {"data": [], "total": 0, "summary": None} if page_size else []
