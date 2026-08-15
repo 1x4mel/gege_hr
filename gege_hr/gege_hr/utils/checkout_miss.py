@@ -371,6 +371,17 @@ def penalise_expired(now=None) -> int:
             doc.status = "Penalised"
             doc.save()
             flipped += 1
+        except frappe.LinkValidationError:
+            # RUNTIME BUG (9.5k Error Log rows on the bench): tickets whose
+            # Shift Instance / auto-checkout logs were purged by seed scripts
+            # can NEVER pass doc.save() (link validation) — the scheduler
+            # retried them every hour forever. Flip the status directly so
+            # the ticket leaves the Pending set.
+            try:
+                frappe.db.set_value(MISS_DOCTYPE, name, "status", "Penalised", update_modified=False)
+                flipped += 1
+            except Exception:
+                frappe.log_error(title="checkout_miss penalise (dead-link) failed", message=name)
         except Exception:
             frappe.log_error(title="checkout_miss penalise failed", message=name)
     # S6 fix: report the number actually flipped, not len(names) — a failed
