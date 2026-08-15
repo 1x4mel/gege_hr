@@ -244,6 +244,7 @@ def get_employee_dashboard(
     FE contract but the headline tiles always reflect *today* (the monthly
     figures already live on the Monthly Attendance view).
     """
+    _require_hr_user()
 
     company = (company or "").strip() or None
     today = _today_portal()

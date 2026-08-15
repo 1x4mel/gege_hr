@@ -103,6 +103,12 @@ def list_training_events(status=None, search=None, page=1, page_size=20):
 def enroll_training(employee=None, training_event=None):
     if not employee or not training_event:
         frappe.throw("Cần nhân viên + lớp đào tạo.")
+    if not _is_manager():
+        own = frappe.db.get_value("Employee", {"user_id": frappe.session.user})
+        if employee != own:
+            frappe.throw("Chỉ được đăng ký đào tạo cho chính mình.")
+        if frappe.db.exists(EMP_TRAINING_DOCTYPE, {"employee": employee, "training_event": training_event}):
+            frappe.throw("Nhân viên đã đăng ký lớp đào tạo này.")
     doc = frappe.new_doc(EMP_TRAINING_DOCTYPE)
     doc.employee = employee
     doc.training_event = training_event
@@ -118,6 +124,10 @@ def my_training(employee=None, status=None, page=1, page_size=20):
         if not emp:
             frappe.throw("Tài khoản chưa liên kết nhân viên.")
         employee = emp
+    if not _is_manager():
+        own = frappe.db.get_value("Employee", {"user_id": frappe.session.user})
+        if employee != own:
+            frappe.throw("Chỉ xem được đào tạo của chính mình.")
     return _list(EMP_TRAINING_DOCTYPE, _EMP_TRAINING_FIELDS, [["employee", "=", employee]], status, None, page, page_size)
 
 

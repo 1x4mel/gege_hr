@@ -51,17 +51,27 @@ STATE = {
 # Helpers
 # --------------------------------------------------------------------------- #
 def _resolve_employee(employee: str | None) -> str:
-    """Resolve the employee for the caller (param > session user) → its *name*.
+    """Resolve the employee for the caller → its *name*.
 
-    ``employee`` may arrive as a full object from the SPA; coerce to the name
-    string so it is safe to use as a ``filters`` value.
+    Ownership-safe (IDOR fix): a plain Employee is ALWAYS pinned to the
+    session user's own employee — a client-supplied ``employee`` param is only
+    honoured for HR Manager / System Manager callers (who legitimately act on
+    behalf of others, e.g. admin custom check-ins). ``employee`` may arrive as
+    a full object from the SPA; it is coerced to the name string so it is safe
+    to use as a ``filters`` value.
     """
-    if employee:
-        return emp_utils.emp_name(employee)
-    emp = emp_utils.get_employee_for_user()
-    if not emp:
+    own = emp_utils.get_employee_for_user()
+    if not own:
         frappe.throw(_("Tài khoản này chưa được liên kết với nhân viên."), frappe.PermissionError)
-    return emp
+    if employee:
+        requested = emp_utils.emp_name(employee)
+        if requested == own or _is_hr_manager():
+            return requested
+        frappe.throw(
+            _("Bạn không có quyền truy cập dữ liệu của nhân viên khác."),
+            frappe.PermissionError,
+        )
+    return own
 
 
 def _checkins_for(employee: str, day: date) -> list[dict]:
@@ -1025,7 +1035,13 @@ def team_attendance(
     caller_roles = set(frappe.get_roles())
     is_company_wide = bool(caller_roles & {"HR Manager", "System Manager"})
 
-    manager_emp = emp_utils.emp_name(manager) if manager else emp_utils.get_employee_for_user()
+    # IDOR fix: a company-wide caller may inspect any manager's team; everyone
+    # else (Line Manager / HR User) is pinned to their OWN reports — a forged
+    # ``manager`` param must not expose another team's attendance.
+    if manager and is_company_wide:
+        manager_emp = emp_utils.emp_name(manager)
+    else:
+        manager_emp = emp_utils.get_employee_for_user()
     # The SPA forwards the logged-in user's email/username as ``manager``; that
     # is not an Employee *name*, so resolve it (by user_id) before filtering on
     # ``reports_to``. Falls back to the session's own Employee when unresolved.
@@ -2059,12 +2075,20 @@ def auto_mark_absent_job() -> None:
         ws_name = frappe.db.get_value("VN Attendance Work Session", {"shift_instance": si.name})
         if not ws_name:
             continue
-        missing = frappe.db.get_value("VN Attendance Work Session", ws_name, "missing_checkin")
+        missing, has_leave = frappe.db.get_value(
+            "VN Attendance Work Session", ws_name, ["missing_checkin", "has_leave"]
+        )
         if not missing:
             continue
+        # An approved leave covering the day is a legitimate absence — marking
+        # it absent zeroed the payable day and docked pay for employees who
+        # were on approved leave.
+        if has_leave:
+            continue
         try:
-            frappe.db.set_value("VN Attendance Work Session", ws_name, "absent", 1)
-            frappe.db.set_value("VN Attendance Work Session", ws_name, "payable_day", 0)
+            frappe.db.set_value(
+                "VN Attendance Work Session", ws_name, {"absent": 1, "payable_day": 0}
+            )
         except Exception:
             continue
 

@@ -270,6 +270,11 @@ def submit_goal(
     description: str | None = None,
 ) -> dict:
     emp = _resolve(employee)
+    _assert_own(emp)
+    if cycle:
+        cyc_status = frappe.db.get_value("Appraisal Cycle", cycle, "status")
+        if cyc_status in ("Completed", "Cancelled"):
+            frappe.throw("Chu kỳ đánh giá đã đóng — không thể thêm mục tiêu.")
     if not (goal_name or "").strip():
         frappe.throw("Cần tên mục tiêu.")
     company = frappe.db.get_value("Employee", emp, "company")
@@ -290,9 +295,14 @@ def submit_goal(
 
 @frappe.whitelist()
 def update_goal_progress(name: str | None = None, progress: float = 0) -> dict:
-    emp = frappe.db.get_value(GOAL_DOCTYPE, name, "employee")
-    if emp:
-        _assert_own(emp)
+    if not name or not frappe.db.exists(GOAL_DOCTYPE, name):
+        frappe.throw("Mục tiêu không tồn tại.")
+    emp, cycle = frappe.db.get_value(GOAL_DOCTYPE, name, ["employee", "appraisal_cycle"])
+    _assert_own(emp)
+    if cycle:
+        cyc_status = frappe.db.get_value("Appraisal Cycle", cycle, "status")
+        if cyc_status in ("Completed", "Cancelled"):
+            frappe.throw("Chu kỳ đánh giá đã đóng — không thể cập nhật mục tiêu.")
     p = max(0.0, min(100.0, _num(progress)))
     status = status_for_progress(p)
     frappe.db.set_value(GOAL_DOCTYPE, name, {"progress": p, "status": status})

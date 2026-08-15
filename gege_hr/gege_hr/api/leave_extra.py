@@ -213,6 +213,7 @@ def all_leave_encashments(
 @frappe.whitelist()
 def submit_leave_encashment(employee=None, leave_type=None, encashment_days=None, earning_component=None):
     emp = _resolve(employee)
+    _assert_own(emp)
     days = _num(encashment_days)
     if not leave_type or days <= 0:
         frappe.throw("Cần loại phép + số ngày đổi > 0.")
@@ -235,8 +236,9 @@ def approve_leave_encashment(name=None):
     doc = frappe.get_doc(ENCASHMENT_DOCTYPE, name)
     try:
         doc.submit()
-    except Exception:
-        frappe.log_error(title="leave_encashment.submit skipped")
+    except Exception as exc:
+        frappe.log_error(title="leave_encashment.submit failed")
+        frappe.throw(f"Duyệt đổi phép thất bại: {exc}")
     return {"name": doc.name, "status": doc.status}
 
 
@@ -245,10 +247,13 @@ def reject_leave_encashment(name=None, reason=None):
     if not _is_manager():
         frappe.throw("Chỉ HR/Manager từ chối.")
     doc = frappe.get_doc(ENCASHMENT_DOCTYPE, name)
-    try:
+    if doc.docstatus == 0:
+        doc.status = "Rejected"
+        if reason:
+            doc.reason = (doc.reason or "") + f" | Từ chối: {reason}"
+        doc.save(ignore_permissions=True)
+    else:
         doc.cancel()
-    except Exception:
-        frappe.log_error(title="leave_encashment.cancel skipped")
     return {"name": doc.name, "status": doc.status}
 
 
@@ -311,6 +316,7 @@ def all_comp_off_requests(
 @frappe.whitelist()
 def submit_comp_off(employee=None, leave_type=None, work_from_date=None, work_to_date=None, reason=None):
     emp = _resolve(employee)
+    _assert_own(emp)
     if not (work_from_date and work_to_date):
         frappe.throw("Cần ngày bắt đầu + kết thúc làm bù.")
     company = frappe.db.get_value("Employee", emp, "company")
@@ -332,8 +338,9 @@ def approve_comp_off(name=None):
     doc = frappe.get_doc(COMPOFF_DOCTYPE, name)
     try:
         doc.submit()
-    except Exception:
-        frappe.log_error(title="comp_off.submit skipped")
+    except Exception as exc:
+        frappe.log_error(title="comp_off.submit failed")
+        frappe.throw(f"Duyệt làm bù thất bại: {exc}")
     return {"name": doc.name, "status": doc.status}
 
 
@@ -342,10 +349,13 @@ def reject_comp_off(name=None, reason=None):
     if not _is_manager():
         frappe.throw("Chỉ HR/Manager từ chối.")
     doc = frappe.get_doc(COMPOFF_DOCTYPE, name)
-    try:
+    if doc.docstatus == 0:
+        doc.status = "Rejected"
+        if reason:
+            doc.reason = (doc.reason or "") + f" | Từ chối: {reason}"
+        doc.save(ignore_permissions=True)
+    else:
         doc.cancel()
-    except Exception:
-        frappe.log_error(title="comp_off.cancel skipped")
     return {"name": doc.name, "status": doc.status}
 
 

@@ -269,6 +269,7 @@ def periods(
     ``status`` is an exact match (Law #2). ``search`` is a broad free-text
     search (Law #3) OR-combined across the period's columns (DNA §6.6).
     """
+    _assert_closer()
     filters = {}
     if company:
         filters["company"] = company
@@ -360,6 +361,7 @@ def review_detail(
     already-loaded line list client-side. Numeric ranges use two separate list
     filters per field, not ``between`` (DNA §6.6 B).
     """
+    _assert_closer()
     name = (name or "").strip()
     if not name:
         frappe.throw(_("Thiếu mã kỳ lương."))
