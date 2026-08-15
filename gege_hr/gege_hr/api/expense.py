@@ -94,6 +94,7 @@ def my_expense_claims(
 ) -> dict:
     emp = _resolve(employee)
     _assert_own(emp)
+    _assert_own(emp)
     return _list(
         filters=[["employee", "=", emp]],
         status=status,
@@ -244,16 +245,24 @@ def submit_expense_claim(
     doc.expense_approver = expense_approver or frappe.session.user
     doc.remark = remark or ""
     doc.total_claimed_amount = total
-    doc.total_sanctioned_amount = total
+    doc.total_sanctioned_amount = 0  # sanctioned by the approver, not the submitter
     for r in rows:
         doc.append("expenses", r)
     doc.insert(ignore_permissions=True)
+    submit_note = ""
     try:
         doc.submit()
     except Exception:
         # Submit may require accounts setup; keep it Draft so HR can still action it.
         frappe.log_error(title="expense_claim.submit skipped (accounts not ready)")
-    return {"name": doc.name, "total": total, "status": doc.status, "approval_status": doc.approval_status}
+        submit_note = "Đơn đang ở nháp (chưa submit được) — HR sẽ xử lý."
+    return {
+        "name": doc.name,
+        "total": total,
+        "status": doc.status,
+        "approval_status": doc.approval_status,
+        "message": submit_note,
+    }
 
 
 @frappe.whitelist()
@@ -261,6 +270,8 @@ def approve_expense_claim(name: str | None = None) -> dict:
     if not _is_manager():
         frappe.throw("Chỉ HR/Manager duyệt chi phí.")
     doc = frappe.get_doc(CLAIM_DOCTYPE, name)
+    if doc.approval_status in ("Approved", "Rejected"):
+        frappe.throw(f"Đơn chi phí đã ở trạng thái {doc.approval_status} — không duyệt lại.")
     doc.approval_status = "Approved"
     doc.save()  # proper: runs validate + on_update (HR Manager grant via setup_permissions)
     return {"name": doc.name, "approval_status": doc.approval_status}
@@ -271,6 +282,8 @@ def reject_expense_claim(name: str | None = None, reason: str | None = None) -> 
     if not _is_manager():
         frappe.throw("Chỉ HR/Manager từ chối chi phí.")
     doc = frappe.get_doc(CLAIM_DOCTYPE, name)
+    if doc.approval_status in ("Approved", "Rejected"):
+        frappe.throw(f"Đơn chi phí đã ở trạng thái {doc.approval_status} — không đổi được.")
     doc.approval_status = "Rejected"
     if reason:
         doc.remark = reason

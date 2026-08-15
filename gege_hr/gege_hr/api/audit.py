@@ -282,7 +282,9 @@ def _date_window(from_date: str | None, to_date: str | None):
 # --------------------------------------------------------------------------- #
 # Write endpoint — internal, used by domain flows
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+# NOT whitelisted on purpose: the audit trail is legal evidence (NĐ 13/2023).
+# A whitelisted record() let any logged-in user forge audit events with an
+# arbitrary ``actor``; internal callers use log()/record() directly in code.
 def record(
     audit_type: str,
     company: str,

@@ -30,12 +30,28 @@ PREFIXES = {
 }
 
 
+# Reverse of PREFIXES — the fallback counter must count the RIGHT doctype.
+_PREFIX_TO_DOCTYPE = {v: k for k, v in PREFIXES.items()}
+
+
 def _next_sequence(prefix: str, stamp: str) -> int:
     """Deterministic-ish 6-digit counter from a Redis INCR per prefix+day."""
     try:
         n = frappe.cache().incr(f"gege_hr:seq:{prefix}:{stamp}")
     except Exception:
-        n = (frappe.db.count("VN Attendance Raw Log") or 0) + 1
+        # Redis unavailable: the OLD fallback counted "VN Attendance Raw Log"
+        # for EVERY prefix — a meaningless number that produced existing names
+        # (DuplicateEntryError) on WS/CR/SAR/... inserts. Count the prefix's
+        # own doctype + the number already used with today's stamp instead.
+        doctype = _PREFIX_TO_DOCTYPE.get(prefix)
+        if not doctype:
+            return 1
+        try:
+            total = frappe.db.count(doctype) or 0
+            used_today = frappe.db.count(doctype, {"name": ["like", f"{prefix}-{stamp}-%"]})
+            n = max(total, used_today) + 1
+        except Exception:
+            return 1
     return int(n)
 
 

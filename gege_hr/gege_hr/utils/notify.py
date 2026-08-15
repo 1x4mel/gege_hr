@@ -278,6 +278,10 @@ def _tickle(employee: str | None, notification_name: str | None) -> None:
         return
     try:
         target_user = resolve_user_for_employee(employee)
+        if not target_user:
+            # user=None broadcasts to EVERY connected socket — an unlinked
+            # employee must not leak the event (and payload) site-wide.
+            return
         frappe.publish_realtime(
             event=f"hr-portal:{employee}",
             message={"employee": employee, "name": notification_name},

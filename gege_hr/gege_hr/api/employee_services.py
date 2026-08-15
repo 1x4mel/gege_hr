@@ -170,6 +170,7 @@ def all_grievances(status=None, grievance_type=None, search=None,
 @frappe.whitelist()
 def submit_grievance(employee=None, grievance_type=None, subject=None, description=None):
     emp = _resolve(employee)
+    _assert_own(emp)
     if not (subject or "").strip():
         frappe.throw("Cần chủ đề khiếu nại.")
     doc = frappe.new_doc(GRIEVANCE_DOCTYPE)
@@ -259,6 +260,7 @@ def submit_travel_request(
     employee=None, purpose_of_travel=None, from_date=None, to_date=None, estimated_cost=None
 ):
     emp = _resolve(employee)
+    _assert_own(emp)
     if not (from_date and to_date and (purpose_of_travel or "").strip()):
         frappe.throw("Cần mục đích + ngày đi + ngày về.")
     doc = frappe.new_doc(TRAVEL_DOCTYPE)

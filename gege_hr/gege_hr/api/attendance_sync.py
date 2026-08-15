@@ -122,6 +122,7 @@ def sync_attendance(ws_name: str | None = None) -> str | None:
     """
     if not ws_name:
         return None
+    frappe.only_for(["HR Manager", "System Manager"])
     try:
         ws = frappe.db.get_value(WORK_SESSION_DOCTYPE, ws_name, _WS_FIELDS, as_dict=True) or {}
     except Exception:

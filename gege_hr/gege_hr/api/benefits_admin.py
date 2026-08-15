@@ -114,12 +114,15 @@ def all_benefit_applications(status=None, search=None, date_from=None, date_to=N
 @frappe.whitelist()
 def submit_benefit_application(employee=None, max_benefits=None):
     emp = _resolve(employee)
+    _assert_own(emp)
     doc = frappe.new_doc(BENEFIT_DOCTYPE)
     doc.employee = emp
     doc.date = frappe.utils.today()
     if max_benefits:
         try:
-            doc.max_benefits = float(max_benefits)
+            amount = float(max_benefits)
+            if amount >= 0:
+                doc.max_benefits = amount
         except (TypeError, ValueError):
             pass
     doc.insert(ignore_permissions=True)
