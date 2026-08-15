@@ -969,7 +969,7 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
     # held until the request/job commits): the second runner re-reads the WS
     # created by the first and takes the update path instead.
     frappe.db.sql(
-        "SELECT name FROM `tabShift Instance` WHERE name = %(name)s FOR UPDATE",
+        "SELECT name FROM `tabVN Employee Shift Instance` WHERE name = %(name)s FOR UPDATE",
         {"name": shift_instance_name},
     )
 

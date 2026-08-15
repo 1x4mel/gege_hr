@@ -123,6 +123,15 @@ def sync_attendance(ws_name: str | None = None) -> str | None:
     if not ws_name:
         return None
     frappe.only_for(["HR Manager", "System Manager"])
+    return _sync_attendance_internal(ws_name)
+
+
+def _sync_attendance_internal(ws_name: str) -> str | None:
+    """Role-free core — called by the whitelisted endpoint AND by the
+    ``on_work_session_update`` doc-event. The doc-event runs inside the
+    background job that an employee check-in enqueues (session user = the
+    employee), so any role gate here would fail the job and roll back the
+    whole Work Session calculation."""
     try:
         ws = frappe.db.get_value(WORK_SESSION_DOCTYPE, ws_name, _WS_FIELDS, as_dict=True) or {}
     except Exception:
@@ -186,7 +195,7 @@ def sync_attendance(ws_name: str | None = None) -> str | None:
 
 def on_work_session_update(doc, method: str | None = None) -> None:
     """``doc_events`` hook — keep Attendance in sync after every Work Session save."""
-    sync_attendance(getattr(doc, "name", None))
+    _sync_attendance_internal(getattr(doc, "name", None))
 
 
 @frappe.whitelist()
@@ -218,7 +227,7 @@ def backfill_attendance(from_date: str | None = None, to_date: str | None = None
     synced = 0
     skipped = 0
     for name in names:
-        if sync_attendance(name):
+        if _sync_attendance_internal(name):
             synced += 1
         else:
             skipped += 1

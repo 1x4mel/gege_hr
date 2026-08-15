@@ -27,10 +27,10 @@ import frappe
 from frappe import _
 
 from gege_hr.gege_hr.api import audit as audit_api
+from gege_hr.gege_hr.utils import _db, notify, pagination
 from gege_hr.gege_hr.utils import employee as emp_utils
-from gege_hr.gege_hr.utils import notify
-from gege_hr.gege_hr.utils import pagination
 from gege_hr.gege_hr.utils import payroll as calc
+
 # Checkout-miss defaults shared with the engine (BUG-6 fix) — the settings UI
 # must fall back to exactly what utils.checkout_miss falls back to.
 from gege_hr.gege_hr.utils.checkout_miss import DEFAULTS as CM_DEFAULTS
@@ -118,7 +118,7 @@ def _claim_period_for_calculation(period_name: str) -> None:
     employee (double Salary Slip). Guarded UPDATE: the loser sees 0 rows and
     aborts before touching any line.
     """
-    claimed = frappe.db.sql(
+    claimed = _db.guarded_update(
         "UPDATE `tabVN Payroll Review Period` SET status = 'Calculating'"
         " WHERE name = %(name)s AND status IN ('Draft', 'Calculated', 'Calculating')",
         {"name": period_name},
@@ -532,7 +532,11 @@ def calculate_payroll_review(name: str | None = None) -> dict:
         late_minutes_list = _employee_late_minutes(
             emp_id, period.from_date, period.to_date
         )
-        late_penalty = calc.compute_late_penalty(late_minutes_list, penalty_rules)
+        # daily_rate = 8 standard hours × hourly rate (basis for Percentage /
+        # Half-Day / Full-Day penalty rules — M4).
+        late_penalty = calc.compute_late_penalty(
+            late_minutes_list, penalty_rules, daily_rate=hourly_rate * 8.0
+        )
 
         # Checkout-miss penalty: Σ penalty_amount of Penalised (non-waived) tickets this period.
         checkout_miss_penalty = calc.load_checkout_miss_penalty(
@@ -652,7 +656,8 @@ def _employee_bracket_hours(employee: str, from_date, to_date, brackets: list[di
     Request exists for that work_date — otherwise the OUT is capped at
     planned_end so unpaid OT is excluded from gross.
     """
-    from datetime import datetime as _dt, time as _time, timedelta as _td
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
     from zoneinfo import ZoneInfo
 
     VN = ZoneInfo("Asia/Ho_Chi_Minh")
@@ -703,7 +708,13 @@ def _employee_bracket_hours(employee: str, from_date, to_date, brackets: list[di
     try:
         for r in frappe.db.get_all(
             "VN Overtime Request",
-            filters={"employee": employee, "docstatus": 1},
+            filters={
+                "employee": employee,
+                "docstatus": 1,
+                # C4: submitted-but-Rejected requests were still paying OT —
+                # match the WS engine's approved-set exactly.
+                "workflow_state": ["in", ["Approved", "Confirmed"]],
+            },
             fields=["work_date"],
         ):
             if r.get("work_date"):
@@ -722,36 +733,64 @@ def _employee_bracket_hours(employee: str, from_date, to_date, brackets: list[di
         return end_vn.astimezone(UTC)
 
     # --- Pair IN→OUT, cap at planned_end, add OT only if approved ---------
+    def _flush(cur_in, out_t):
+        """Count one IN→OUT pair (regular capped at planned_end; OT only if
+        approved). An absurd span (>16h — forgotten checkout over multiple
+        days) is capped at planned_end instead of dropping the whole shift
+        (M6), mirroring the checkout-miss policy of the WS engine."""
+        span_h = (out_t - cur_in).total_seconds() / 3600.0
+        if span_h <= 0:
+            return
+        try:
+            vn_date = cur_in.astimezone(VN).date()
+            pe = _planned_end_utc(vn_date)
+        except Exception:
+            pe = None
+        if span_h > 16.0 and pe:
+            out_t = pe  # cap runaway pair at the shift's planned end
+        # Regular hours: IN → min(OUT, planned_end). Always counted.
+        regular_out = min(out_t, pe) if pe else out_t
+        split = calc.split_hours_by_bracket(cur_in, regular_out, brackets)
+        for coeff, hours in split.items():
+            bracket_hours[coeff] = bracket_hours.get(coeff, 0.0) + hours
+        # OT hours: planned_end → actual OUT. Only if approved.
+        if pe and out_t > pe and str(vn_date) in approved_ot:
+            ot_split = calc.split_hours_by_bracket(pe, out_t, brackets)
+            for coeff, hours in ot_split.items():
+                bracket_hours[coeff] = bracket_hours.get(coeff, 0.0) + hours
+
     bracket_hours: dict[float, float] = {}
     cur_in = None
     for t, lt in logs:
         if lt == "IN":
-            cur_in = t
-        elif lt == "OUT" and cur_in is not None and t > cur_in:
-            span_h = (t - cur_in).total_seconds() / 3600.0
-            if span_h <= 16.0:
+            if cur_in is not None:
+                # C3: previous shift never checked out — a second IN used to
+                # silently DISCARD it (a full lost day). Close it at the
+                # shift's planned end (checkout-miss policy A), no OT.
                 try:
                     vn_date = cur_in.astimezone(VN).date()
                     pe = _planned_end_utc(vn_date)
                 except Exception:
                     pe = None
-                # Regular hours: IN → min(OUT, planned_end). Always counted.
-                regular_out = min(t, pe) if pe else t
-                split = calc.split_hours_by_bracket(cur_in, regular_out, brackets)
-                for coeff, hours in split.items():
-                    bracket_hours[coeff] = bracket_hours.get(coeff, 0.0) + hours
-                # OT hours: planned_end → actual OUT. Only if approved.
-                if pe and t > pe and str(vn_date) in approved_ot:
-                    ot_split = calc.split_hours_by_bracket(pe, t, brackets)
-                    for coeff, hours in ot_split.items():
-                        bracket_hours[coeff] = bracket_hours.get(coeff, 0.0) + hours
+                _flush(cur_in, pe or t)
+            cur_in = t
+        elif lt == "OUT" and cur_in is not None and t > cur_in:
+            _flush(cur_in, t)
             cur_in = None
+    # Trailing IN with no OUT at all: close at planned_end too.
+    if cur_in is not None:
+        try:
+            pe2 = _planned_end_utc(cur_in.astimezone(VN).date())
+        except Exception:
+            pe2 = None
+        _flush(cur_in, pe2 or (cur_in + _td(hours=8)))
     return bracket_hours
 
 
 def _employee_late_minutes(employee: str, from_date, to_date) -> list[float]:
     """Minutes-late for each ``late_entry=1`` Attendance row."""
     from datetime import datetime as _dt
+    from datetime import timedelta
     from zoneinfo import ZoneInfo
 
     VN = ZoneInfo("Asia/Ho_Chi_Minh")
@@ -789,6 +828,13 @@ def _employee_late_minutes(employee: str, from_date, to_date) -> list[float]:
         shift_start = as_time(st)
         planned = _dt.combine(in_portal.date(), shift_start).replace(tzinfo=VN)
         minutes = (in_portal - planned).total_seconds() / 60.0
+        # H3: overnight shift — an IN after midnight belongs to YESTERDAY's
+        # planned start; without the rollback the delay went negative and the
+        # lateness was never penalised.
+        st_end = frappe.db.get_value("Shift Type", shift_name, "end_time")
+        if st_end is not None and as_time(st_end) <= shift_start and minutes < 0:
+            planned -= timedelta(days=1)
+            minutes = (in_portal - planned).total_seconds() / 60.0
         if minutes > 0:
             result.append(round(minutes, 1))
     return result
@@ -1349,8 +1395,9 @@ def export_bank_file(name: str, fmt: str = "napas", value_date: str | None = Non
     total, count}`` on success, or ``{ok: False, missing: [...]}`` when employees
     are missing bank account info (HR fixes the data, then re-exports).
     """
-    from gege_hr.gege_hr.utils import bank_export
     from frappe.utils import getdate
+
+    from gege_hr.gege_hr.utils import bank_export
 
     _assert_closer()
     period = _get_period(name)

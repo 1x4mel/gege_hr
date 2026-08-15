@@ -58,18 +58,28 @@ def _is_hr_approver(user: str | None) -> bool:
 def has_permission(doc, ptype="read", user=None):
     """Grant HR Manager / HR User access to ANY row of the matrix doctypes.
 
+    F2 fix: the hook used to return True for EVERY ptype — HR User could then
+    ``delete``/``cancel``/``amend`` rows the permission matrix only grants to
+    HR Manager. Non-read/write/submit ptypes now defer to the role matrix.
     Returns ``True`` for those roles, ``None`` for everyone else (defer to
     Frappe's default owner/role permission — employees still see only their own).
     """
     if _is_hr_approver(user):
-        return True
+        if ptype in ("read", "write", "submit", "create"):
+            return True
+        return None  # delete/cancel/amend → decided by the role matrix
     return None
 
 
 def permission_query_conditions(user):
     """HR Manager / HR User see every row (no extra SQL restriction).
 
-    Others return "" too — Frappe then applies the standard role/owner permission
-    (employees are scoped to their own via the doctype's existing perm rules).
+    F1 fix: returning "" for EVERY user disabled Frappe's default scoping, so
+    any Employee role holding a read DocPerm on these doctypes could list
+    co-workers' rows (expense amounts, grievances) via /api/resource. Only
+    approver roles get the unscoped ""; everyone else defers (None) to the
+    standard role/owner permission rules.
     """
-    return ""
+    if _is_hr_approver(user):
+        return ""
+    return None

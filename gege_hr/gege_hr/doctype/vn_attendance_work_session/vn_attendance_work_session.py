@@ -75,9 +75,11 @@ class VNAttendanceWorkSession(Document):
         have opened a ``SELECT ... FOR UPDATE`` beforehand, or use this as the
         single guard in low-concurrency deployments.
         """
+        from gege_hr.gege_hr.utils._db import guarded_update_tuple
+
         allowed_from = allowed_from or ["Calculated", "Error", "Pending"]
         placeholders = ", ".join(["%s"] * len(allowed_from))
-        claimed = frappe.db.sql(
+        won = guarded_update_tuple(
             f"""
             UPDATE `tabVN Attendance Work Session`
             SET calculation_status = %s
@@ -85,7 +87,6 @@ class VNAttendanceWorkSession(Document):
             """,
             (claim_status, self.name, *allowed_from),
         )
-        won = bool(claimed)
         if won:
             self.calculation_status = claim_status
             self.db_set("calculation_status", claim_status, notify=False)

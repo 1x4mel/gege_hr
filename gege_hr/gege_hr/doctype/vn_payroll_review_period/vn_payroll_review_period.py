@@ -27,8 +27,13 @@ class VNPayrollReviewPeriod(Document):
     STATUS_PUBLISHED = "Published"
     STATUS_CANCELLED = "Cancelled"
 
+    STATUS_CALCULATING = "Calculating"
+
     ALLOWED_TRANSITIONS = {
-        STATUS_DRAFT: {STATUS_CALCULATED, STATUS_CANCELLED},
+        STATUS_DRAFT: {STATUS_CALCULATING, STATUS_CALCULATED, STATUS_CANCELLED},
+        # F10: a crash mid-calculation left the period stuck in Calculating
+        # forever — allow it to recover back to a working state.
+        STATUS_CALCULATING: {STATUS_CALCULATED, STATUS_DRAFT, STATUS_CANCELLED},
         STATUS_CALCULATED: {STATUS_APPROVED, STATUS_DRAFT, STATUS_CANCELLED},
         STATUS_APPROVED: {STATUS_SLIPS, STATUS_CANCELLED},
         STATUS_SLIPS: {STATUS_PUBLISHED, STATUS_CANCELLED},

@@ -107,12 +107,15 @@ def _occurrence_no(employee: str, window_days: int) -> int:
         return 1
     try:
         since = (now_datetime() - timedelta(days=int(window_days or 90))).date()
+        # M5: waived tickets don't escalate — counting them made a single
+        # waived miss push the NEXT one straight into the penalty bracket.
         count = frappe.db.count(
             MISS_DOCTYPE,
             {
                 "employee": employee,
                 "docstatus": ["<", 2],
                 "work_date": [">=", since],
+                "penalty_waived": 0,
             },
         )
         return int(count or 0) + 1
@@ -196,7 +199,9 @@ def _close_session(session: dict, cfg: dict) -> str | None:
     # exists() check → duplicate OUT logs + duplicate penalty tickets).
     if not session.get("name"):
         return None
-    claimed = frappe.db.sql(
+    from gege_hr.gege_hr.utils._db import guarded_update
+
+    claimed = guarded_update(
         f"UPDATE `{WORK_SESSION_DOCTYPE}` SET vn_auto_checkout = 1"
         " WHERE name = %(name)s AND vn_auto_checkout = 0",
         {"name": session["name"]},

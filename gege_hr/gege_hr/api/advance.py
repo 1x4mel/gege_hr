@@ -389,7 +389,9 @@ def mark_paid(
     # only the request that flips Approved → Paid proceeds; the loser reloads,
     # sees Paid, and takes the idempotent path.
     if doc.workflow_state == "Approved":
-        claimed = frappe.db.sql(
+        from gege_hr.gege_hr.utils._db import guarded_update
+
+        claimed = guarded_update(
             "UPDATE `tabVN Salary Advance Request`"
             " SET workflow_state = 'Paid', payment_status = 'Paid'"
             " WHERE name = %(name)s AND workflow_state = 'Approved'",

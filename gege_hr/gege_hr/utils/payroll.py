@@ -473,32 +473,42 @@ def load_deduction_rates() -> dict[str, float]:
     """BHXH/BHYT/BHTN/TNCN rates (percent) from VN HR Portal Setting."""
     if frappe is None:
         return {"BHXH": 8.0, "BHYT": 1.5, "BHTN": 1.0, "TNCN": 10.0}
+    defaults = {"BHXH": 8.0, "BHYT": 1.5, "BHTN": 1.0, "TNCN": 10.0}
+    if frappe is None:
+        return dict(defaults)
+
+    def _rate(field: str) -> float:
+        # M7: ``or`` swallowed a legitimate 0 (e.g. TNCN=0 for an employee
+        # under the tax threshold) and re-applied the default rate.
+        val = frappe.db.get_single_value("VN HR Portal Setting", field)
+        return float(val) if val is not None and val != "" else defaults[field.split("_")[-1]]
+
     try:
-        return {
-            "BHXH": float(frappe.db.get_single_value("VN HR Portal Setting", "vn_ded_bhxh") or 8),
-            "BHYT": float(frappe.db.get_single_value("VN HR Portal Setting", "vn_ded_bhyt") or 1.5),
-            "BHTN": float(frappe.db.get_single_value("VN HR Portal Setting", "vn_ded_bhtn") or 1),
-            "TNCN": float(frappe.db.get_single_value("VN HR Portal Setting", "vn_ded_tncn") or 10),
-        }
+        return {k: _rate(f"vn_ded_{k.lower()}") for k in defaults}
     except Exception:
-        return {"BHXH": 8.0, "BHYT": 1.5, "BHTN": 1.0, "TNCN": 10.0}
+        return dict(defaults)
 
 
 def load_penalty_rules(company: str | None = None) -> list[dict]:
-    """Active ``VN Attendance Penalty Rule`` rows for ``company``.
+    """Penalty rules of the company's active ``VN Attendance Policy``.
 
-    Returns ``[{from_minutes, to_minutes, penalty_type, penalty_value}, ...]``
-    sorted by ``from_minutes`` ascending.
+    C2 fix: ``VN Attendance Penalty Rule`` is a CHILD table — it has no
+    ``company``/``is_active`` columns, so the old direct filter crashed with
+    "unknown column" (silently caught → []). Late penalties were ALWAYS zero.
+    Query through the parent policy instead (active + matching company).
     """
     if frappe is None:
         return []
     try:
-        filters = {}
+        pf = {"is_active": 1}
         if company:
-            filters["company"] = company
+            pf["company"] = company
+        policy = frappe.db.get_value("VN Attendance Policy", pf, "name")
+        if not policy:
+            return []
         rows = frappe.db.get_all(
             "VN Attendance Penalty Rule",
-            filters=filters,
+            filters={"parent": policy, "parenttype": "VN Attendance Policy"},
             fields=["from_minutes", "to_minutes", "penalty_type", "penalty_value"],
             order_by="from_minutes asc",
         )
@@ -544,6 +554,17 @@ def split_hours_by_bracket(start_dt, end_dt, brackets: list[dict]) -> dict[float
     Returns ``{1.0: 120.0, 1.2: 30.5, 1.5: 8.0}`` (coeff → hours).
     """
     from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    VN = ZoneInfo("Asia/Ho_Chi_Minh")
+    # Brackets are defined in PORTAL hours (VN). Callers historically passed
+    # UTC datetimes, so every hour-of-day was shifted -7h: a day shift scored
+    # the night coefficient (+37.5% gross) and a night shift lost ~30%.
+    # Normalise to portal time before splitting.
+    if getattr(start_dt, "tzinfo", None) is not None:
+        start_dt = start_dt.astimezone(VN)
+    if getattr(end_dt, "tzinfo", None) is not None:
+        end_dt = end_dt.astimezone(VN)
 
     if start_dt >= end_dt:
         return {}
@@ -636,11 +657,19 @@ def compute_hourly_line(
     }
 
 
-def compute_late_penalty(late_minutes_list: list[float], penalty_rules: list[dict]) -> float:
+def compute_late_penalty(
+    late_minutes_list: list[float],
+    penalty_rules: list[dict],
+    daily_rate: float = 0.0,
+) -> float:
     """Total late-occurrence penalty for an employee.
 
     For each entry in ``late_minutes_list`` (minutes late per occurrence), find
     the first matching ``VN Attendance Penalty Rule`` bracket and apply its amount.
+
+    M4 fix: ``Percentage`` used to add the raw number (5 → 5 VND) and
+    ``Half Day``/``Full Day`` silently contributed nothing. Percentage now
+    applies to the daily rate; half/full day deduct half/one daily rate.
     """
     total = 0.0
     for late_min in late_minutes_list:
@@ -655,6 +684,10 @@ def compute_late_penalty(late_minutes_list: list[float], penalty_rules: list[dic
                 elif ptype == "Per Minute":
                     total += late_min * pval
                 elif ptype == "Percentage":
-                    total += pval  # caller should multiply by daily/hourly rate
+                    total += daily_rate * pval / 100.0
+                elif ptype == "Half Day":
+                    total += daily_rate / 2.0
+                elif ptype == "Full Day":
+                    total += daily_rate
                 break
     return round2(total)
