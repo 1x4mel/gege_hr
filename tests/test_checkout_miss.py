@@ -61,6 +61,7 @@ class StubFrappe:
         self.created_docs = []          # payloads passed to get_doc
         self.set_values = []            # (doctype, name, updates)
         self.sql_claims = []            # (query, params) — guarded UPDATE claims
+        self._last_affected = 0
         self.committed = False
 
     class db:  # noqa: N801 — mimic frappe.db namespace
@@ -71,12 +72,17 @@ class StubFrappe:
 
         class _DB:
             def sql(inner, query, params=None, as_dict=False, **_kw):
-                # Guarded UPDATE claims (H3) must report "1 row affected" so the
-                # caller believes it won the claim; other statements return rows.
+                # Guarded UPDATE claims (H3) go through utils/_db.guarded_update,
+                # which reads the affected-row count via SELECT ROW_COUNT().
+                # The stub mirrors real MariaDB semantics: 1 after a matching
+                # UPDATE, 1 for the following ROW_COUNT() probe.
                 q = (query or "").strip().upper()
                 if q.startswith("UPDATE"):
                     outer.sql_claims.append((query, params))
-                    return [[1]] if not as_dict else [{"affected": 1}]
+                    outer._last_affected = 1
+                    return ()
+                if "ROW_COUNT()" in q:
+                    return ((outer._last_affected,),)
                 return list(outer._sessions)
 
             def get_all(inner, doctype, filters=None, fields=None, **_kw):
