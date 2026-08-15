@@ -383,7 +383,27 @@ def mark_paid(
     if doc.workflow_state not in ("Approved", "Paid"):
         frappe.throw(_("Chỉ yêu cầu đã duyệt mới có thể ghi nhận thanh toán."))
 
+    # H4 race guard: two "Mark Paid" clicks at once both read state=Approved,
+    # both save() → on_update fires twice → TWO Additional Salary rows → the
+    # advance is deducted from payroll twice. Claim the transition atomically:
+    # only the request that flips Approved → Paid proceeds; the loser reloads,
+    # sees Paid, and takes the idempotent path.
+    if doc.workflow_state == "Approved":
+        claimed = frappe.db.sql(
+            "UPDATE `tabVN Salary Advance Request`"
+            " SET workflow_state = 'Paid', payment_status = 'Paid'"
+            " WHERE name = %(name)s AND workflow_state = 'Approved'",
+            {"name": name},
+        )
+        if not claimed:
+            doc.reload()
+            if doc.workflow_state != "Paid":
+                frappe.throw(_("Chỉ yêu cầu đã duyệt mới có thể ghi nhận thanh toán."))
+
     already_paid = doc.workflow_state == "Paid"
+    if doc.workflow_state != "Paid":
+        doc.workflow_state = "Paid"
+        doc.payment_status = "Paid"
     if doc.workflow_state != "Paid":
         doc.workflow_state = "Paid"
         doc.payment_status = "Paid"

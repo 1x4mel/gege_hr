@@ -188,10 +188,23 @@ def _close_session(session: dict, cfg: dict) -> str | None:
     """Synthesise the OUT log + ticket for one open session. Returns miss name."""
     if frappe is None:
         return None
+
+    # H3 race guard: mobile_checkin and the hourly scheduler can both pick the
+    # same open session. Claim it FIRST with a guarded UPDATE on
+    # vn_auto_checkout (0 → 1): only the winner proceeds to create the OUT log
+    # and ticket; the loser sees 0 rows and skips (previously both passed the
+    # exists() check → duplicate OUT logs + duplicate penalty tickets).
+    if not session.get("name"):
+        return None
+    claimed = frappe.db.sql(
+        f"UPDATE `{WORK_SESSION_DOCTYPE}` SET vn_auto_checkout = 1"
+        " WHERE name = %(name)s AND vn_auto_checkout = 0",
+        {"name": session["name"]},
+    )
+    if not claimed:
+        return None
     # Idempotency: a ticket already references this session → skip.
-    if session.get("name") and frappe.db.exists(
-        MISS_DOCTYPE, {"shift_instance": session.get("shift_instance")}
-    ):
+    if frappe.db.exists(MISS_DOCTYPE, {"shift_instance": session.get("shift_instance")}):
         return None
 
     checkout_at = get_datetime(session["planned_end"])
@@ -239,14 +252,14 @@ def _close_session(session: dict, cfg: dict) -> str | None:
     )
     miss.insert(ignore_permissions=True)
 
-    # 4. Mark the work session closed + link the ticket.
+    # 4. Mark the work session closed + link the ticket (vn_auto_checkout was
+    # already flipped to 1 by the claim above — here we stamp the rest).
     frappe.db.set_value(
         WORK_SESSION_DOCTYPE,
         session["name"],
         {
             "actual_checkout": checkout_at,
             "last_checkout_log": out_log.name,
-            "vn_auto_checkout": 1,
             "vn_checkout_miss": miss.name,
         },
         update_modified=False,

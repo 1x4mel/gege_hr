@@ -1867,13 +1867,19 @@ def recalculate_work_session(work_session: str | None = None, shift_instance: st
 
     from gege_hr.gege_hr.utils import calc
 
-    # CAS guard (plan §19.3): refuse concurrent recalculation.
+    # CAS guard (plan §19.3): refuse concurrent recalculation. Guarded UPDATE
+    # (claim → check rows affected) instead of read-then-set, so two recalc
+    # requests cannot both pass the status check and run in parallel.
     ws_name = frappe.db.get_value("VN Attendance Work Session", {"shift_instance": shift_instance})
     if ws_name:
-        status = frappe.db.get_value("VN Attendance Work Session", ws_name, "calculation_status")
-        if status == "Recalculating":
+        claimed = frappe.db.sql(
+            "UPDATE `tabVN Attendance Work Session`"
+            " SET calculation_status = 'Recalculating'"
+            " WHERE name = %(name)s AND calculation_status != 'Recalculating'",
+            {"name": ws_name},
+        )
+        if not claimed:
             frappe.throw(_("Work Session đang được tính lại, vui lòng đợi."), frappe.ValidationError)
-        frappe.db.set_value("VN Attendance Work Session", ws_name, "calculation_status", "Recalculating")
 
     name = calc.persist_work_session(shift_instance, calculate_mode="recalculate")
     if name:

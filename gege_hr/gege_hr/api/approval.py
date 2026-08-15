@@ -136,6 +136,25 @@ def _config(transaction_type: str) -> dict:
     return cfg
 
 
+def _lock_request_row(cfg: dict, name: str) -> None:
+    """Serialize concurrent approve/reject on the same request.
+
+    Without the lock, two approvers acting at the same moment both read the
+    same ``current`` state, both compute a next state from that stale value,
+    and the last writer wins — an already-Approved request can be dragged back
+    to a pending state (then approved AGAIN, firing side-effects twice: double
+    OUT-log, double OT write-back). SELECT ... FOR UPDATE inside the request's
+    open transaction makes the second request block until the first commits;
+    combined with the post-lock re-check of the state in approve/reject, the
+    loser now aborts with "không ở trạng thái chờ duyệt" instead of racing.
+    """
+    doctype = cfg["doctype"].replace("`", "``")
+    frappe.db.sql(
+        f"SELECT name FROM `tab{doctype}` WHERE name = %(name)s FOR UPDATE",
+        {"name": name},
+    )
+
+
 # Flat row shape returned to the SPA — keeps the inbox list renderable without a
 # second lookup (matches the row docstring in hr-ui/src/api/index.js).
 # Fields common to every request row (none of these are type-specific, so they
@@ -771,6 +790,7 @@ def approve_request(
     # skipped the read-permission check). If a 403 occurs, grant the role
     # read/write on the DocType via Role Permissions Manager — do NOT bypass in
     # code, or validate/on_update and the request's own audit/hooks won't run.
+    _lock_request_row(cfg, name)  # serialize concurrent approve/reject (H1)
     doc = frappe.get_doc(cfg["doctype"], name)
     _data = doc.as_dict()
     current = doc.get(cfg["status_field"])
@@ -884,6 +904,7 @@ def reject_request(
 
     # Proper Frappe flow: load via get_doc (read permission checked). See
     # approve_request — no raw db.get_value bypass.
+    _lock_request_row(cfg, name)  # serialize concurrent approve/reject (H1)
     doc = frappe.get_doc(cfg["doctype"], name)
     _data = doc.as_dict()
     current = doc.get(cfg["status_field"])
