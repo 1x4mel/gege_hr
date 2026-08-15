@@ -69,15 +69,28 @@ class _Frappe:
         def __init__(self, fr):
             self.fr = fr
 
+        def exists(self, doctype, name=None):
+            if doctype == "Goal":
+                return any(r.get("name") == name for r in self.fr.list_rows.get("Goal", []))
+            return True
+
         def get_value(self, doctype, key, field=None, as_dict=False):
             if doctype == "Employee" and isinstance(key, dict):
                 return self.fr.employee_for_user
             if doctype == "Employee":
                 return self.fr.employee_company
             if doctype == "Goal":
-                # by name → employee (for update_goal_progress ownership)
+                # by name → [employee, cycle] (ownership + closed-cycle gate)
+                if isinstance(field, (list, tuple)):
+                    row = next(
+                        (r for r in self.fr.list_rows.get("Goal", []) if r.get("name") == key),
+                        None,
+                    )
+                    return (row or {}).get("employee", self.fr.goal_employee), None
                 row = next((r for r in self.fr.list_rows.get("Goal", []) if r.get("name") == key), None)
                 return row.get("employee") if row else self.fr.goal_employee
+            if doctype == "Appraisal Cycle":
+                return "Active"
             return None
 
         def set_value(self, doctype, name, fields, *a, **k):
