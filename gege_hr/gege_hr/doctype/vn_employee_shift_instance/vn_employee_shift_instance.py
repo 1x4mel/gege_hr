@@ -19,8 +19,11 @@ class VNEmployeeShiftInstance(Document):
     but derived from portal-local ``planned_window``.
     """
 
-    def before_insert(self):
-        set_yymmdd_name(self, "before_insert")
+    def autoname(self):
+        # Frappe calls this from set_new_name (naming.py step 4) — the
+        # before_insert variant never ran because ``doc.name = None`` +
+        # the JSON ``format:`` option always overwrote it first.
+        set_yymmdd_name(self, "autoname")
 
     def validate(self):
         self._normalize_employee_name()

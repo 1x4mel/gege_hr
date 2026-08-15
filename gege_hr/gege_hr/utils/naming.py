@@ -6,6 +6,7 @@ Format: ``PREFIX-YYMMDD-XXXXXX`` (plan v5 §5.2), generated in ``before_insert``
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 try:
@@ -56,16 +57,24 @@ def _next_sequence(prefix: str, stamp: str) -> int:
 
 
 def set_yymmdd_name(doc, method: str | None = None) -> None:
-    """Assign ``PREFIX-YYMMDD-XXXXXX`` to a transaction doc in before_insert."""
+    """Assign ``PREFIX-YYMMDD-XXXXXX`` to a transaction doc in before_insert.
+
+    The DocType ``autoname`` is a date-less ``format:PREFIX-{#####}`` fallback.
+    This hook ALWAYS overwrites it with the real date-stamped name — the old
+    guard (``_is_new``, an attribute Frappe documents don't have) saw the
+    autoname-assigned placeholder and returned, so every transaction row in
+    production was literally named ``PREFIX-YYMMDD-12345`` (verified live:
+    3650 WS / 3645 SI rows). Only a caller-provided *new-style* name wins.
+    """
     if frappe is None or doc is None:
         return
-    if getattr(doc, "name", None) and not str(doc.name).startswith("__"):
-        # Some doctypes already named — leave as is.
-        if getattr(doc, "_is_new", True) is False:
-            return
     prefix = PREFIXES.get(doc.doctype)
     if not prefix:
         return
+    existing = str(getattr(doc, "name", None) or "")
+    if existing and not (existing.startswith("__") or re.fullmatch(rf"{re.escape(prefix)}-\d+", existing)):
+        return  # explicit caller-provided name — respect it
+    # Empty, temp, or the date-less autoname fallback → stamp the real name.
     stamp = datetime.utcnow().strftime("%y%m%d")
     seq = _next_sequence(prefix, stamp)
     doc.name = f"{prefix}-{stamp}-{seq:06d}"

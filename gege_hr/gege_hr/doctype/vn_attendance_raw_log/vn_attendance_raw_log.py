@@ -17,8 +17,11 @@ class VNAttendanceRawLog(Document):
     ``Employee Checkin`` (plan §7.1 layers 1→3).
     """
 
-    def before_insert(self):
-        set_yymmdd_name(self, "before_insert")
+    def autoname(self):
+        # Frappe calls this from set_new_name (naming.py step 4) — the
+        # before_insert variant never ran because ``doc.name = None`` +
+        # the JSON ``format:`` option always overwrote it first.
+        set_yymmdd_name(self, "autoname")
 
     def validate(self):
         if not self.employee and not self.raw_employee_code:

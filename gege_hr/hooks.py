@@ -212,7 +212,6 @@ doc_events = {
     },
     # Shift instance naming + recalc trigger.
     "VN Employee Shift Instance": {
-        "before_insert": "gege_hr.gege_hr.utils.naming.set_yymmdd_name",
         "on_submit": "gege_hr.gege_hr.api.shift.on_shift_instance_submit",
     },
     # Raw check-in arrival → enqueue work-session recalculation.
