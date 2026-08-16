@@ -23,8 +23,11 @@ class VNAttendanceWorkSession(Document):
     # ------------------------------------------------------------------ #
     # Lifecycle hooks
     # ------------------------------------------------------------------ #
-    def before_insert(self):
-        set_yymmdd_name(self, "before_insert")
+    def autoname(self):
+        # Frappe calls this from set_new_name (naming.py step 4) — the
+        # before_insert variant never ran because ``doc.name = None`` +
+        # the JSON ``format:`` option always overwrote it first.
+        set_yymmdd_name(self, "autoname")
 
     def validate(self):
         self._normalize_employee_name()
@@ -75,9 +78,11 @@ class VNAttendanceWorkSession(Document):
         have opened a ``SELECT ... FOR UPDATE`` beforehand, or use this as the
         single guard in low-concurrency deployments.
         """
+        from gege_hr.gege_hr.utils._db import guarded_update_tuple
+
         allowed_from = allowed_from or ["Calculated", "Error", "Pending"]
         placeholders = ", ".join(["%s"] * len(allowed_from))
-        claimed = frappe.db.sql(
+        won = guarded_update_tuple(
             f"""
             UPDATE `tabVN Attendance Work Session`
             SET calculation_status = %s
@@ -85,7 +90,6 @@ class VNAttendanceWorkSession(Document):
             """,
             (claim_status, self.name, *allowed_from),
         )
-        won = bool(claimed)
         if won:
             self.calculation_status = claim_status
             self.db_set("calculation_status", claim_status, notify=False)

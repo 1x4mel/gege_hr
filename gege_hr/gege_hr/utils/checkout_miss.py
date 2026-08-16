@@ -107,12 +107,15 @@ def _occurrence_no(employee: str, window_days: int) -> int:
         return 1
     try:
         since = (now_datetime() - timedelta(days=int(window_days or 90))).date()
+        # M5: waived tickets don't escalate — counting them made a single
+        # waived miss push the NEXT one straight into the penalty bracket.
         count = frappe.db.count(
             MISS_DOCTYPE,
             {
                 "employee": employee,
                 "docstatus": ["<", 2],
                 "work_date": [">=", since],
+                "penalty_waived": 0,
             },
         )
         return int(count or 0) + 1
@@ -196,7 +199,9 @@ def _close_session(session: dict, cfg: dict) -> str | None:
     # exists() check → duplicate OUT logs + duplicate penalty tickets).
     if not session.get("name"):
         return None
-    claimed = frappe.db.sql(
+    from gege_hr.gege_hr.utils._db import guarded_update
+
+    claimed = guarded_update(
         f"UPDATE `{WORK_SESSION_DOCTYPE}` SET vn_auto_checkout = 1"
         " WHERE name = %(name)s AND vn_auto_checkout = 0",
         {"name": session["name"]},
@@ -366,6 +371,17 @@ def penalise_expired(now=None) -> int:
             doc.status = "Penalised"
             doc.save()
             flipped += 1
+        except frappe.LinkValidationError:
+            # RUNTIME BUG (9.5k Error Log rows on the bench): tickets whose
+            # Shift Instance / auto-checkout logs were purged by seed scripts
+            # can NEVER pass doc.save() (link validation) — the scheduler
+            # retried them every hour forever. Flip the status directly so
+            # the ticket leaves the Pending set.
+            try:
+                frappe.db.set_value(MISS_DOCTYPE, name, "status", "Penalised", update_modified=False)
+                flipped += 1
+            except Exception:
+                frappe.log_error(title="checkout_miss penalise (dead-link) failed", message=name)
         except Exception:
             frappe.log_error(title="checkout_miss penalise failed", message=name)
     # S6 fix: report the number actually flipped, not len(names) — a failed

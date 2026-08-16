@@ -1,6 +1,6 @@
 {
  "actions": [],
- "autoname": "format:OR-{YYMMDD}-{#####}",
+ "autoname": "format:OR-{#####}",
  "creation": "2026-06-21 04:30:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",

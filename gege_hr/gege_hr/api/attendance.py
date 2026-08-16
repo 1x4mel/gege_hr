@@ -25,6 +25,7 @@ from frappe import _
 from frappe.utils import add_days, flt, get_datetime, getdate
 
 from gege_hr.gege_hr.api import audit as audit_api
+from gege_hr.gege_hr.utils import _db as _db_mod
 from gege_hr.gege_hr.utils import employee as emp_utils
 from gege_hr.gege_hr.utils import gamification as game
 from gege_hr.gege_hr.utils import pagination
@@ -1888,7 +1889,7 @@ def recalculate_work_session(work_session: str | None = None, shift_instance: st
     # requests cannot both pass the status check and run in parallel.
     ws_name = frappe.db.get_value("VN Attendance Work Session", {"shift_instance": shift_instance})
     if ws_name:
-        claimed = frappe.db.sql(
+        claimed = _db_mod.guarded_update(
             "UPDATE `tabVN Attendance Work Session`"
             " SET calculation_status = 'Recalculating'"
             " WHERE name = %(name)s AND calculation_status != 'Recalculating'",

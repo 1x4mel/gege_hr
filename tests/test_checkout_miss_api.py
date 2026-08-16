@@ -499,6 +499,8 @@ def _engine(stub_kw, monkeypatch):
     frappe_mod.db = stub.db
     frappe_mod.get_doc = stub.get_doc
     frappe_mod.log_error = stub.log_error
+    # penalise_expired catches LinkValidationError on dead-link tickets
+    frappe_mod.LinkValidationError = type("LinkValidationError", (FrappeError,), {})
     frappe_mod.utils = utils
     monkeypatch.setitem(sys.modules, "frappe", frappe_mod)
     monkeypatch.setitem(sys.modules, "frappe.utils", utils)

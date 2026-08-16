@@ -27,8 +27,13 @@ class VNPayrollReviewPeriod(Document):
     STATUS_PUBLISHED = "Published"
     STATUS_CANCELLED = "Cancelled"
 
+    STATUS_CALCULATING = "Calculating"
+
     ALLOWED_TRANSITIONS = {
-        STATUS_DRAFT: {STATUS_CALCULATED, STATUS_CANCELLED},
+        STATUS_DRAFT: {STATUS_CALCULATING, STATUS_CALCULATED, STATUS_CANCELLED},
+        # F10: a crash mid-calculation left the period stuck in Calculating
+        # forever — allow it to recover back to a working state.
+        STATUS_CALCULATING: {STATUS_CALCULATED, STATUS_DRAFT, STATUS_CANCELLED},
         STATUS_CALCULATED: {STATUS_APPROVED, STATUS_DRAFT, STATUS_CANCELLED},
         STATUS_APPROVED: {STATUS_SLIPS, STATUS_CANCELLED},
         STATUS_SLIPS: {STATUS_PUBLISHED, STATUS_CANCELLED},
@@ -36,8 +41,11 @@ class VNPayrollReviewPeriod(Document):
         STATUS_CANCELLED: set(),
     }
 
-    def before_insert(self):
-        set_yymmdd_name(self, "before_insert")
+    def autoname(self):
+        # Frappe calls this from set_new_name (naming.py step 4) — the
+        # before_insert variant never ran because ``doc.name = None`` +
+        # the JSON ``format:`` option always overwrote it first.
+        set_yymmdd_name(self, "autoname")
 
     def validate(self):
         self._normalize_dates()

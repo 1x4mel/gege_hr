@@ -1,6 +1,6 @@
 {
  "actions": [],
- "autoname": "format:CR-{YYMMDD}-{#####}",
+ "autoname": "format:CR-{#####}",
  "creation": "2026-06-21 06:30:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",

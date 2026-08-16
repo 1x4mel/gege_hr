@@ -213,6 +213,10 @@ def _purge(from_date, to_date, emps, dry_run: bool) -> dict[str, int]:
         ("VN Employee Shift Instance", "employee", "work_date", False),
         ("VN Overtime Request", "employee", "work_date", True),
         ("Attendance", "employee", "attendance_date", True),
+        # RUNTIME BUG: purging SI + checkins without their tickets left 327
+        # orphaned VN Checkout Miss rows whose links could never validate —
+        # penalise_expired then failed every hour (9.5k Error Log rows).
+        ("VN Checkout Miss", "employee", "work_date", True),
     ]
     for dt, ef, df, scoped in specs:
         if not _ok(dt):

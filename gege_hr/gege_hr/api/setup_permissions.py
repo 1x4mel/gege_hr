@@ -105,7 +105,10 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
     # uses in ``share_doc_with_approver``) before ``doc.submit()`` — proper Frappe,
     # submit still runs validate + on_submit (Leave Ledger + audit logs).
     "Leave Application": {
-        EMPLOYEE: {"read": 1, "write": 1, "create": 1, "delete": 1, "submit": 1, "cancel": 1},
+        # F6: Employee previously held submit/cancel/delete — a self-submit
+        # bypassed the approval matrix entirely (HRMS still writes the ledger,
+        # so leave balance deducted with no approval).
+        EMPLOYEE: {"read": 1, "write": 1, "create": 1},
         HR_MANAGER: {
             "read": 1, "write": 1, "create": 1, "delete": 1, "submit": 1, "cancel": 1, "amend": 1, "share": 1,
         },
