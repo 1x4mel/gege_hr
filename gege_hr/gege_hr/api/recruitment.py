@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import frappe
 
+from gege_hr.gege_hr.utils import pagination
+
 OPENING_DOCTYPE = "Job Opening"
 APPLICANT_DOCTYPE = "Job Applicant"
 TRAINING_EVENT_DOCTYPE = "Training Event"
@@ -40,7 +42,7 @@ def _list(doctype, fields, filters, status, search, page, page_size, search_fiel
     or_filters = None
     q = (search or "").strip()
     if q:
-        like = f"%{q}%"
+        like = f"%{pagination.escape_like(q)}%"
         sf = search_fields or ["name"]
         or_filters = [[field, "like", like] for field in sf]
     page = max(1, int(page or 1))

@@ -267,19 +267,38 @@ def match_overtime_request_detailed(
     Contract: the summed values always equal :func:`match_overtime_request` over
     the same inputs (TC-U-07) — this keeps the pure function testable in isolation.
     """
+    # M1: two overlapping approved requests (A 20:00-22:00, B 21:00-23:00) over
+    # one 3h actual window used to yield 2h + 2h = 4h written back — HR saw 4h
+    # served for 3h worked. Walk the actual window minute-by-minute instead and
+    # credit each unit of served time to exactly ONE request (first covering
+    # request wins), so Σ per-request == actual served hours.
     per_name: dict[str, float] = {}
+    STEP = 5.0 / 60.0  # 5-minute resolution — coarse enough to stay cheap
     for win in actual_ot_windows or []:
         ws = _as_dt(win.get("start"))
         we = _as_dt(win.get("end"))
         if not ws or not we:
             continue
-        for req in ot_requests or []:
-            rs = _as_dt(req.get("from_datetime") or req.get("start"))
-            re_ = _as_dt(req.get("to_datetime") or req.get("end"))
-            overlap = calculate_overlap(ws, we, rs, re_)
-            if overlap:
-                key = req.get("name") or ""
-                per_name[key] = per_name.get(key, 0.0) + overlap
+        covered = [
+            (
+                _as_dt(req.get("from_datetime") or req.get("start")),
+                _as_dt(req.get("to_datetime") or req.get("end")),
+                req.get("name") or "",
+            )
+            for req in ot_requests or []
+        ]
+        covered = [(s, e, n) for s, e, n in covered if s and e]
+        span = (we - ws).total_seconds() / 3600.0
+        steps = max(1, int(round(span / STEP)))
+        for i in range(steps):
+            mid = ws.timestamp() + ((i + 0.5) / steps) * (we - ws).total_seconds()
+            import datetime as _dtm
+
+            point = _dtm.datetime.fromtimestamp(mid, tz=ws.tzinfo)
+            for s, e, n in covered:
+                if s <= point <= e:
+                    per_name[n] = per_name.get(n, 0.0) + span / steps
+                    break
     return {k: round(v, 4) for k, v in per_name.items()}
 
 
@@ -289,13 +308,16 @@ def round_overtime(hours: float, policy: dict) -> float:
     Methods (see VN Attendance Policy): No Rounding / Nearest Nmin / Up to Nmin,
     where N comes from ``overtime_rounding_minutes`` (15/30).
     """
+    # M9 note: rounding below uses floor(x + 0.5) — half-UP. The old
+    # round() is banker's rounding (half-to-even): 7.5 steps → 0, 22.5 → 2.
     method = (policy.get("overtime_rounding_method") or "No Rounding").strip()
     minutes = int(_num(policy.get("overtime_rounding_minutes"), 15)) or 15
     if method == "No Rounding" or minutes <= 0:
         return round(_num(hours), 4)
     total_min = _num(hours) * 60.0
     if method.lower().startswith("nearest"):
-        total_min = round(total_min / minutes) * minutes
+        # half-UP (floor(x+0.5)) — see M9 note above
+        total_min = math.floor(total_min / minutes + 0.5) * minutes
     elif method.lower().startswith("up to"):
         total_min = math.ceil(total_min / minutes) * minutes
     return round(total_min / 60.0, 4)
@@ -588,8 +610,13 @@ def generate_segments(work_session: dict, holiday_dates: set[date] | None = None
         _emit_ot(actual_checkin, planned_start)
 
     # 2. Regular: overlap of [actual] with [planned]
+    # M3: without an OUT, reg_end fell back to planned_end and emitted a full
+    # regular segment (8h night on a never-checked-out session) while the
+    # engine had already computed regular_hours = 0 / payable_day = 0 —
+    # segments and headline numbers disagreed. Only emit when a real OUT (or
+    # the auto-close at planned_end) exists.
     reg_start = max(filter(None, [actual_checkin, planned_start]))
-    reg_end = min(filter(None, [actual_checkout, planned_end]))
+    reg_end = min(filter(None, [actual_checkout, planned_end])) if actual_checkout else None
     if reg_end and reg_start and reg_end > reg_start:
         _emit_regular(reg_start, reg_end)
 
@@ -973,16 +1000,33 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
         {"name": shift_instance_name},
     )
 
+    # M10: don't filter on Employee Checkin.shift — HRMS only stamps that
+    # column when the punch falls inside the Shift Type's own (narrow) margin,
+    # so early pre-OT / late post-OT punches arrived with shift=None and were
+    # dropped from the session. Fetch by employee inside the widened window
+    # (the cap span keeps the query bounded) and let _filter_logs_to_window
+    # decide membership.
+    _ps = _as_dt(si["planned_start"])
+    _pe = _as_dt(si["planned_end"])
+    try:
+        _cap_h = float(si.get("vn_max_total_work_hours") or 20)
+    except (TypeError, ValueError):
+        _cap_h = 20.0
+    _wlo = (_ps or _pe) - timedelta(hours=_cap_h + 2)
+    _whi = (_pe or _ps) + timedelta(hours=_cap_h + 2)
     logs = (
         frappe.db.get_all(
             "Employee Checkin",
-            filters={"employee": si["employee"], "shift": si.get("shift_type")},
+            filters={
+                "employee": si["employee"],
+                "time": [">=", _wlo.strftime("%Y-%m-%d %H:%M:%S")],
+                "time": ["<=", _whi.strftime("%Y-%m-%d %H:%M:%S")],
+            },
             fields=["name", "time", "log_type"],
             order_by="time asc",
         )
         or []
     )
-    # Narrow to logs inside the planned window ± 24h to avoid pulling history.
     logs = _filter_logs_to_window(logs, si["planned_start"], si["planned_end"], si)
 
     policy = load_policy(si.get("attendance_policy"), si["employee"])

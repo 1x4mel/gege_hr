@@ -26,6 +26,19 @@ from typing import Any, Callable, Iterable, Sequence
 MAX_PAGE_SIZE = 200
 
 
+def escape_like(value: Any) -> str:
+    """Escape LIKE wildcards in a client search string.
+
+    A raw ``%``/``_`` in ``search`` matched everything, defeating the filter's
+    intent and surfacing extra rows the user is allowed to see. Use for every
+    ``f"%{q}%"`` LIKE build."""
+    s = str(value or "")
+    s = s.replace("\\", "\\\\")
+    s = s.replace("%", "\\%")
+    s = s.replace("_", "\\_")
+    return s.strip()
+
+
 def as_int(value: Any, default: int) -> int:
     """Coerce a whitelist arg (Frappe passes strings) to int with a fallback."""
     try:

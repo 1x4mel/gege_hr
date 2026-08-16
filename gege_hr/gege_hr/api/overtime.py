@@ -274,7 +274,12 @@ def submit_overtime_request(**kwargs) -> dict:
     if kwargs.get("work_session"):
         doc.work_session = kwargs["work_session"]
     if kwargs.get("attachment"):
-        doc.attachment = kwargs["attachment"]
+        att = str(kwargs["attachment"])
+        # Only files uploaded through Frappe (/files/...) — an external URL
+        # here would render off-site content inside the HR portal.
+        if not att.startswith(("/files/", "/private/files/")):
+            frappe.throw(_("Tệp đính kèm không hợp lệ."), frappe.ValidationError)
+        doc.attachment = att
 
     doc.insert()
     # Move into the approval pipeline (Draft → Pending Manager). Best-effort:

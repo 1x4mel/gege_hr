@@ -320,25 +320,65 @@ def run_hourly() -> dict:
     """Hourly scheduler entry: auto-close forgotten checkouts for every active
     employee (handles those who don't return for days) + flip expired Pending
     tickets to Penalised. Returns a small summary for the scheduler log.
+
+    F4: set-based + overlap guard. The old loop ran one SQL + up to 5 writes
+    PER EMPLOYEE sequentially in a single scheduler worker (500-2000 employees
+    → the hourly tick could exceed its slot and the next run overlapped it).
+    Now only employees that actually HAVE an open session past the buffer are
+    processed (one SQL total), and a short-lived Redis lock makes an
+    overlapping tick a no-op instead of a double run.
     """
     if frappe is None:
         return {"closed": 0, "penalised": 0}
     cfg = _config()
     if not int(cfg.get("enabled", 1)):
         return {"closed": 0, "penalised": 0, "disabled": True}
-    closed_total = 0
+
+    # Overlap guard: skip if another tick is still running (TTL 55 min).
     try:
-        employees = frappe.db.get_all(
-            "Employee", filters={"status": "Active"}, pluck="name"
-        )
+        lock = frappe.cache().set("gege_hr:cm:run_hourly_lock", 1, ex=3300, nx=True)
+        if not lock:
+            return {"closed": 0, "penalised": 0, "skipped": "locked"}
     except Exception:
+        lock = None  # no Redis → run anyway (single scheduler worker anyway)
+
+    import datetime as _dt
+
+    now_utc = now_datetime() if now_datetime else _dt.datetime.utcnow()
+    cutoff = (now_utc - timedelta(minutes=int(cfg.get("buffer_minutes", 30)))).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    try:
+        rows = frappe.db.sql(
+            """
+            SELECT DISTINCT employee FROM `tabVN Attendance Work Session`
+            WHERE docstatus < 2
+              AND vn_auto_checkout = 0
+              AND actual_checkin IS NOT NULL AND actual_checkin != ''
+              AND planned_end < %s
+              AND (actual_checkout IS NULL OR actual_checkout = 0
+                   OR actual_checkout = '0000-00-00 00:00:00' OR actual_checkout = '')
+            """,
+            (cutoff,),
+            as_dict=True,
+        )
+        employees = [r["employee"] for r in rows or []]
+    except Exception:
+        frappe.log_error(title="checkout_miss.run_hourly candidates failed")
         employees = []
+
+    closed_total = 0
     for emp in employees:
         try:
             closed_total += len(auto_close_missed_checkouts(emp))
         except Exception:
             frappe.log_error(title=f"checkout_miss.run_hourly {emp}")
     penalised = penalise_expired()
+    if lock:
+        try:
+            frappe.cache().delete("gege_hr:cm:run_hourly_lock")
+        except Exception:
+            pass
     return {"closed": closed_total, "penalised": penalised}
 
 

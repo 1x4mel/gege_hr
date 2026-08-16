@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import frappe
 
+from gege_hr.gege_hr.utils import pagination
+
 BENEFIT_DOCTYPE = "Employee Benefit Application"
 GRATUITY_DOCTYPE = "Gratuity"
 PROMOTION_DOCTYPE = "Employee Promotion"
@@ -68,7 +70,7 @@ def _list(doctype, fields, filters, status, search, page, page_size,
     or_filters = None
     q = (search or "").strip()
     if q:
-        like = f"%{q}%"
+        like = f"%{pagination.escape_like(q)}%"
         of = [["employee_name", "like", like], ["name", "like", like]]
         # Numeric columns also join the broad search (DNA §6.6 A — typing a
         # number must match max_benefits / amount columns too).

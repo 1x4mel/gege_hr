@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import frappe
 
+from gege_hr.gege_hr.utils import pagination
+
 GOAL_DOCTYPE = "Goal"
 CYCLE_DOCTYPE = "Appraisal Cycle"
 APPRAISAL_DOCTYPE = "Appraisal"
@@ -217,7 +219,7 @@ def _list_goals(
     or_filters = None
     q = (search or "").strip()
     if q:
-        like = f"%{q}%"
+        like = f"%{pagination.escape_like(q)}%"
         or_filters = [
             ["goal_name", "like", like],
             ["employee_name", "like", like],

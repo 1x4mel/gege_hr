@@ -13,6 +13,8 @@ from datetime import date, timedelta
 
 import frappe
 
+from gege_hr.gege_hr.utils import pagination
+
 TEMPLATE_DOCTYPE = "VN Onboarding Template"
 ONBOARDING_DOCTYPE = "VN Employee Onboarding"
 
@@ -260,7 +262,7 @@ def onboarding_list(
     or_filters = []
     q = (search or "").strip()
     if q:
-        like = f"%{q}%"
+        like = f"%{pagination.escape_like(q)}%"
         or_filters = [
             ["name", "like", like],
             ["employee", "like", like],

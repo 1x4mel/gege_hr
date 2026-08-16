@@ -843,7 +843,7 @@ def list_employees(
     or_filters = None
     _q = (search or "").strip()
     if _q:
-        _like = f"%{_q}%"
+        _like = f"%{pagination.escape_like(_q)}%"
         or_filters = [[c, "like", _like] for c in _EMPLOYEE_SEARCH_FIELDS if c in valid]
         if not or_filters:
             or_filters = None
@@ -1096,7 +1096,7 @@ def list_users(
     or_filters = None
     _q = (search or "").strip()
     if _q:
-        _like = f"%{_q}%"
+        _like = f"%{pagination.escape_like(_q)}%"
         or_filters = [
             ["full_name", "like", _like],
             ["email", "like", _like],
@@ -1335,7 +1335,7 @@ def list_shift_assignments(
     or_filters = None
     _q = (search or "").strip()
     if _q:
-        _like = f"%{_q}%"
+        _like = f"%{pagination.escape_like(_q)}%"
         or_filters = [
             ["employee", "like", _like],
             ["employee_name", "like", _like],
@@ -1671,7 +1671,7 @@ def list_shift_requests(
     or_filters = None
     _q = (search or "").strip()
     if _q:
-        _like = f"%{_q}%"
+        _like = f"%{pagination.escape_like(_q)}%"
         or_filters = [
             ["employee_name", "like", _like],
             ["shift_type", "like", _like],

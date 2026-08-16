@@ -1495,7 +1495,7 @@ def _ws_search_or_filters(search: str | None) -> list | None:
         "employee_name",
         "shift_type",
     ]
-    _like = f"%{q}%"
+    _like = f"%{pagination.escape_like(q)}%"
     return [[c, "like", _like] for c in cols] or None
 
 
@@ -1667,7 +1667,7 @@ def get_exceptions(
     or_filters = None
     _q = (search or "").strip()
     if _q:
-        _like = f"%{_q}%"
+        _like = f"%{pagination.escape_like(_q)}%"
         or_filters = [
             ["name", "like", _like],
             ["employee", "like", _like],
@@ -2240,7 +2240,13 @@ def submit_correction_request(**kwargs) -> dict:
         "attachment",
     ):
         if kwargs.get(opt):
-            doc.set(opt, kwargs.get(opt))
+            val = kwargs.get(opt)
+            if opt == "attachment":
+                val = str(val)
+                # Only files uploaded through Frappe (/files/...).
+                if not val.startswith(("/files/", "/private/files/")):
+                    frappe.throw(_("Tệp đính kèm không hợp lệ."), frappe.ValidationError)
+            doc.set(opt, val)
 
     doc.insert()
     # Move into the approval pipeline (Draft → Pending Manager). Best-effort:

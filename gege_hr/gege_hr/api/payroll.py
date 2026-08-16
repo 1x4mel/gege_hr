@@ -253,7 +253,7 @@ def _period_search_or_filters(search: str | None) -> list | None:
     q = (search or "").strip()
     if not q:
         return None
-    like = f"%{q}%"
+    like = f"%{pagination.escape_like(q)}%"
     return [[field, "like", like] for field in _PERIOD_SEARCH_FIELDS]
 
 
@@ -314,7 +314,7 @@ def _review_line_search_or_filters(search: str | None) -> list | None:
     q = (search or "").strip()
     if not q:
         return None
-    like = f"%{q}%"
+    like = f"%{pagination.escape_like(q)}%"
     return [[field, "like", like] for field in _REVIEW_LINE_SEARCH_FIELDS]
 
 

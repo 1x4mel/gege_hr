@@ -27,17 +27,10 @@ app_license = "MIT"
 # on_update/on_submit → logs / ledger), with no ignore_permissions bypass.
 # The shared implementation lives in gege_hr.gege_hr.permissions.
 # --------------------------------------------------------------------------- #
-_MATRIX_DOCTYPES = [
-    "VN Salary Advance Request",
-    "VN Overtime Request",
-    "VN Attendance Correction Request",
-    "VN Leave Cancellation Request",
-    "Expense Claim",
-    "Employee Grievance",
-    "Travel Request",
-    "Leave Encashment",
-    "Compensatory Leave Request",
-]
+# F3: single source of truth — the doctype list lives in permissions.py.
+# A second hand-maintained copy here drifted silently out of sync.
+from gege_hr.gege_hr.permissions import MATRIX_DOCTYPES as _MATRIX_DOCTYPES  # noqa: E402
+
 has_permission = {dt: "gege_hr.gege_hr.permissions.has_permission" for dt in _MATRIX_DOCTYPES}
 permission_query_conditions = {
     dt: "gege_hr.gege_hr.permissions.permission_query_conditions" for dt in _MATRIX_DOCTYPES

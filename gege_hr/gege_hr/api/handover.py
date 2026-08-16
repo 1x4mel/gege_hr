@@ -20,8 +20,7 @@ from frappe.utils import now
 
 from gege_hr.gege_hr.utils import employee as emp_utils
 from gege_hr.gege_hr.utils import handover as handover_utils
-from gege_hr.gege_hr.utils import notify
-from gege_hr.gege_hr.utils import pagination
+from gege_hr.gege_hr.utils import notify, pagination
 
 DOCTYPE = "VN Leave Handover Task"
 _LIST_FIELDS = [

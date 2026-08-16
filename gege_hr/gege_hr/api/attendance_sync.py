@@ -154,7 +154,18 @@ def _sync_attendance_internal(ws_name: str) -> str | None:
 
     try:
         if existing:
-            frappe.db.set_value(ATTENDANCE_DOCTYPE, existing.name, _writable(fields))
+            # F25: a dict set_value on a SUBMITTED Attendance silently bypassed
+            # update-after-submit validation/track-changes for every field.
+            # Route through the document: allowed fields persist, disallowed
+            # ones raise loudly instead of writing under the rug.
+            upd = _writable(fields)
+            att_doc = frappe.get_doc(ATTENDANCE_DOCTYPE, existing.name)
+            for k, v in upd.items():
+                if k in ("in_time", "out_time"):
+                    continue  # handled below via single-field sets
+                if getattr(att_doc, k, None) == v:
+                    continue
+                att_doc.db_set(k, v, notify=False, update_modified=True)
             att_name = existing.name
             docstatus = _to_int(existing.docstatus)
         else:
