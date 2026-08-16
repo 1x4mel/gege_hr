@@ -662,13 +662,17 @@ def _employee_bracket_hours(employee: str, from_date, to_date, brackets: list[di
 
     VN = ZoneInfo("Asia/Ho_Chi_Minh")
     UTC = ZoneInfo("UTC")
+    # H4: logs are stored UTC while the period bounds are portal (VN) dates.
+    # A VN shift touching either boundary (e.g. 06:00 VN on from_date =
+    # 23:00 UTC the day before) fell outside the old [00:00, 23:59] window
+    # and its whole pair was dropped from payroll. Widen one day each side;
+    # each pair is later stamped with its VN work_date so nothing leaks in.
+    win_start = (_dt.strptime(str(from_date), "%Y-%m-%d") - _td(days=1)).strftime("%Y-%m-%d 00:00:00")
+    win_end = (_dt.strptime(str(to_date), "%Y-%m-%d") + _td(days=1)).strftime("%Y-%m-%d 23:59:59")
     try:
         rows = frappe.db.get_all(
             "Employee Checkin",
-            filters={
-                "employee": employee,
-                "time": ["between", [f"{from_date} 00:00:00", f"{to_date} 23:59:59"]],
-            },
+            filters={"employee": employee, "time": ["between", [win_start, win_end]]},
             fields=["time", "log_type"],
             order_by="time asc",
         )
@@ -687,21 +691,44 @@ def _employee_bracket_hours(employee: str, from_date, to_date, brackets: list[di
         logs.append((t, (r.get("log_type") or "").strip().upper()))
     logs.sort(key=lambda x: x[0])
 
-    # --- Shift planned-end lookup (for OT capping) -------------------------
-    shift_start = shift_end = None
-    try:
-        st_name = frappe.db.get_value(
-            "Shift Assignment",
-            {"employee": employee, "docstatus": 1, "status": "Active"},
-            "shift_type",
-        )
-        if st_name:
-            from frappe.utils import get_time
+    # --- Shift windows per date (H1) ---------------------------------------
+    # The old lookup took ONE currently-Active assignment and applied its
+    # window to every log of the period — anyone who changed shifts mid-period
+    # had the wrong planned_end (wrong OT cap) on the other half of the month.
+    # Resolve the assignment effective on each VN date instead.
+    from frappe.utils import get_time
 
-            shift_start = get_time(frappe.db.get_value("Shift Type", st_name, "start_time"))
-            shift_end = get_time(frappe.db.get_value("Shift Type", st_name, "end_time"))
-    except Exception:
-        pass
+    _shift_cache: dict = {}
+
+    def _shift_for(vn_date):
+        if vn_date in _shift_cache:
+            return _shift_cache[vn_date]
+        st_name = None
+        try:
+            # Effective assignment: started on/before the date, not yet ended.
+            st_name = frappe.db.get_value(
+                "Shift Assignment",
+                {
+                    "employee": employee,
+                    "docstatus": 1,
+                    "status": "Active",
+                    "start_date": ["<=", vn_date],
+                    "or": [["end_date", "is", "not set"], ["end_date", ">=", vn_date]],
+                },
+                "shift_type",
+            )
+        except Exception:
+            st_name = None
+        window = (None, None)
+        if st_name:
+            try:
+                s = get_time(frappe.db.get_value("Shift Type", st_name, "start_time"))
+                e = get_time(frappe.db.get_value("Shift Type", st_name, "end_time"))
+                window = (s, e)
+            except Exception:
+                window = (None, None)
+        _shift_cache[vn_date] = window
+        return window
 
     # --- Approved OT dates (VN Overtime Request submitted/docstatus=1) -----
     approved_ot: set[str] = set()
@@ -723,12 +750,12 @@ def _employee_bracket_hours(employee: str, from_date, to_date, brackets: list[di
         pass
 
     def _planned_end_utc(vn_date):
-        """UTC datetime of the shift's planned_end for the given VN date."""
-        if not shift_end:
+        """UTC datetime of the shift's planned_end effective on that VN date."""
+        s_time, e_time = _shift_for(vn_date)
+        if not e_time:
             return None
-        end_vn = _dt.combine(vn_date, shift_end)
-        end_vn = end_vn.replace(tzinfo=VN)
-        if shift_start and shift_end <= shift_start:
+        end_vn = _dt.combine(vn_date, e_time).replace(tzinfo=VN)
+        if s_time and e_time <= s_time:
             end_vn += _td(days=1)  # overnight shift (end < start)
         return end_vn.astimezone(UTC)
 
@@ -788,56 +815,27 @@ def _employee_bracket_hours(employee: str, from_date, to_date, brackets: list[di
 
 
 def _employee_late_minutes(employee: str, from_date, to_date) -> list[float]:
-    """Minutes-late for each ``late_entry=1`` Attendance row."""
-    from datetime import datetime as _dt
-    from datetime import timedelta
-    from zoneinfo import ZoneInfo
+    """Minutes-late per shift-day from the Work-Session engine (H2).
 
-    VN = ZoneInfo("Asia/Ho_Chi_Minh")
+    The old source (``Attendance.late_entry``) is never set by any production
+    flow in this app — only seed scripts wrote it — so late penalties were
+    always computed from an empty list. The Work-Session engine already
+    computes ``late_minutes`` WITH the policy grace window and overnight
+    handling; read it straight from there."""
     try:
         rows = frappe.db.get_all(
-            "Attendance",
+            "VN Attendance Work Session",
             filters={
                 "employee": employee,
-                "attendance_date": ["between", [from_date, to_date]],
-                "docstatus": 1,
-                "late_entry": 1,
+                "work_date": ["between", [from_date, to_date]],
+                "docstatus": ["<", 2],
             },
-            fields=["attendance_date", "shift", "in_time"],
+            fields=["late_minutes"],
         )
     except Exception:
         return []
+    return [float(r.late_minutes or 0) for r in rows if float(r.late_minutes or 0) > 0]
 
-    result: list[float] = []
-    for r in rows:
-        if not r.get("in_time"):
-            continue
-        try:
-            in_t = _dt.strptime(str(r["in_time"])[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
-        except Exception:
-            continue
-        in_portal = in_t.astimezone(VN)
-        shift_name = r.get("shift")
-        if not shift_name:
-            continue
-        st = frappe.db.get_value("Shift Type", shift_name, "start_time")
-        if st is None:
-            continue
-        from gege_hr.gege_hr.utils.tz import as_time
-
-        shift_start = as_time(st)
-        planned = _dt.combine(in_portal.date(), shift_start).replace(tzinfo=VN)
-        minutes = (in_portal - planned).total_seconds() / 60.0
-        # H3: overnight shift — an IN after midnight belongs to YESTERDAY's
-        # planned start; without the rollback the delay went negative and the
-        # lateness was never penalised.
-        st_end = frappe.db.get_value("Shift Type", shift_name, "end_time")
-        if st_end is not None and as_time(st_end) <= shift_start and minutes < 0:
-            planned -= timedelta(days=1)
-            minutes = (in_portal - planned).total_seconds() / 60.0
-        if minutes > 0:
-            result.append(round(minutes, 1))
-    return result
 
 
 def _employee_salary_components(employee: str) -> tuple[list[float], list[float]]:

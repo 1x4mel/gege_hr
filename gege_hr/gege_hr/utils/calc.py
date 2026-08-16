@@ -1095,10 +1095,24 @@ def _filter_logs_to_window(
     # with the old ±24h margin). Fall back to ±2h if SI window fields are missing.
     lo = _as_dt(si.get("checkin_window_start")) if si else None
     hi = _as_dt(si.get("max_checkout_time")) if si else None
-    if not lo:
-        lo = ps - timedelta(hours=2)
-    if not hi:
-        hi = pe + timedelta(hours=2)
+    # H5: the SI window is the *permitted check-in/out* window, which is
+    # NARROWER than the hours the engine must credit — an early pre-OT IN
+    # (before checkin_window_start) or a long approved post-shift OT OUT
+    # (past max_checkout_time, still under vn_max_total_work_hours) was being
+    # dropped from the session entirely (missing_checkin / zero hours).
+    # Widen each side to the engine's own work-hour caps: total span may not
+    # exceed vn_max_total_work_hours (default 20h) around the planned shift.
+    try:
+        max_total_h = float(si.get("vn_max_total_work_hours") or 20) if si else 20.0
+    except (TypeError, ValueError):
+        max_total_h = 20.0
+    cap_lo = pe - timedelta(hours=max_total_h)
+    cap_hi = ps + timedelta(hours=max_total_h)
+    # WIDEN (never narrow): union of the SI window and the engine's cap.
+    if lo is None or cap_lo < lo:
+        lo = cap_lo
+    if hi is None or cap_hi > hi:
+        hi = cap_hi
     return [lg for lg in logs if lo <= _as_dt(lg.get("time")) <= hi]
 
 
