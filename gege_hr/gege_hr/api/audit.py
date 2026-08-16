@@ -87,7 +87,7 @@ def _audit_search_or_filters(search: str | None) -> list | None:
     q = (search or "").strip()
     if not q:
         return None
-    like = f"%{q}%"
+    like = f"%{pagination.escape_like(q)}%"
     return [[field, "like", like] for field in _AUDIT_SEARCH_FIELDS]
 
 

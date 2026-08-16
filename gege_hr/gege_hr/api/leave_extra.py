@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import frappe
 
+from gege_hr.gege_hr.utils import pagination
+
 ENCASHMENT_DOCTYPE = "Leave Encashment"
 COMPOFF_DOCTYPE = "Compensatory Leave Request"
 
@@ -67,7 +69,7 @@ def _or_filters_for(doctype, q):
     Frappe casts the value to datetime and raises ParserError, breaking the whole
     query. Date filtering uses a `creation` day-range in the popover instead.
     """
-    like = f"%{q}%"
+    like = f"%{pagination.escape_like(q)}%"
     base = [
         ["employee_name", "like", like],
         ["name", "like", like],

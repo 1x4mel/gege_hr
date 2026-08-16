@@ -34,12 +34,42 @@ def control_total(rows) -> float:
     return round(sum(_to_float(r.get("amount")) for r in (rows or [])), 2)
 
 
+def _safe_csv_field(value) -> str:
+    """Neutralise CSV formula injection: a leading =, +, -, @ executes when
+    the file is opened in Excel (employee_name is user-controlled data)."""
+    s = str(value if value is not None else "")
+    if s[:1] in ("=", "+", "-", "@"):
+        return "'" + s
+    return s
+
+
+def _detail_total_int(rows) -> int:
+    """Σ round(row) — the trailer must equal what the DETAIL rows actually
+    say, not round(Σ row): with .5 cents the two diverge and bank
+    reconciliation flags the file."""
+    return sum(amount_int(r.get("amount")) for r in (rows or []))
+
+
 def missing_fields(rows) -> list:
-    """Rows that cannot be paid: no ``account_no`` or amount ≤ 0."""
+    """Rows that cannot be paid: no ``account_no``/bank or amount ≤ 0."""
     out = []
     for r in (rows or []):
         account = str(r.get("account_no") or "").strip()
+        bank = str(r.get("bank_code") or r.get("bank_name") or "").strip()
         amt = _to_float(r.get("amount"))
+        if not account:
+            pass  # reason below
+        elif not bank and (r.get("bank_code") is not None or r.get("bank_name") is not None):
+            # bank field present but blank — NAPAS lines with an empty bank
+            # code are rejected downstream.
+            out.append(
+                {
+                    "employee": r.get("employee"),
+                    "employee_name": r.get("employee_name"),
+                    "reason": "missing bank",
+                }
+            )
+            continue
         if not account:
             out.append(
                 {
@@ -70,15 +100,15 @@ def build_csv(rows, *, company: str = "", value_date: str = "", filename: str | 
         writer.writerow(
             [
                 i,
-                r.get("employee"),
-                r.get("employee_name"),
-                r.get("account_no"),
-                r.get("bank_name"),
+                _safe_csv_field(r.get("employee")),
+                _safe_csv_field(r.get("employee_name")),
+                _safe_csv_field(r.get("account_no")),
+                _safe_csv_field(r.get("bank_name")),
                 amount_int(r.get("amount")),
             ]
         )
     writer.writerow([])
-    writer.writerow(["", "", "", "", "TONG CONG", amount_int(control_total(rows))])
+    writer.writerow(["", "", "", "", "TONG CONG", _detail_total_int(rows)])
     return {
         "filename": filename or f"payroll_{value_date or 'export'}.csv",
         "content": buf.getvalue(),
@@ -97,13 +127,14 @@ def build_napas(
     filename: str | None = None,
 ) -> dict:
     total = control_total(rows)
-    lines = [f"H|{customer_code}|{value_date}|{len(rows)}|{amount_int(total)}"]
+    header_total = _detail_total_int(rows)
+    lines = [f"H|{customer_code}|{value_date}|{len(rows)}|{header_total}"]
     for r in rows:
         bank = r.get("bank_code") or r.get("bank_name") or ""
         lines.append(
-            f"D|{r.get('account_no')}|{r.get('employee_name')}|{bank}|{amount_int(r.get('amount'))}"
+            f"D|{r.get('account_no')}|{str(r.get('employee_name') or '').replace('|', '/')}|{bank}|{amount_int(r.get('amount'))}"
         )
-    lines.append(f"T|{len(rows)}|{amount_int(total)}")
+    lines.append(f"T|{len(rows)}|{header_total}")
     content = "\n".join(lines) + "\n"
     return {
         "filename": filename or f"payroll_{value_date or 'export'}.napas.txt",

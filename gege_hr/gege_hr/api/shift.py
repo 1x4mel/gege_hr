@@ -18,7 +18,6 @@ from frappe.utils import add_days, getdate
 from gege_hr.gege_hr.utils import employee as emp_utils
 from gege_hr.gege_hr.utils import tz as tz_utils
 
-
 # ---------------------------------------------------------------------------
 # Shift Type validate hook — keep Frappe-native auto-attendance windows in sync
 # with the gege_hr custom fields. The portal UI edits ``vn_*`` custom fields

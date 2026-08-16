@@ -57,5 +57,8 @@ class VNApprovalMatrix(Document):
                     frappe.throw(_("Bước {0}: cần chỉ định User/Role cho kiểu approver.").format(i))
 
             key = (step.approver_type, step.approver_user, step.approver_role)
-            # Allow identical consecutive role-based steps but warn on exact dups.
+            # F13: exact-duplicate steps created approval loops — the old code
+            # built a `seen` set and never checked it. Reject them.
+            if key in seen:
+                frappe.throw(_("Bước {0} trùng lặp với một bước trước đó.").format(i))
             seen.add(key)

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import frappe
 
+from gege_hr.gege_hr.utils import pagination
+
 CLAIM_DOCTYPE = "Expense Claim"
 
 _CLAIM_FIELDS = [
@@ -176,7 +178,7 @@ def _list(
     or_filters = None
     q = (search or "").strip()
     if q:
-        like = f"%{q}%"
+        like = f"%{pagination.escape_like(q)}%"
         or_filters = [
             ["employee_name", "like", like],
             ["name", "like", like],

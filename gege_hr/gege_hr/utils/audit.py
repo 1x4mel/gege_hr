@@ -130,6 +130,18 @@ def audit_payload(
     if not company:
         raise ValueError("company is required")
     if not is_valid_audit_type(audit_type):
+        # F19: a typo'd audit_type used to be silently rewritten to
+        # "Manual Override", misclassifying the event in the legal trail.
+        # Keep the fallback but log loudly so bad callers surface.
+        try:
+            import frappe
+
+            frappe.log_error(
+                title="audit: unknown audit_type coerced",
+                message=str(audit_type)[:200],
+            )
+        except Exception:
+            pass
         audit_type = "Manual Override"
     doc: dict[str, Any] = {
         "doctype": "VN Audit Event",

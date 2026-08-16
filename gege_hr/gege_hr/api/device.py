@@ -361,7 +361,7 @@ def _device_search_or_filters(search: str | None) -> list | None:
     q = (search or "").strip()
     if not q:
         return None
-    like = f"%{q}%"
+    like = f"%{pagination.escape_like(q)}%"
     return [[field, "like", like] for field in _DEVICE_SEARCH_FIELDS]
 
 
@@ -542,6 +542,9 @@ def upload_logs(logs: list | None = None) -> dict:
     _assert_hr_manager()
     if not isinstance(logs, list) or not logs:
         frappe.throw(_("Chưa có dữ liệu để tải lên."), frappe.ValidationError)
+    # Cap the batch — an unbounded list DoSes the request handler.
+    if len(logs) > 500:
+        frappe.throw(_("Tối đa 500 dòng mỗi lần tải lên."), frappe.ValidationError)
 
     accepted = 0
     rejected = 0

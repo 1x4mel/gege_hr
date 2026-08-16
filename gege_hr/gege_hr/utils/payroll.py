@@ -427,11 +427,56 @@ def resolve_hourly_rate(employee: str, date=None) -> float:
 
     Falls back to ``VN HR Portal Setting.vn_default_hourly_rate`` (default 20 000 VND)
     when the employee has no department or the department has no rate set.
+
+    M8: ``date`` is honoured — the Department is read as of that date (latest
+    Version snapshot of the Department doc at/before ``date``, when any
+    exists) so a mid-period transfer prices the earlier days at the OLD
+    department's rate instead of silently re-rating the whole period. Without
+    a date (or without Frappe versioning for Department) the CURRENT rate is
+    used, same as before.
     """
     if frappe is None or not employee:
         return 20000.0
     try:
-        dept = frappe.db.get_value("Employee", employee, "department")
+        dept = None
+        if date:
+            # Employee department as of ``date``: scan the Version trail
+            # (track_changes) for the latest "department" change at/before it.
+            # Frappe v15 has no helper API for this — read the versions table
+            # directly; any failure falls back to the current department.
+            try:
+                from frappe.utils import getdate
+
+                as_of = getdate(date)
+                vers = frappe.db.get_all(
+                    "Version",
+                    filters={
+                        "ref_doctype": "Employee",
+                        "docname": employee,
+                        "creation": ["<=", f"{as_of} 23:59:59"],
+                    },
+                    fields=["data"],
+                    order_by="creation desc",
+                    limit_page_length=200,
+                )
+                import json as _json
+
+                for v in vers:
+                    try:
+                        data = _json.loads(v.data or "{}")
+                    except Exception:
+                        continue
+                    for ch in data.get("changed", []):
+                        # ch = [fieldname, old, new]
+                        if ch and ch[0] == "department":
+                            dept = ch[2] or ch[1] or None
+                            break
+                    if dept:
+                        break
+            except Exception:
+                dept = None
+        if not dept:
+            dept = frappe.db.get_value("Employee", employee, "department")
         if dept:
             rate = frappe.db.get_value("Department", dept, "vn_hourly_rate")
             if rate and float(rate) > 0:

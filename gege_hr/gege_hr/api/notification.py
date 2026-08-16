@@ -243,7 +243,17 @@ def _assert_owner(notif_user: str | None) -> None:
     import frappe  # noqa: WPS433 - lazy
 
     if not notif_user:
-        return  # legacy row without a user link — allow.
+        # Legacy row without a user link: nobody owns it — deny instead of
+        # letting any session mutate it (HR managers still pass below).
+        roles = set(emp_utils.get_user_roles() or [])
+        if not (roles & emp_utils.HR_MANAGER_ROLES):
+            import frappe
+
+            frappe.throw(
+                "Thông báo không có người nhận — chỉ HR mới được xử lý.",
+                frappe.PermissionError,
+            )
+        return
     roles = set(emp_utils.get_user_roles() or [])
     # HR/System Managers may manage any notification (bulk ops, corrections).
     if roles & emp_utils.HR_MANAGER_ROLES:
