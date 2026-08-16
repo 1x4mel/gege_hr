@@ -154,6 +154,18 @@ class _Frappe:
                 self.name = maybe_name
                 self.docstatus = row.get("docstatus", 0)
 
+            def __getattr__(self, attr):
+                # Field reads fall through to the stored row (F25 per-field
+                # update path compares current values via getattr).
+                try:
+                    return self.__dict__[attr]
+                except KeyError:
+                    return row.get(attr)
+
+            def db_set(self, fieldname, value, **_kw):
+                store.setdefault(maybe_name, {"name": maybe_name})[fieldname] = value
+                return self
+
             def submit(self):
                 store.setdefault(maybe_name, {"name": maybe_name})["docstatus"] = 1
                 outer.submitted.append(maybe_name)
