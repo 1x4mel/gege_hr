@@ -55,6 +55,10 @@ class _FakeDoc:
             setattr(self, k, v)
         self.saved = False
         self.inserted = False
+        self.flags = types.SimpleNamespace()
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
 
     def insert(self, ignore_permissions=False):
         self.inserted = True
@@ -151,12 +155,16 @@ def idor(monkeypatch):
 
     leave = importlib.import_module("gege_hr.gege_hr.api.leave")
     handover = importlib.import_module("gege_hr.gege_hr.api.handover")
-    for m in (leave, handover):
+    leave_extra = importlib.import_module("gege_hr.gege_hr.api.leave_extra")
+    employee_services = importlib.import_module("gege_hr.gege_hr.api.employee_services")
+    for m in (leave, handover, leave_extra, employee_services):
         monkeypatch.setattr(m, "frappe", stub)
 
     # The create / update paths fire a best-effort notification; neutralise it
     # so the test never depends on the VN Notification table.
     monkeypatch.setattr(handover.notify, "push_notification", lambda *a, **k: None)
+    monkeypatch.setattr(leave_extra.notify, "push_notification", lambda *a, **k: None)
+    monkeypatch.setattr(employee_services.notify, "push_notification", lambda *a, **k: None)
 
     emp_utils = importlib.import_module("gege_hr.gege_hr.utils.employee")
 
@@ -176,9 +184,19 @@ def idor(monkeypatch):
         state["roles"] = list(roles or [])
         state["employee"] = employee
 
+    # leave_extra / employee_services resolve the caller through their own
+    # frappe.get_roles + frappe.db.get_value("Employee", {"user_id": ...}) —
+    # wire the same persona state into the stub so the swap is visible there.
+    stub.get_roles = _roles
+    harness.get_value = lambda doctype, *a, **k: (
+        state["employee"] if doctype == "Employee" and a and isinstance(a[0], dict) else None
+    )
+
     return types.SimpleNamespace(
         leave=leave,
         handover=handover,
+        leave_extra=leave_extra,
+        employee_services=employee_services,
         harness=harness,
         stub=stub,
         persona=persona,
@@ -386,3 +404,75 @@ def test_my_handovers_always_self_scoped(idor):
         c[0] == "to_employee" and c[2] != "SELF" for c in filters if len(c) == 3
     )
     assert len(out) == len(idor.harness.list_rows)  # passthrough — DB applies filter
+
+
+# --------------------------------------------------------------------------- #
+# plan-test-complete-hr-extra §3.3 (G7) — leave_extra + employee_services IDOR
+# --------------------------------------------------------------------------- #
+def test_leave_extra_my_denies_other_employee(idor):  # ID-01
+    """A plain Employee may not list someone else's encashments."""
+    idor.persona(roles=["Employee"], employee="SELF")
+    with pytest.raises(Exception):
+        idor.leave_extra.my_leave_encashments(employee="OTHER")
+    with pytest.raises(Exception):
+        idor.leave_extra.my_comp_off_requests(employee="OTHER")
+
+
+def test_services_my_denies_other_employee(idor):  # ID-02 / ID-03
+    """A plain Employee may not list someone else's grievances / travels."""
+    idor.persona(roles=["Employee"], employee="SELF")
+    with pytest.raises(Exception):
+        idor.employee_services.my_grievances(employee="OTHER")
+    with pytest.raises(Exception):
+        idor.employee_services.my_travel_requests(employee="OTHER")
+
+
+def test_manager_my_bypasses_self_scope(idor):  # ID-04
+    """HR Manager may query any employee's rows (intended bypass)."""
+    idor.persona(roles=["HR Manager"], employee="SELF")
+    idor.leave_extra.my_leave_encashments(employee="OTHER")  # must not raise
+    idor.employee_services.my_grievances(employee="OTHER")  # must not raise
+    idor.employee_services.my_travel_requests(employee="OTHER")  # must not raise
+
+
+@pytest.mark.parametrize(
+    "fn",
+    [
+        lambda m: m.leave_extra.approve_leave_encashment(name="X"),
+        lambda m: m.leave_extra.reject_leave_encashment(name="X"),
+        lambda m: m.leave_extra.approve_comp_off(name="X"),
+        lambda m: m.leave_extra.reject_comp_off(name="X"),
+        lambda m: m.employee_services.resolve_grievance(name="X"),
+        lambda m: m.employee_services.approve_travel_request(name="X"),
+        lambda m: m.employee_services.reject_travel_request(name="X"),
+    ],
+)
+def test_actions_deny_plain_employee(idor, fn):  # ID-05
+    """Every approve/reject/resolve endpoint denies a plain Employee."""
+    idor.persona(roles=["Employee"], employee="SELF")
+    with pytest.raises(Exception):
+        fn(idor)
+
+
+@pytest.mark.parametrize(
+    "fn",
+    [
+        lambda m: m.leave_extra.all_leave_encashments(),
+        lambda m: m.leave_extra.all_comp_off_requests(),
+        lambda m: m.employee_services.all_grievances(),
+        lambda m: m.employee_services.all_travel_requests(),
+    ],
+)
+def test_all_lists_deny_plain_employee(idor, fn):  # ID-06
+    """Every all_* endpoint denies a plain Employee."""
+    idor.persona(roles=["Employee"], employee="SELF")
+    with pytest.raises(Exception):
+        fn(idor)
+
+
+def test_hr_user_manager_set_allowed(idor):  # ID-07
+    """HR User is inside the manager set for both modules."""
+    idor.persona(roles=["HR User"], employee="SELF")
+    idor.leave_extra.all_leave_encashments()  # must not raise
+    idor.employee_services.all_travel_requests()  # must not raise
+    idor.employee_services.resolve_grievance(name="X")  # manager gate passes

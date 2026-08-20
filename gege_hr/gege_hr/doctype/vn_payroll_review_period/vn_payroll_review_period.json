@@ -20,7 +20,10 @@
   {"fieldname": "total_deductions", "default": "0", "fieldtype": "Currency", "in_list_view": 1, "label": "Total Deductions", "options": "Company:company:default_currency", "read_only": 1},
   {"fieldname": "col2", "fieldtype": "Column Break"},
   {"fieldname": "total_net_pay", "default": "0", "fieldtype": "Currency", "in_list_view": 1, "label": "Total Net Pay", "options": "Company:company:default_currency", "read_only": 1},
-  {"fieldname": "payroll_entry", "fieldtype": "Link", "label": "Payroll Entry", "options": "Payroll Entry", "read_only": 1}
+  {"fieldname": "payroll_entry", "fieldtype": "Link", "label": "Payroll Entry", "options": "Payroll Entry", "read_only": 1},
+  {"fieldname": "gen_err_break", "fieldtype": "Section Break", "label": "Generate Errors"},
+  {"fieldname": "generate_errors", "fieldtype": "Small Text", "label": "Generate Errors (JSON)", "read_only": 1},
+  {"fieldname": "vn_auto_created", "default": "0", "fieldtype": "Check", "in_list_view": 1, "in_standard_filter": 1, "label": "Tự động (job WP6)", "read_only": 1}
  ],
  "links": [],
  "module": "gege_hr",

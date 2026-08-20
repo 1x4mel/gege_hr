@@ -199,3 +199,31 @@ def audit_row(row: Any) -> dict:
     if isinstance(value, datetime):
         out["created_at"] = value.isoformat(sep=" ")
     return out
+
+
+# --------------------------------------------------------------------------- #
+# WP11 — CSV export builder (pure; Excel-safe UTF-8 BOM)
+# --------------------------------------------------------------------------- #
+def build_audit_csv(rows: list[dict]) -> str:
+    """Serialise audit rows to CSV with a UTF-8 BOM.
+
+    * BOM ``\\ufeff`` — Excel mở tiếng Việt đúng không cần import wizard.
+    * Header = :data:`AUDIT_ROW_FIELDS` (stable order).
+    * Every cell passes through the ``=``/``+``/``-``/``@`` formula-injection
+      neutraliser (same policy as utils/bank_export).
+    """
+    import csv
+    import io
+
+    def _safe(value) -> str:
+        s = "" if value is None else str(value)
+        if s[:1] in ("=", "+", "-", "@"):
+            return f"'{s}"
+        return s
+
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\r\n")
+    writer.writerow(list(AUDIT_ROW_FIELDS))
+    for row in rows or []:
+        writer.writerow([_safe(row.get(f)) for f in AUDIT_ROW_FIELDS])
+    return "\ufeff" + buf.getvalue()

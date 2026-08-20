@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import frappe
 from frappe import _
+from frappe.utils import get_datetime, now_datetime
 
 from gege_hr.gege_hr.api import audit as audit_api
 from gege_hr.gege_hr.utils import employee as emp_utils
+from gege_hr.gege_hr.utils.tz import wall as tz_wall
 
 MISS_DOCTYPE = "VN Checkout Miss"
 
@@ -305,6 +307,16 @@ def explain_checkout_miss(
             ),
             frappe.ValidationError,
         )
+    # Grace-deadline hard-stop: even while the status is still Pending (the
+    # hourly flip may not have run yet), a ticket past its grace_deadline no
+    # longer accepts explanations — the card is closed for the employee.
+    deadline = frappe.db.get_value(MISS_DOCTYPE, name, "grace_deadline")
+    # PHASE-1 FRAME: deadline is naive PORTAL WALL — compare in the same frame.
+    if deadline and tz_wall(now_datetime()) > tz_wall(get_datetime(deadline)):
+        frappe.throw(
+            _("Đã quá hạn giải trình — phiếu {0} đã bị khoá.").format(name),
+            frappe.ValidationError,
+        )
     updates: dict = {
         "explanation": explanation,
         "evidence_ref": evidence_ref or "",
@@ -330,6 +342,26 @@ def explain_checkout_miss(
             cr.insert(ignore_permissions=True)
             cr_name = cr.name
             updates["correction_request"] = cr_name
+            # D-FLOW FIX: a CR opened from an explanation must enter the
+            # approval pipeline immediately (Draft → Pending Manager) — exactly
+            # like submit_correction_request does. Otherwise the CR sits in
+            # Draft forever and HR's approve_request rejects it ("không ở
+            # trạng thái chờ duyệt"), so the real checkout never replaces the
+            # fake OUT (E2E Group D finding).
+            # Move the CR into the approval pipeline. doc.save() is unusable
+            # here: the employee session lacks READ on the CR doctype (the
+            # insert above ran ignore_permissions), so send_for_approval's
+            # save() fails on has_permission and the CR silently stays Draft.
+            # A direct state write is safe — explain already verified ticket
+            # ownership, and the approver's approve_request performs the full
+            # doc.save() with hooks when acting on it.
+            frappe.db.set_value(
+                "VN Attendance Correction Request",
+                cr_name,
+                {"workflow_state": "Pending Manager"},
+                update_modified=False,
+            )
+            frappe.db.commit()
         except Exception:
             frappe.log_error(title="checkout_miss.explain correction create failed")
     frappe.db.set_value(MISS_DOCTYPE, name, updates)

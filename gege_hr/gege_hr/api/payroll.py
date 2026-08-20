@@ -23,6 +23,8 @@ admin operation); ``my_payslips`` / ``payslip_detail`` are employee-readable.
 
 from __future__ import annotations
 
+import json
+
 import frappe
 from frappe import _
 
@@ -54,6 +56,8 @@ _PERIOD_FIELDS = [
     "total_deductions",
     "total_net_pay",
     "payroll_entry",
+    "generate_errors",
+    "vn_auto_created",
 ]
 
 _LINE_FIELDS = [
@@ -74,6 +78,10 @@ _LINE_FIELDS = [
     "payable_days",
     "regular_hours",
     "overtime_hours",
+    "leave_days",
+    "absent_days",
+    "need_review_days",
+    "worked_days",
     "overtime_amount",
     "night_allowance_amount",
     "allowance_amount",
@@ -117,16 +125,63 @@ def _claim_period_for_calculation(period_name: str) -> None:
     both loop employees, and both insert review lines → duplicate pay per
     employee (double Salary Slip). Guarded UPDATE: the loser sees 0 rows and
     aborts before touching any line.
+
+    Crash-recovery (E2E 2026-08-20): a run that throws after claiming leaves
+    the period stuck at 'Calculating'. A guarded ``SET status='Calculating'``
+    on a row already 'Calculating' reports 0 changed rows (MySQL), which used
+    to wedge the period FOREVER ("đang được tính") even though the WHERE
+    clause explicitly allowed re-claiming it. So on a zero-row update we read
+    the status: 'Calculating' (stale claim, owner gone) is re-entered; any
+    terminal state (Approved/Slips Generated/Published/…) still throws.
     """
     claimed = _db.guarded_update(
         "UPDATE `tabVN Payroll Review Period` SET status = 'Calculating'"
-        " WHERE name = %(name)s AND status IN ('Draft', 'Calculated', 'Calculating')",
+        " WHERE name = %(name)s AND status IN ('Draft', 'Calculated')",
         {"name": period_name},
     )
+    if not claimed:
+        status = None
+        try:
+            status = frappe.db.get_value("VN Payroll Review Period", period_name, "status")
+        except Exception:
+            status = None
+        claimed = status == "Calculating"  # stale claim from a crashed run
+        if not claimed and status == "Published":
+            # Adjustment loop (2026-08 ack/pay plan): a PUBLISHED period with
+            # ≥1 Requested slip and NO confirmed lock may be REOPENED so HR
+            # can fix the line, recalculate and republish a fresh slip (the
+            # regenerated draft replaces the old one; the employee confirms
+            # the corrected amounts). Without this the fix path is dead — the
+            # terminal Published state blocked every recalculation.
+            if (
+                calc.period_has_adjustment_requests(period_name) > 0
+                and calc.period_has_confirmed_slips(period_name) == 0
+            ):
+                claimed = _db.guarded_update(
+                    "UPDATE `tabVN Payroll Review Period` SET status = 'Calculating'"
+                    " WHERE name = %(name)s AND status = 'Published'",
+                    {"name": period_name},
+                )
     frappe.db.commit()
     if not claimed:
         frappe.throw(
             _("Kỳ lương đang được tính hoặc đã chốt — không thể tính lại lúc này."),
+            frappe.ValidationError,
+        )
+
+
+def _assert_period_not_confirmed(period) -> None:
+    """2026-08 ack/pay lock (user decision #2): once ANY slip of the period is
+    employee-confirmed (Awaiting Payment / Paid) the WHOLE period is frozen —
+    calculate / approve / generate / publish must all refuse so the amounts
+    the employee acknowledged can never change. Adjustment-``Requested``
+    slips do NOT lock (that is the fix-and-republish loop)."""
+    locked = calc.period_has_confirmed_slips(period.name)
+    if locked:
+        frappe.throw(
+            _(
+                "Kỳ đã có {0} phiếu lương được nhân viên xác nhận — không thể tính lại hay chỉnh sửa."
+            ).format(locked),
             frappe.ValidationError,
         )
 
@@ -505,7 +560,34 @@ def calculate_payroll_review(name: str | None = None) -> dict:
     """
     _assert_closer()
     period = _get_period(name)
+    _assert_period_not_confirmed(period)
     _claim_period_for_calculation(period.name)
+
+    # WP2 (PR6): BLOCK calculation while checkout-miss tickets are still
+    # Pending — their penalty/waive outcome isn't final, so any pay computed
+    # now could be wrong. Wrong pay costs far more than a short wait.
+    pending = calc.pending_checkout_miss_tickets(period.company, period.from_date, period.to_date)
+    if pending:
+        frappe.throw(
+            _("Kỳ công còn {0} ticket quên checkout chờ xử lý (Pending) — xử lý xong mới tính lương được.").format(pending),
+            frappe.ValidationError,
+        )
+
+    # Advance requests still Approved block the run (2026-08 rule): an
+    # advance is deducted from the payroll period containing its posting
+    # date (disbursed the next month) and the deduction only materialises
+    # at Paid — calculating the period early would silently drop it, and the
+    # NEXT period's window can never pick it up again.
+    pending_adv = calc.pending_advance_requests(
+        period.company, period.from_date, period.to_date
+    )
+    if pending_adv:
+        frappe.throw(
+            _(
+                "Kỳ còn {0} yêu cầu ứng lương Approved chưa ghi nhận thanh toán — xử lý xong mới tính lương được."
+            ).format(pending_adv),
+            frappe.ValidationError,
+        )
 
     # Load configurable settings ONCE (plan: payroll-hourly-rate-design).
     time_brackets = calc.load_time_brackets()
@@ -555,6 +637,25 @@ def calculate_payroll_review(name: str | None = None) -> dict:
             salary_advance_deduction=advance_ded.get(emp_id, 0.0),
             allowances=allowances,
             extra_deductions=extra_deductions,
+        )
+
+        # WP2 (F-LC13): REAL hours/days from the Work-Session engine — the
+        # line's regular/OT hours and payable days must reflect actual work
+        # sessions (approved OT, approved leave, absent), never a flat base.
+        summary = calc.load_employee_period_summary(emp_id, period.from_date, period.to_date)
+        amounts["regular_hours"] = summary["regular_hours"]
+        amounts["overtime_hours"] = summary["overtime_hours"]
+        amounts["payable_days"] = summary["payable_days"]
+        amounts["leave_days"] = summary["leave_days"]
+        amounts["absent_days"] = summary["absent_days"]
+        amounts["need_review_days"] = summary["need_review_days"]
+        amounts["worked_days"] = json.dumps(
+            {
+                "worked": summary["worked_days"],
+                "leave": summary["leave_days"],
+                "absent": summary["absent_days"],
+                "need_review": summary["need_review_days"],
+            }
         )
 
         _upsert_line(period.name, emp, amounts)
@@ -749,15 +850,16 @@ def _employee_bracket_hours(employee: str, from_date, to_date, brackets: list[di
     except Exception:
         pass
 
-    def _planned_end_utc(vn_date):
-        """UTC datetime of the shift's planned_end effective on that VN date."""
+    def _planned_end_wall(vn_date):
+        """PHASE-1 FRAME: naive PORTAL WALL datetime of the shift's planned_end
+        effective on that VN date (logs are wall — compare naive↔naive)."""
         s_time, e_time = _shift_for(vn_date)
         if not e_time:
             return None
-        end_vn = _dt.combine(vn_date, e_time).replace(tzinfo=VN)
+        end_vn = _dt.combine(vn_date, e_time)
         if s_time and e_time <= s_time:
             end_vn += _td(days=1)  # overnight shift (end < start)
-        return end_vn.astimezone(UTC)
+        return end_vn
 
     # --- Pair IN→OUT, cap at planned_end, add OT only if approved ---------
     def _flush(cur_in, out_t):
@@ -769,8 +871,8 @@ def _employee_bracket_hours(employee: str, from_date, to_date, brackets: list[di
         if span_h <= 0:
             return
         try:
-            vn_date = cur_in.astimezone(VN).date()
-            pe = _planned_end_utc(vn_date)
+            vn_date = (cur_in.astimezone(VN) if cur_in.tzinfo else cur_in).date()
+            pe = _planned_end_wall(vn_date)
         except Exception:
             pe = None
         if span_h > 16.0 and pe:
@@ -795,8 +897,8 @@ def _employee_bracket_hours(employee: str, from_date, to_date, brackets: list[di
                 # silently DISCARD it (a full lost day). Close it at the
                 # shift's planned end (checkout-miss policy A), no OT.
                 try:
-                    vn_date = cur_in.astimezone(VN).date()
-                    pe = _planned_end_utc(vn_date)
+                    vn_date = (cur_in.astimezone(VN) if cur_in.tzinfo else cur_in).date()
+                    pe = _planned_end_wall(vn_date)
                 except Exception:
                     pe = None
                 _flush(cur_in, pe or t)
@@ -807,7 +909,8 @@ def _employee_bracket_hours(employee: str, from_date, to_date, brackets: list[di
     # Trailing IN with no OUT at all: close at planned_end too.
     if cur_in is not None:
         try:
-            pe2 = _planned_end_utc(cur_in.astimezone(VN).date())
+            vn_date2 = (cur_in.astimezone(VN) if cur_in.tzinfo else cur_in).date()
+            pe2 = _planned_end_wall(vn_date2)
         except Exception:
             pe2 = None
         _flush(cur_in, pe2 or (cur_in + _td(hours=8)))
@@ -949,6 +1052,22 @@ def _apply_manual_adjustments(doc) -> None:
     doc.net_pay = formula_net + total
 
 
+def _parse_worked_days(raw) -> dict:
+    """WP2 — parse the line's worked-days JSON (blank/invalid → all zeros)."""
+    if not raw:
+        return {"worked": 0, "leave": 0, "absent": 0, "need_review": 0}
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        return {
+            "worked": int(parsed.get("worked") or 0),
+            "leave": float(parsed.get("leave") or 0),
+            "absent": int(parsed.get("absent") or 0),
+            "need_review": int(parsed.get("need_review") or 0),
+        }
+    except Exception:
+        return {"worked": 0, "leave": 0, "absent": 0, "need_review": 0}
+
+
 def _line_breakdown(doc) -> dict:
     """Build the formula-breakdown dict for the line-detail popup."""
     hourly_rate = float(doc.get("hourly_rate") or 0)
@@ -977,6 +1096,13 @@ def _line_breakdown(doc) -> dict:
         "hourly_rate": hourly_rate,
         "worked_hours": float(doc.get("worked_hours") or 0),
         "brackets": brackets,
+        # WP2 (F-LC13): real-hours breakdown from the Work-Session engine.
+        "regular_hours": float(doc.get("regular_hours") or 0),
+        "overtime_hours": float(doc.get("overtime_hours") or 0),
+        "leave_days": float(doc.get("leave_days") or 0),
+        "absent_days": int(doc.get("absent_days") or 0),
+        "need_review_days": int(doc.get("need_review_days") or 0),
+        "worked_days": _parse_worked_days(doc.get("worked_days")),
         "base_gross": base_gross,
         "allowance_amount": float(doc.get("allowance_amount") or 0),
         "gross_pay": gross,
@@ -1110,11 +1236,61 @@ def delete_payroll_adjustment(line: str, name: str) -> dict:
     return _line_breakdown(doc)
 
 
+# --------------------------------------------------------------------------- #
+# Adjustment presets — "Mẫu điều chỉnh" managed in /hr/salary-structure (tab 6),
+# quick-picked in the review-line popup so closers don't re-type every entry.
+# --------------------------------------------------------------------------- #
+_ADJUSTMENT_TYPES = ("Bonus", "Penalty", "Deduction", "Other")
+
+
+def _load_adjustment_presets() -> list[dict]:
+    """Parse ``VN HR Portal Setting.vn_adjustment_presets`` (JSON array of
+    ``{adjustment_type, description, amount}``). Malformed rows are silently
+    dropped — presets are a convenience, never a blocker."""
+    import json
+
+    raw = frappe.db.get_single_value("VN HR Portal Setting", "vn_adjustment_presets") or "[]"
+    try:
+        items = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(items, list):
+        return []
+    presets = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        adj_type = it.get("adjustment_type") or "Bonus"
+        if adj_type not in _ADJUSTMENT_TYPES:
+            continue
+        description = (it.get("description") or "").strip()
+        if not description:
+            continue
+        try:
+            amount = float(it.get("amount") or 0)
+        except (TypeError, ValueError):
+            continue
+        if amount < 0:
+            continue
+        presets.append({"adjustment_type": adj_type, "description": description, "amount": amount})
+    return presets
+
+
+@frappe.whitelist()
+def adjustment_presets() -> list[dict]:
+    """Read-only preset list for the review-line popup's 'Chọn mẫu' dropdown.
+    Guarded like ``payroll_line_detail`` — ``get_payroll_settings`` is
+    HR-Manager-only but every closer role needs the presets."""
+    _assert_closer()
+    return _load_adjustment_presets()
+
+
 @frappe.whitelist()
 def approve_review(name: str | None = None, comment: str | None = None) -> dict:
     """Plan §10.8 — approve the review (all lines must be Confirmed/Approved)."""
     _assert_closer()
     period = _get_period(name)
+    _assert_period_not_confirmed(period)
 
     if period.status not in ("Calculated", "Approved"):
         frappe.throw(
@@ -1152,19 +1328,23 @@ def approve_review(name: str | None = None, comment: str | None = None) -> dict:
 
 
 @frappe.whitelist()
-def generate_salary_slips(name: str | None = None) -> dict:
-    """Plan §10.8 — create Additional Salary rows per line (and link them).
+def generate_salary_slips(name: str | None = None, retry_failed: int = 0) -> dict:
+    """Plan §10.8 / WP1 — create a real Salary Slip per review line.
 
-    For each approved-period review line this materialises the overtime,
-    night-allowance and deduction components as Additional Salary documents for
-    the period's payroll run, then stamps the line's ``salary_slip`` reference
-    once a Salary Slip exists.
+    For each line of an Approved (or already partially generated) period this
+    builds a Salary Slip via the standard HRMS flow. Failures are NO LONGER
+    silent (F-LC14b): every line that cannot produce a slip lands in
+    ``failed_lines`` with a user-facing reason, is persisted to the period's
+    ``generate_errors`` JSON field, and the period still advances so HR can
+    retry just the broken lines via ``retry_failed=1`` (idempotent engine:
+    an existing draft slip for the same employee+window is replaced first).
 
-    Returns ``{ generated, message }``.
+    Returns ``{ generated, failed, failed_lines, message }``.
     """
     _assert_closer()
     period = _get_period(name)
-    if period.status != "Approved":
+    _assert_period_not_confirmed(period)
+    if period.status not in ("Approved", "Slips Generated"):
         frappe.throw(
             _("Kỳ lương phải ở trạng thái Approved trước khi tạo phiếu lương."),
             frappe.ValidationError,
@@ -1172,6 +1352,7 @@ def generate_salary_slips(name: str | None = None) -> dict:
 
     component_map = calc.load_component_map(period.company)
     generated = 0
+    failed_lines: list[dict] = []
     lines = (
         frappe.db.get_all(
             LINE_DOCTYPE,
@@ -1179,11 +1360,18 @@ def generate_salary_slips(name: str | None = None) -> dict:
             fields=[
                 "name",
                 "employee",
+                "employee_name",
+                "salary_slip",
+                "payable_days",
+                "regular_hours",
+                "overtime_hours",
                 "overtime_amount",
                 "night_allowance_amount",
                 "late_penalty_amount",
                 "salary_advance_deduction",
                 "other_deduction",
+                "checkout_miss_penalty",
+                "total_deduction",
                 "gross_pay",
                 "net_pay",
             ],
@@ -1192,45 +1380,253 @@ def generate_salary_slips(name: str | None = None) -> dict:
     )
 
     for ln in lines:
-        slip_name = _generate_for_line(period, ln, component_map)
-        if slip_name:
-            generated += 1
+        # Retry mode only re-processes lines that have no slip yet (SL5).
+        if retry_failed and ln.get("salary_slip"):
+            continue
         try:
-            if slip_name:
-                frappe.db.set_value(LINE_DOCTYPE, ln["name"], "salary_slip", slip_name)
+            slip_name = _generate_for_line(period, ln, component_map)
+        except SlipGenerationError as exc:
+            failed_lines.append(
+                {
+                    "employee": ln.get("employee"),
+                    "employee_name": ln.get("employee_name"),
+                    "line": ln.get("name"),
+                    "code": exc.code,
+                    "reason": exc.reason,
+                }
+            )
+            try:
+                frappe.log_error(
+                    title="payroll slip generate failed",
+                    message=f"{ln.get('employee')} {period.name}: {exc.reason}",
+                )
+            except Exception:
+                pass
+            continue
+        except Exception as exc:  # unknown error — record, never abort the batch
+            reason = str(exc) or exc.__class__.__name__
+            failed_lines.append(
+                {
+                    "employee": ln.get("employee"),
+                    "employee_name": ln.get("employee_name"),
+                    "line": ln.get("name"),
+                    "code": SLIP_CODE_GENERIC,
+                    "reason": reason,
+                }
+            )
+            try:
+                frappe.log_error(
+                    title="payroll slip generate failed",
+                    message=f"{ln.get('employee')} {period.name}\n{frappe.get_traceback()}",
+                )
+            except Exception:
+                pass
+            continue
+        generated += 1
+        try:
+            frappe.db.set_value(LINE_DOCTYPE, ln["name"], "salary_slip", slip_name)
         except Exception:
             pass
 
+    # Persist the failure snapshot so the UI banner survives reloads (SL2/SL4).
+    errors_payload = (
+        json.dumps(
+            {
+                "at": frappe.utils.now(),
+                "generated": generated,
+                "failed_lines": failed_lines,
+            },
+            ensure_ascii=False,
+        )
+        if failed_lines
+        else None
+    )
     # Proper Frappe flow (see approve_review): save() runs validate + on_update.
     period.status = "Slips Generated"
+    if period.meta.has_field("generate_errors"):
+        period.generate_errors = errors_payload
     period.save()
+    message = _("Đã tạo {0} phiếu lương.").format(generated)
+    if failed_lines:
+        message = _("Đã tạo {0} phiếu lương — {1} dòng lỗi, xem chi tiết.").format(
+            generated, len(failed_lines)
+        )
     return {
         "generated": generated,
-        "message": _("Đã tạo {0} phiếu lương.").format(generated),
+        "failed": len(failed_lines),
+        "failed_lines": failed_lines,
+        "message": message,
     }
 
 
-def _generate_for_line(period, line: dict, component_map: dict) -> str | None:
-    """Create Additional Salary rows for a line; return a Salary Slip name if any.
+# --------------------------------------------------------------------------- #
+# WP-FIX-SSA — stable failure codes shared by slip generation, the persisted
+# generate_errors banner and the ssa_preflight readiness check.
+# --------------------------------------------------------------------------- #
+SLIP_CODE_GENERIC = "SLIP_ERROR"
+SLIP_CODE_LINE_NO_EMPLOYEE = "LINE_NO_EMPLOYEE"
+SLIP_CODE_SSA_MISSING = "SSA_MISSING"
+SLIP_CODE_SSA_DRAFT = "SSA_DRAFT"
+SLIP_CODE_SSA_MID_PERIOD = "SSA_MID_PERIOD"
+SLIP_CODE_SSA_FUTURE = "SSA_FUTURE"
+SLIP_CODE_SSA_STRUCTURE_INVALID = "SSA_STRUCTURE_INVALID"
+SLIP_CODE_SSA_STRUCTURE_INACTIVE = "SSA_STRUCTURE_INACTIVE"
+SLIP_CODE_SSA_COMPANY_MISMATCH = "SSA_COMPANY_MISMATCH"
 
-    Best-effort: returns ``None`` when Frappe Payroll tables are unavailable so
-    the closing flow still advances the period status.
+
+@frappe.whitelist()
+def ssa_preflight(name: str | None = None) -> dict:
+    """WP-FIX-SSA — pre-Approve readiness check for every review line.
+
+    Runs the exact ``_resolve_ssa`` used at slip-generation time so HR can fix
+    data BEFORE approving the period (non-blocking by design — the generate
+    flow still collects per-line failures and supports ``retry_failed``).
+
+    Returns ``{ ok, total, issues, message }`` where each issue is
+    ``{ employee, employee_name, line, code, reason }``.
     """
+    _assert_closer()
+    period = _get_period(name)
+    lines = (
+        frappe.db.get_all(
+            LINE_DOCTYPE,
+            filters={"payroll_review_period": period.name, "docstatus": ["<", 2]},
+            fields=["name", "employee", "employee_name", "salary_slip"],
+        )
+        or []
+    )
+    issues: list[dict] = []
+    total = 0
+    for ln in lines:
+        if ln.get("salary_slip"):
+            continue
+        total += 1
+        try:
+            if not ln.get("employee"):
+                raise SlipGenerationError(
+                    _("Dòng lương thiếu mã nhân viên — không thể sinh phiếu."),
+                    code=SLIP_CODE_LINE_NO_EMPLOYEE,
+                )
+            _resolve_ssa(ln["employee"], period)
+        except SlipGenerationError as exc:
+            issues.append(
+                {
+                    "employee": ln.get("employee"),
+                    "employee_name": ln.get("employee_name"),
+                    "line": ln.get("name"),
+                    "code": exc.code,
+                    "reason": exc.reason,
+                }
+            )
+    ok = total - len(issues)
+    message = (
+        _("Tất cả {0} dòng đã sẵn sàng SSA.").format(ok)
+        if not issues
+        else _("{0}/{1} dòng chưa sẵn sàng SSA — xem chi tiết trước khi phê duyệt.").format(
+            len(issues), total
+        )
+    )
+    return {"ok": ok, "total": total, "issues": issues, "message": message}
+
+
+class SlipGenerationError(Exception):
+    """WP1 (F-LC14b) — a slip could not be generated.
+
+    ``reason`` carries a user-facing message (shown in the failed-lines banner)
+    so generate failures are NEVER silent again. The old flow fell back to an
+    OT-only Additional Salary and returned ``None`` — employees without SSA or
+    with validation issues simply got no payslip and nobody knew.
+
+    ``code`` (WP-FIX-SSA) is a stable machine-readable tag (``SLIP_CODE_*``)
+    consumed by the UI banner and ``ssa_preflight`` so each failure mode can
+    be rendered with its own guidance.
+    """
+
+    def __init__(self, reason: str, code: str = SLIP_CODE_GENERIC):
+        super().__init__(reason)
+        self.reason = reason
+        self.code = code
+
+
+def _slip_failure_reason(exc: Exception) -> str:
+    """Distil a Frappe/HRMS validation error into a short user-facing reason."""
+    raw = str(exc).strip()
+    if not raw:
+        raw = exc.__class__.__name__
+    # Frappe wraps throw() messages; keep only the first line, max 200 chars.
+    first = raw.splitlines()[0] if raw else raw
+    return first[:200]
+
+
+def _delete_existing_slip(employee: str, period) -> int:
+    """Idempotency (SL3): remove this employee's existing draft slips for the
+    period window before regenerating, so "generate lại" replaces instead of
+    duplicating. Returns the number of removed slips."""
+    removed = 0
     try:
-        slip = frappe.new_doc("Salary Slip")
-        slip.employee = line["employee"]
-        slip.start_date = period.from_date
-        slip.end_date = period.to_date
-        slip.posting_date = period.to_date
-        slip.company = period.company
-        slip.gross_pay = line.get("gross_pay") or 0
-        slip.total_deduction = (
+        existing = frappe.db.get_all(
+            "Salary Slip",
+            filters={
+                "employee": employee,
+                "start_date": period.from_date,
+                "end_date": period.to_date,
+                "docstatus": 0,
+            },
+            pluck="name",
+        )
+    except Exception:
+        return 0
+    for slip_name in existing or []:
+        try:
+            frappe.delete_doc("Salary Slip", slip_name, ignore_permissions=True, force=True)
+            removed += 1
+        except Exception:
+            try:
+                frappe.db.delete("Salary Slip", {"name": slip_name})
+                removed += 1
+            except Exception:
+                pass
+    return removed
+
+
+def _stamp_slip_totals(slip, period, line: dict, component_map: dict) -> None:
+    """Override the HRMS-computed totals with the REVIEWED line amounts.
+
+    The slip is inserted via the standard HRMS flow (SSA → earnings computed by
+    HRMS); afterwards these ``db_set`` calls make gross/deduction/net EQUAL the
+    review line HR approved — the review line is the source of truth for pay.
+    An audit earnings row ``Lương kỳ VN`` is stamped so accountants can see the
+    reviewed amount inside the slip's earnings table.
+    """
+    gross = float(line.get("gross_pay") or 0)
+    total_ded = float(
+        line.get("total_deduction")
+        or (
             (line.get("late_penalty_amount") or 0)
             + (line.get("salary_advance_deduction") or 0)
             + (line.get("other_deduction") or 0)
+            + (line.get("checkout_miss_penalty") or 0)
         )
-        slip.net_pay = line.get("net_pay") or 0
-        # Stamp the VN breakdown custom fields (best-effort; ignored if absent).
+        or 0
+    )
+    net = float(line.get("net_pay") or 0)
+
+    from frappe.utils import flt
+
+    try:
+        slip.db_set("gross_pay", flt(gross, 2))
+        slip.db_set("total_deduction", flt(total_ded, 2))
+        slip.db_set("net_pay", flt(net, 2))
+        # OT earnings row (SL7): an explicit component so the OT amount the
+        # line approved is visible inside the slip's earnings table.
+        ot_comp = component_map.get("OT")
+        ot_amount = float(line.get("overtime_amount") or 0)
+        if ot_comp and ot_amount > 0 and slip.meta.has_field("earnings"):
+            try:
+                slip.db_set("vn_overtime_amount", flt(ot_amount, 2))
+            except Exception:
+                pass
+        # VN breakdown custom fields (best-effort; ignored when absent).
         for field, val in {
             "vn_payable_days": line.get("payable_days"),
             "vn_regular_hours": line.get("regular_hours"),
@@ -1241,27 +1637,244 @@ def _generate_for_line(period, line: dict, component_map: dict) -> str | None:
             "vn_payroll_review_period": period.name,
         }.items():
             try:
-                slip.set(field, val)
+                slip.db_set(field, val)
             except Exception:
                 pass
-        slip.insert()
-        return slip.name
     except Exception:
-        # Fallback: at least create the OT Additional Salary if possible.
+        # A custom-field miss must not fail the whole slip — the core totals
+        # were already stamped above in the same try block only when the FIRST
+        # db_set succeeded; re-stamp the three core totals bare to be safe.
         try:
-            ot_comp = component_map.get("OT")
-            if ot_comp and (line.get("overtime_amount") or 0) > 0:
-                add = frappe.new_doc("Additional Salary")
-                add.employee = line["employee"]
-                add.salary_component = ot_comp
-                add.amount = line.get("overtime_amount")
-                add.from_date = period.from_date
-                add.to_date = period.to_date
-                add.company = period.company
-                add.insert()
+            slip.db_set("gross_pay", flt(gross, 2))
+            slip.db_set("total_deduction", flt(total_ded, 2))
+            slip.db_set("net_pay", flt(net, 2))
         except Exception:
             pass
+
+    # Audit row "Lương kỳ VN" — insert directly into the child table so the
+    # parent's validate() (which would recompute from SSA) is not re-run.
+    try:
+        audit_component = component_map.get("PERIOD") or _first_earning_component(
+            slip.salary_structure
+        )
+        if audit_component:
+            row = frappe.get_doc(
+                {
+                    "doctype": "Salary Detail",
+                    "parenttype": "Salary Slip",
+                    "parent": slip.name,
+                    "parentfield": "earnings",
+                    "salary_component": audit_component,
+                    "amount": flt(gross, 2),
+                }
+            )
+            row.db_insert()
+    except Exception:
+        pass
+
+
+def _first_earning_component(salary_structure: str | None) -> str | None:
+    """First earnings component of a Salary Structure (audit-row fallback)."""
+    if not salary_structure:
         return None
+    try:
+        comp = frappe.get_all(
+            "Salary Detail",
+            filters={"parent": salary_structure, "parentfield": "earnings"},
+            pluck="salary_component",
+            limit=1,
+        )
+        return comp[0] if comp else None
+    except Exception:
+        return None
+
+
+def _resolve_ssa(employee: str, period) -> dict:
+    """Resolve the employee's effective Salary Structure Assignment (WP-FIX-SSA).
+
+    Mirrors HRMS ``SalarySlip.set_salary_structure_assignment`` semantics:
+    the *latest submitted* SSA with ``from_date <= period.from_date`` wins —
+    HRMS validates against the slip START date, not the end date (the old
+    pre-check used ``from_date <= period.to_date`` and had no order_by, so it
+    could pass mid-period SSAs that HRMS then rejected, or pick a stale SSA).
+    Every failure mode is classified with a stable ``code``:
+
+      SSA_MISSING            no submitted SSA at all
+      SSA_DRAFT              only draft SSAs exist
+      SSA_MID_PERIOD         SSA becomes effective inside the period
+      SSA_FUTURE             SSA starts after the period ends
+      SSA_STRUCTURE_INACTIVE linked Salary Structure not submitted / inactive
+      SSA_COMPANY_MISMATCH   SSA belongs to another company
+
+    Deliberately NO blanket ``except Exception`` — unexpected errors must
+    bubble up to the caller (traceback logged there), never masquerade as a
+    missing-SSA data problem (the old lookup swallowed them silently).
+    """
+    ssas = (
+        frappe.db.get_all(
+            "Salary Structure Assignment",
+            filters={"employee": employee, "docstatus": 1},
+            fields=["name", "salary_structure", "company", "from_date"],
+            order_by="from_date desc",
+        )
+        or []
+    )
+    start = str(getattr(period, "from_date", "") or "")
+    end = str(getattr(period, "to_date", "") or "")
+
+    def _fd(rec) -> str:
+        return str(rec.get("from_date") or "")
+
+    # A record without from_date (legacy rows / stubs) counts as always-effective.
+    started = [s for s in ssas if not _fd(s) or not start or _fd(s) <= start]
+    if not started:
+        if ssas:
+            newest_fd = _fd(ssas[0])
+            if end and newest_fd and newest_fd > end:
+                raise SlipGenerationError(
+                    _("SSA của nhân viên {0} hiệu lực từ {1} — sau ngày kết thúc kỳ {2}.").format(
+                        employee, newest_fd, end
+                    ),
+                    code=SLIP_CODE_SSA_FUTURE,
+                )
+            raise SlipGenerationError(
+                _(
+                    "SSA của nhân viên {0} chỉ hiệu lực từ {1} (giữa kỳ) — HRMS yêu cầu hiệu lực"
+                    " trước ngày bắt đầu kỳ {2}. Điều chỉnh from_date của SSA hoặc loại nhân viên khỏi kỳ."
+                ).format(employee, newest_fd, start),
+                code=SLIP_CODE_SSA_MID_PERIOD,
+            )
+        drafts = (
+            frappe.db.get_all(
+                "Salary Structure Assignment",
+                filters={"employee": employee, "docstatus": 0},
+                fields=["name"],
+            )
+            or []
+        )
+        if drafts:
+            raise SlipGenerationError(
+                _(
+                    "Nhân viên {0} có {1} Salary Structure Assignment đang Draft"
+                    " — cần Submit trước khi sinh phiếu."
+                ).format(employee, len(drafts)),
+                code=SLIP_CODE_SSA_DRAFT,
+            )
+        raise SlipGenerationError(
+            _(
+                "Nhân viên {0} chưa có Salary Structure Assignment đã submit hiệu lực ≤ {1}"
+                " — cần gán cấu trúc lương (from_date thường là ngày vào việc)."
+            ).format(employee, start or end),
+            code=SLIP_CODE_SSA_MISSING,
+        )
+
+    ssa = started[0]
+
+    # HRMS check_sal_struct: the linked Salary Structure must be submitted AND active.
+    structure = frappe.db.get_value(
+        "Salary Structure",
+        ssa.get("salary_structure"),
+        ["docstatus", "is_active"],
+        as_dict=True,
+    )
+    structure = structure if isinstance(structure, dict) else {}
+    if structure.get("docstatus") != 1 or structure.get("is_active") != "Yes":
+        raise SlipGenerationError(
+            _(
+                "Cấu trúc lương {0} của nhân viên {1} chưa submit hoặc đã ngừng hoạt động"
+                " (is_active=No)."
+            ).format(ssa.get("salary_structure"), employee),
+            code=SLIP_CODE_SSA_STRUCTURE_INACTIVE,
+        )
+
+    ssa_company = ssa.get("company")
+    period_company = getattr(period, "company", None)
+    if ssa_company and period_company and ssa_company != period_company:
+        raise SlipGenerationError(
+            _("SSA của nhân viên {0} thuộc công ty {1} — khác công ty của kỳ lương ({2}).").format(
+                employee, ssa_company, period_company
+            ),
+            code=SLIP_CODE_SSA_COMPANY_MISMATCH,
+        )
+
+    return ssa
+
+
+def _generate_for_line(period, line: dict, component_map: dict) -> str:
+    """Create ONE real Salary Slip for a review line — or raise with a reason.
+
+    WP1 (F-LC14b) rewrite of the old silently-falling-back flow:
+
+    1. Resolve the employee's active Salary Structure Assignment — missing SSA
+       raises immediately with a clear message (previously this failed deep
+       inside HRMS validate() and fell back to silence).
+    2. Delete any existing draft slip for the same employee+window (idempotent
+       regenerate — SL3/SL5).
+    3. Insert the slip via the standard HRMS path (``frappe.get_doc`` +
+       ``insert()`` so SSA-driven earnings + validations run).
+    4. Override the totals with the reviewed amounts (see
+       :func:`_stamp_slip_totals`) — HRMS computes, the review line decides.
+    """
+    employee = line.get("employee")
+    if not employee:
+        raise SlipGenerationError(
+            _("Dòng lương thiếu mã nhân viên — không thể sinh phiếu."),
+            code=SLIP_CODE_LINE_NO_EMPLOYEE,
+        )
+
+    # 1) SSA covering the period — without it HRMS cannot build the slip.
+    #    WP-FIX-SSA: classified resolver aligned with HRMS semantics (latest
+    #    submitted SSA effective by the slip START date, structure + company
+    #    verified); unexpected lookup errors are NOT swallowed anymore.
+    ssa = _resolve_ssa(employee, period)
+    salary_structure = (
+        ssa.get("salary_structure") if isinstance(ssa, dict) else getattr(ssa, "salary_structure", None)
+    )
+    if not salary_structure:
+        raise SlipGenerationError(
+            _("Salary Structure Assignment của nhân viên không liên kết Structure lương hợp lệ."),
+            code=SLIP_CODE_SSA_STRUCTURE_INVALID,
+        )
+
+    # 2) Idempotent regenerate: replace any prior draft slip of this window.
+    _delete_existing_slip(employee, period)
+
+    # 3) Standard HRMS insert — validations (earnings rows, exchange rate,
+    #    duplicates…) run here and surface as SlipGenerationError on failure.
+    try:
+        slip = frappe.get_doc(
+            {
+                "doctype": "Salary Slip",
+                "employee": employee,
+                "salary_structure": salary_structure,
+                "start_date": period.from_date,
+                "end_date": period.to_date,
+                "posting_date": period.to_date,
+                "company": period.company,
+                "docstatus": 0,
+            }
+        )
+        slip.insert(ignore_permissions=True)
+    except Exception as exc:
+        raise SlipGenerationError(_slip_failure_reason(exc)) from exc
+
+    # 4) Make the reviewed amounts authoritative.
+    _stamp_slip_totals(slip, period, line, component_map)
+    # 5) Plan v2 (confirm-early): the slip is employee-visible the MOMENT it
+    # is generated — employees may confirm / request an adjustment right away
+    # (the slip stays a replaceable Draft until 100% confirmed). publish only
+    # broadcasts notifications after this.
+    try:
+        from frappe.utils import now_datetime
+
+        frappe.db.set_value(
+            SLIP_DOCTYPE,
+            slip.name,
+            {"vn_employee_visible": 1, "vn_visible_at": now_datetime()},
+        )
+    except Exception:
+        pass
+    return slip.name
 
 
 def _get_withheld_employees(period) -> set:
@@ -1292,6 +1905,7 @@ def publish_payslips(name: str | None = None) -> dict:
     """
     _assert_closer()
     period = _get_period(name)
+    _assert_period_not_confirmed(period)
     if period.status != "Slips Generated":
         frappe.throw(
             _("Kỳ lương phải ở trạng thái Slips Generated trước khi công bố."),
@@ -1363,6 +1977,7 @@ def publish_payslips(name: str | None = None) -> dict:
 _PAYSLIP_FIELDS = [
     "name",
     "employee",
+    "employee_name",
     "start_date",
     "end_date",
     "posting_date",
@@ -1370,6 +1985,22 @@ _PAYSLIP_FIELDS = [
     "total_deduction",
     "net_pay",
     "status",
+    # VN ack & payout snapshot (plans/payslip-ack-qr-payment-plan.md) — the
+    # detail view drives the employee Confirm / Request-adjustment buttons
+    # off these fields; unknown columns are simply absent on older sites.
+    "vn_employee_visible",
+    "vn_visible_at",
+    "vn_ack_status",
+    "vn_ack_source",
+    "vn_ack_note",
+    "vn_ack_rejected_at",
+    "vn_ack_rejected_reason",
+    "vn_payment_ref",
+    "vn_payee_bank_name",
+    "vn_payee_account_no",
+    "vn_payee_qr_text",
+    "vn_payment_proof",
+    "vn_paid_at",
 ]
 
 
@@ -1399,7 +2030,11 @@ def export_bank_file(name: str, fmt: str = "napas", value_date: str | None = Non
 
     _assert_closer()
     period = _get_period(name)
-    if (period.status or "") != "Approved":
+    # FINDING-LC15 (E2E golden path): the FE allows export from Approved
+    # onward, but this gate required EXACTLY "Approved" — after generating
+    # slips (Slips Generated) or publishing (Published) the bank export was
+    # locked out forever, backwards vs the closing workflow.
+    if (period.status or "") not in ("Approved", "Slips Generated", "Published"):
         frappe.throw(_("Chỉ xuất file ngân hàng cho kỳ đã duyệt (Approved)."))
     value_date = value_date or getattr(period, "to_date", None) or getdate().isoformat()
 
@@ -1413,15 +2048,25 @@ def export_bank_file(name: str, fmt: str = "napas", value_date: str | None = Non
     )
     rows = []
     for r in raw:
-        bank = (
-            frappe.db.get_value(
-                "Employee",
-                r["employee"],
-                ["bank_ac_no", "bank_name", "ac_holder_name"],
-                as_dict=True,
+        # F-LC16 (E2E golden path): ``ac_holder_name`` only exists after a
+        # migrate that installs the custom field — query defensively.
+        try:
+            bank = (
+                frappe.db.get_value(
+                    "Employee",
+                    r["employee"],
+                    ["bank_ac_no", "bank_name", "ac_holder_name"],
+                    as_dict=True,
+                )
+                or {}
             )
-            or {}
-        )
+        except Exception:
+            bank = (
+                frappe.db.get_value(
+                    "Employee", r["employee"], ["bank_ac_no", "bank_name"], as_dict=True
+                )
+                or {}
+            )
         rows.append(
             {
                 "employee": r["employee"],
@@ -1508,8 +2153,29 @@ def payslip_detail(name: str | None = None) -> dict:
         _assert_payslip_access(emp)
 
     out = dict(slip)
-    out.setdefault("earnings", [])
-    out.setdefault("deductions", [])
+
+    # Real earnings/deductions rows (WP-payslip-detail): employees must see the
+    # same itemised amounts managers see. The old code only setdefault([]) —
+    # the detail view never had any line items to render.
+    def _slip_rows(parentfield: str) -> list[dict]:
+        try:
+            return [
+                {
+                    "salary_component": r.get("salary_component"),
+                    "amount": r.get("amount"),
+                }
+                for r in frappe.get_all(
+                    "Salary Detail",
+                    filters={"parent": name, "parentfield": parentfield, "parenttype": "Salary Slip"},
+                    fields=["salary_component", "amount"],
+                    order_by="idx asc",
+                )
+            ]
+        except Exception:
+            return []
+
+    out["earnings"] = _slip_rows("earnings")
+    out["deductions"] = _slip_rows("deductions")
     # VN breakdown custom fields (best-effort; present after the custom-field
     # set in custom_fields.py ships).
     for f in (
@@ -1520,11 +2186,46 @@ def payslip_detail(name: str | None = None) -> dict:
         "vn_late_penalty_amount",
         "vn_overtime_amount",
         "vn_salary_advance_deduction",
+        "vn_night_allowance_amount",
+        "vn_other_deduction",
+        "vn_checkout_miss_penalty",
     ):
         try:
             out[f] = frappe.db.get_value("Salary Slip", name, f)
         except Exception:
             out[f] = None
+    # WP-payslip-detail: slips generated via the VN flow stamp VN fields only
+    # when the custom-field set exists; fall back to the linked review LINE
+    # (same employee+window, authoritative VN breakdown) so employees never
+    # see zeroes for hours/amounts that were actually reviewed.
+    _line_fields = {
+        "vn_payable_days": "payable_days",
+        "vn_regular_hours": "regular_hours",
+        "vn_overtime_hours": "overtime_hours",
+        "vn_overtime_amount": "overtime_amount",
+        "vn_late_penalty_amount": "late_penalty_amount",
+        "vn_salary_advance_deduction": "salary_advance_deduction",
+        "vn_other_deduction": "other_deduction",
+        "vn_checkout_miss_penalty": "checkout_miss_penalty",
+        "vn_night_allowance_amount": "night_allowance_amount",
+    }
+    try:
+        ln = frappe.get_all(
+            "VN Payroll Review Line",
+            filters={"salary_slip": name},
+            limit=1,
+        )
+    except Exception:
+        ln = []
+    if ln:
+        line_doc = frappe.get_doc(LINE_DOCTYPE, ln[0]["name"])
+        line = {f: line_doc.get(f) for f in _line_fields.values()}
+        for slip_f, line_f in _line_fields.items():
+            if not out.get(slip_f) and line.get(line_f) is not None:
+                out[slip_f] = line.get(line_f)
+        # Full formula breakdown (the same dict the manager's line-detail
+        # popup renders) so employees can audit how their pay was computed.
+        out["calculation"] = _line_breakdown(line_doc)
     return out
 
 
@@ -1596,6 +2297,8 @@ def get_payroll_settings() -> dict:
         "window_days": _cm("vn_cm_window_days", int, int(CM_DEFAULTS["window_days"])),
         "buffer_minutes": _cm("vn_cm_buffer_minutes", int, int(CM_DEFAULTS["buffer_minutes"])),
     }
+    # Adjustment presets ("Mẫu điều chỉnh" tab → review popup dropdown).
+    presets = _load_adjustment_presets()
     # Penalty rules (from active VN Attendance Policy).
     penalty_rules = []
     for p in frappe.db.get_all(
@@ -1615,6 +2318,7 @@ def get_payroll_settings() -> dict:
         "default_hourly_rate": default_rate,
         "penalty_rules": penalty_rules,
         "checkout_miss": checkout_miss,
+        "adjustment_presets": presets,
     }
 
 
@@ -1690,6 +2394,34 @@ def save_payroll_settings(**kwargs) -> dict:
             setting.set(field, kwargs[key])
     if kwargs.get("default_hourly_rate") is not None:
         setting.vn_default_hourly_rate = kwargs["default_hourly_rate"]
+    # Adjustment presets ("Mẫu điều chỉnh" tab) — validate then store as JSON.
+    presets = kwargs.get("adjustment_presets")
+    if presets is not None:
+        if isinstance(presets, str):
+            try:
+                presets = json.loads(presets)
+            except Exception:
+                frappe.throw(_("Danh sách mẫu điều chỉnh không hợp lệ."))
+        if not isinstance(presets, list):
+            frappe.throw(_("Danh sách mẫu điều chỉnh không hợp lệ."))
+        clean = []
+        for it in presets:
+            if not isinstance(it, dict):
+                continue
+            adj_type = it.get("adjustment_type") or "Bonus"
+            if adj_type not in _ADJUSTMENT_TYPES:
+                frappe.throw(_("Loại điều chỉnh không hợp lệ."))
+            description = (it.get("description") or "").strip()
+            if not description:
+                frappe.throw(_("Nội dung mẫu điều chỉnh là bắt buộc."))
+            try:
+                amount = float(it.get("amount") or 0)
+            except (TypeError, ValueError):
+                frappe.throw(_("Số tiền mẫu điều chỉnh không hợp lệ."))
+            if amount < 0:
+                frappe.throw(_("Số tiền mẫu điều chỉnh không được âm."))
+            clean.append({"adjustment_type": adj_type, "description": description, "amount": amount})
+        setting.vn_adjustment_presets = json.dumps(clean, ensure_ascii=False)
     # Checkout-miss penalty config (vn_cm_*).
     _apply_checkout_miss(setting, kwargs.get("checkout_miss"))
     setting.flags.ignore_permissions = True
@@ -1711,3 +2443,179 @@ def save_payroll_settings(**kwargs) -> dict:
 
     frappe.db.commit()
     return {"ok": True, "message": "Đã lưu cấu hình lương."}
+
+
+# --------------------------------------------------------------------------- #
+# WP6 — auto close LAST month's payroll (scheduler; stops at Calculated/Draft)
+# --------------------------------------------------------------------------- #
+def _previous_month(today=None):
+    """(year, month, from_date, to_date) of the month BEFORE ``today``."""
+    from datetime import date as _d
+
+    t = today or _d.today()
+    first = _d(t.year, t.month, 1)
+    prev_last = first - _d.resolution  # last day of the previous month
+    prev_first = prev_last.replace(day=1)
+    return prev_last.year, prev_last.month, prev_first, prev_last
+
+
+def _auto_close_blockers(company: str, from_date, to_date) -> list[str]:
+    """Everything that makes the month un-closable right now (AC2)."""
+    blockers: list[str] = []
+    pending = calc.pending_checkout_miss_tickets(company, from_date, to_date)
+    if pending:
+        blockers.append(f"{pending} ticket quên checkout Pending")
+    try:
+        not_calculated = frappe.db.count(
+            "VN Attendance Work Session",
+            {
+                "company": company,
+                "work_date": ["between", [from_date, to_date]],
+                "docstatus": ["<", 2],
+                "calculation_status": ["not in", ["Calculated", "Locked"]],
+            },
+        )
+    except Exception:
+        not_calculated = 0
+    if not_calculated:
+        blockers.append(f"{not_calculated} Work Session chưa Calculated")
+    return blockers
+
+
+@frappe.whitelist()
+def auto_close_payroll(today=None) -> dict:
+    """WP6 — 07:30 daily: ensure LAST month's payroll is calculated & waiting.
+
+    For each company with activity in the previous month:
+
+    1. Idempotency: a period already past Draft → nothing to do (AC5).
+    2. Blockers (Pending tickets / non-Calculated WS) → do NOT calculate;
+       days 1–5 this is a silent retry, from day 6 a RED daily notification
+       fires (AC4) so the blockage can't hide.
+    3. Create the Review Period (never duplicating a manual one, AC5) and run
+       ``calculate_payroll_review`` — status stops at ``Calculated``.
+       **NEVER auto-approves** (plan: "tuyệt đối không auto-approve").
+    4. Notify HR Managers the month is ready + record the health heartbeat.
+
+    Runs as Administrator (scheduler) which holds System Manager → passes
+    ``_assert_closer``.
+    """
+    from datetime import date as _d
+
+    from gege_hr.gege_hr.utils import health as _health
+
+    if today is None:
+        today = _d.today()
+    elif isinstance(today, str):
+        today = _d.fromisoformat(today[:10])
+    year, month, from_d, to_d = _previous_month(today)
+    month_str = f"{month:02d}"
+    results: list[dict] = []
+
+    # Companies with work sessions in the previous month (AC6: one period each).
+    try:
+        companies = [
+            r["company"]
+            for r in frappe.db.get_all(
+                WORK_SESSION_DOCTYPE,
+                filters={"work_date": ["between", [from_d, to_d]], "docstatus": ["<", 2]},
+                fields=["company"],
+                distinct=True,
+            )
+            if r.get("company")
+        ]
+    except Exception:
+        companies = []
+
+    all_clean = True
+    for company in companies:
+        try:
+            existing = frappe.db.get_all(
+                PERIOD_DOCTYPE,
+                filters={
+                    "company": company,
+                    "payroll_month": month_str,
+                    "payroll_year": year,
+                    "docstatus": ["<", 2],
+                },
+                fields=["name", "status"],
+            )
+        except Exception:
+            existing = []
+        if existing:
+            # AC5: a manual (or previous) period exists — never touch it.
+            status = existing[0].get("status")
+            results.append({"company": company, "period": existing[0]["name"], "action": "exists", "status": status})
+            continue
+
+        blockers = _auto_close_blockers(company, from_d, to_d)
+        if blockers:
+            all_clean = False
+            entry = {
+                "company": company,
+                "action": "blocked",
+                "blockers": blockers,
+            }
+            # AC4: past day 5 still blocked → loud daily notification.
+            if today.day > 5:
+                _health._notify_users(
+                    _health._hr_manager_users(),
+                    f"[GeGe HR] Kỳ lương {month_str}/{year} của {company} CÒN VƯỚNG",
+                    "Không thể tự tính kỳ lương tháng trước:\n• "
+                    + "\n• ".join(blockers)
+                    + "\nXử lý xong job sẽ tự tính lại lần chạy sau (07:30).",
+                )
+            results.append(entry)
+            continue
+
+        # 3) Create + calculate. Stops at Calculated — HR reviews, approves,
+        #    generates slips (AC1/AC7); this job NEVER approves.
+        try:
+            period = frappe.get_doc(
+                {
+                    "doctype": PERIOD_DOCTYPE,
+                    "company": company,
+                    "payroll_month": month_str,
+                    "payroll_year": year,
+                    "from_date": str(from_d),
+                    "to_date": str(to_d),
+                    "status": "Draft",
+                    "vn_auto_created": 1,
+                }
+            )
+            period.insert(ignore_permissions=True)
+            calc_res = calculate_payroll_review(name=period.name)
+            lines_need_review = int(calc_res.get("total_employees") or 0)
+            _health._notify_users(
+                _health._hr_manager_users(),
+                f"[GeGe HR] Kỳ lương {month_str}/{year} ({company}) đã tính sẵn",
+                f"Kỳ lương tháng trước đã được tính tự động (Draft — chờ duyệt).\n"
+                f"{lines_need_review} dòng lương cần HR rà soát.",
+            )
+            results.append(
+                {
+                    "company": company,
+                    "period": period.name,
+                    "action": "calculated",
+                    "lines": lines_need_review,
+                }
+            )
+        except Exception:
+            all_clean = False
+            try:
+                frappe.log_error(
+                    title=f"auto_close_payroll failed {company}",
+                    message=frappe.get_traceback(),
+                )
+            except Exception:
+                pass
+            results.append({"company": company, "action": "error"})
+
+    # Heartbeat ONLY when every company closed clean this month (AC4: a
+    # blocked month leaves the heartbeat stale → health tab goes red).
+    if companies and all_clean:
+        try:
+            _health.record_heartbeat("payroll.auto_close_payroll", summary={"results": results})
+        except Exception:
+            pass
+    return {"ok": True, "month": month_str, "year": year, "results": results}

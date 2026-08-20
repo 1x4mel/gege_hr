@@ -216,13 +216,17 @@ def test_save_salary_structure_requires_at_least_one_earning(fake):
 
 
 def test_save_salary_structure_creates_new_and_audits(fake):
+    # New label must not collide with an existing structure (duplicate guard).
+    fake.db.exists_map[("Salary Structure", "Lương CB")] = False
     res = fake.api.save_salary_structure(
         salary_structure="Lương CB",
         company="GEGE",
         earnings=[{"salary_component": "Basic", "amount": "5000000"}],
         deductions=[{"salary_component": "BHXH", "amount": 500000}],
     )
-    assert res["name"].startswith("NEW-")
+    # WP-QA-SSA: new structures are named by their label (no autoname doc) —
+    # the old NEW-* stub name no longer applies.
+    assert res["name"] == "Lương CB"
     doc = fake.docs_created[-1]
     assert doc.inserted is True
     assert len(doc.earnings) == 1

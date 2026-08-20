@@ -74,8 +74,9 @@ def test_parse_log_time_custom_tz():
 # to_utc_storage_str
 # --------------------------------------------------------------------------- #
 def test_to_utc_storage_str():
-    dt = datetime(2026, 6, 21, 8, 0, tzinfo=VN)  # 08:00 VN == 01:00 UTC
-    assert device.to_utc_storage_str(dt) == "2026-06-21 01:00:00"
+    # PHASE-1 FRAME: storage is naive PORTAL WALL — 08:00 VN stays 08:00.
+    dt = datetime(2026, 6, 21, 8, 0, tzinfo=VN)
+    assert device.to_utc_storage_str(dt) == "2026-06-21 08:00:00"
 
 
 # --------------------------------------------------------------------------- #

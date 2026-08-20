@@ -244,9 +244,9 @@ def admin_module(monkeypatch):
 # Tests
 # --------------------------------------------------------------------------- #
 def test_portal_local_to_utc_vn_offset(admin_module):
-    """BE-12: portal-local 08:00 (Asia/Ho_Chi_Minh, UTC+7) → 01:00Z."""
+    """PHASE-1 FRAME: portal-local 08:00 is stored as naive WALL 08:00."""
     admin, _ = admin_module
-    assert admin._portal_local_to_utc_str("2026-08-12 08:00") == "2026-08-12 01:00:00"
+    assert admin._portal_local_to_utc_str("2026-08-12 08:00") == "2026-08-12 08:00:00"
 
 
 def test_parse_portal_dt_accepts_with_and_without_seconds(admin_module):
@@ -334,24 +334,24 @@ def test_line_manager_allows_own_team(admin_module):
 
 
 def test_insert_new_in_uses_utc_and_logs_type(admin_module):
-    """BE-1: insert new IN → Employee Checkin with log_type IN + UTC time."""
+    """BE-1 (PHASE-1): insert new IN → log_type IN + WALL time 08:05."""
     admin, stub = admin_module
     res = admin.admin_custom_checkin("HR-EMP-1", time_in="2026-08-12 08:05")
     assert res["status"] == "ok"
     payload, name = stub._created[0]
     assert payload["doctype"] == "Employee Checkin"
     assert payload["log_type"] == "IN"
-    assert payload["time"] == "2026-08-12 01:05:00"  # 08:05 VN → 01:05Z
+    assert payload["time"] == "2026-08-12 08:05:00"  # PHASE-1: wall storage
     assert payload["employee"] == "HR-EMP-1"
 
 
 def test_insert_new_out(admin_module):
-    """BE-3: only OUT provided → inserts an OUT checkin."""
+    """BE-3 (PHASE-1): only OUT provided → inserts an OUT checkin (wall)."""
     admin, stub = admin_module
     admin.admin_custom_checkin("HR-EMP-1", time_out="2026-08-12 17:30")
     payload, _ = stub._created[0]
     assert payload["log_type"] == "OUT"
-    assert payload["time"] == "2026-08-12 10:30:00"
+    assert payload["time"] == "2026-08-12 17:30:00"
 
 
 def test_insert_both_in_one_call(admin_module):
@@ -385,7 +385,7 @@ def test_update_existing_in_updates_time_and_recalcs(admin_module):
     )
     assert res["status"] == "ok"
     assert stub._set_values[0][:3] == ("Employee Checkin", "CHK-IN-1", "time")
-    assert stub._set_values[0][3] == "2026-08-12 02:00:00"  # 09:00 VN → 02:00Z
+    assert stub._set_values[0][3] == "2026-08-12 09:00:00"  # PHASE-1: wall
     # update path must trigger recalc explicitly (hook is after_insert-only)
     assert stub._recalc_sink == ["CHK-IN-1"]
     # and must NOT insert a new doc

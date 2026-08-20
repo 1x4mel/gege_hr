@@ -148,7 +148,8 @@ def parse_log_time(value: Any, tz: str | None = None) -> datetime | None:
 def to_utc_storage_str(portal_dt: datetime) -> str:
     """Format a portal-local aware datetime as the UTC string stored in
     ``Employee Checkin.time`` (``YYYY-MM-DD HH:MM:SS``)."""
-    return portal_dt.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    # PHASE-1 FRAME: store naive PORTAL WALL (matches the live DB frame).
+    return portal_dt.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def derive_device_status(
@@ -182,7 +183,7 @@ def _coerce_dt(value: Any) -> datetime | None:
 
 
 def normalize_upload_log(
-    raw: dict | None, default_device_code: str | None = None
+    raw: dict | None, default_device_code: str | None = None, default_tz: str | None = None
 ) -> tuple[dict | None, str | None]:
     """Validate + normalize one uploaded punch row.
 
@@ -195,7 +196,9 @@ def normalize_upload_log(
     if not isinstance(raw, dict) or not raw:
         return None, "Dòng log trống."
 
-    log_time = parse_log_time(raw.get("log_time") or raw.get("time") or raw.get("timestamp"))
+    log_time = parse_log_time(
+        raw.get("log_time") or raw.get("time") or raw.get("timestamp"), tz=default_tz
+    )
     if log_time is None:
         return None, "Thiếu/th sai định dạng thời gian chấm công (log_time)."
 
@@ -795,3 +798,126 @@ def _process_raw_log(raw_log_name: str) -> str | None:
         {"processing_status": "Processed", "employee_checkin": checkin.name},
     )
     return checkin.name
+
+
+# --------------------------------------------------------------------------- #
+# WP10 (prod-readiness-plan) — machine-to-machine push endpoint
+# --------------------------------------------------------------------------- #
+try:  # real guest-whitelisted decorator inside a bench
+    import frappe as _frappe_mod
+
+    _WHITELIST_GUEST = _frappe_mod.whitelist(allow_guest=True)
+except Exception:  # pragma: no cover - bench-free import
+
+    def _WHITELIST_GUEST(fn):
+        fn.whitelisted = True  # same marker as frappe_whitelist()'s shim
+        return fn
+
+# WP10 knobs: a push batch is capped and rate-limited so a chatty device can
+# never flood the ingest pipeline (plan WP10 "giới hạn rate").
+DEVICE_IMPORT_MAX_BATCH = 500
+DEVICE_IMPORT_RATE = (12, 60)  # max 12 batches / 60s per device
+
+
+@_WHITELIST_GUEST
+def device_import(payload: dict | None = None, device_secret: str | None = None) -> dict:
+    """Machine push: batch IN/OUT punches from a physical attendance device.
+
+    Auth: ``device_id`` + ``device_secret`` must match an ACTIVE
+    ``VN Attendance Device`` (secret is a Password field — compared in
+    constant-time). Dedup is inherited from the raw-log pipeline on
+    (device, time, log_type); a re-sent batch is idempotent (counted as
+    duplicates). Unknown badges surface in ``invalid`` with the reason (DV3)
+    instead of failing the batch. Hours live in the device's own timezone
+    (DV4) — ``parse_log_time`` converts via the device's ``timezone`` field.
+
+    Payload::
+
+        {"device_id": "CAM-01", "logs": [
+            {"badge": "0123", "time": "2026-08-18 08:00:30", "type": "IN"},
+            ...
+        ]}
+
+    Returns ``{device, received, imported, duplicates, invalid:[{badge,reason}]}``.
+    """
+    import frappe
+
+    from gege_hr.gege_hr.utils.ratelimit import rate_limit
+
+    payload = payload or {}
+    device_code = str(payload.get("device_id") or payload.get("device_code") or "").strip()
+    if not device_code:
+        frappe.throw(_("Thiếu device_id."), frappe.ValidationError)
+    rate_limit(f"device_import:{device_code}", *DEVICE_IMPORT_RATE)
+
+    device = frappe.db.get_value(
+        "VN Attendance Device",
+        {"device_code": device_code, "is_active": 1},
+        ["name", "device_secret", "timezone"],
+        as_dict=True,
+    )
+    secret_ok = False
+    if device and device.get("device_secret"):
+        import hmac
+
+        secret_ok = hmac.compare_digest(str(device.get("device_secret")), str(device_secret or ""))
+    if not secret_ok:
+        # Deliberately vague: never confirm which part was wrong.
+        frappe.throw(_("Thiết bị hoặc secret không hợp lệ."), frappe.PermissionError)
+
+    logs = payload.get("logs") or []
+    if not isinstance(logs, list):
+        frappe.throw(_("logs phải là danh sách."), frappe.ValidationError)
+    if len(logs) > DEVICE_IMPORT_MAX_BATCH:
+        frappe.throw(
+            _("Batch quá lớn ({0} > {1}) — chia nhỏ rồi gửi lại.").format(len(logs), DEVICE_IMPORT_MAX_BATCH),
+            frappe.ValidationError,
+        )
+
+    device_tz = device.get("timezone") or None
+    imported = 0
+    duplicates = 0
+    invalid: list[dict] = []
+    for raw in logs:
+        # Machine payload shape: ``badge`` is the vocabulary normalize_upload_log
+        # knows as ``code`` (raw_employee_code → VN Device Employee Mapping).
+        raw = dict(raw or {})
+        if not (raw.get("raw_employee_code") or raw.get("code")) and raw.get("badge") is not None:
+            raw["code"] = raw["badge"]
+        normalized, reason = normalize_upload_log(
+            raw, default_device_code=device_code, default_tz=device_tz
+        )
+        if normalized is None:
+            invalid.append({"badge": raw.get("badge") or raw.get("code"), "reason": reason})
+            continue
+        try:
+            _create_raw_log(normalized, source_type="Device Push")
+            imported += 1
+        except frappe.DuplicateEntryError:
+            duplicates += 1  # DV2/DV5: same (device,time,type) already stored — no-op
+        except Exception:
+            frappe.log_error(
+                title=f"device_import row failed {device_code}",
+                message=frappe.get_traceback(),
+            )
+            invalid.append({"badge": normalized.get("raw_employee_code"), "reason": "Lỗi xử lý dòng."})
+
+    try:
+        frappe.db.set_value(
+            "VN Attendance Device",
+            device.get("name"),
+            "last_sync_at",
+            frappe.utils.now(),
+            update_modified=True,
+        )
+        frappe.db.commit()
+    except Exception:
+        pass
+
+    return {
+        "device": device_code,
+        "received": len(logs),
+        "imported": imported,
+        "duplicates": duplicates,
+        "invalid": invalid,
+    }

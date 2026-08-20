@@ -29,6 +29,7 @@ from frappe.utils import getdate
 from gege_hr.gege_hr.api import audit as audit_api
 from gege_hr.gege_hr.utils import employee as emp_utils
 from gege_hr.gege_hr.utils import pagination
+from gege_hr.gege_hr.utils.advance import REPAYMENT_PLAN_NEXT_MONTH
 from gege_hr.gege_hr.utils.request_workflow import send_for_approval
 
 DOCTYPE = "VN Salary Advance Request"
@@ -269,7 +270,9 @@ def submit_advance_request(**kwargs) -> dict:
 
     Accepts the flat payload the SPA sends: ``employee``, ``posting_date``,
     ``requested_amount``, ``reason`` (optional ``salary_advance_policy``,
-    ``payroll_period``, ``repayment_plan``).
+    ``payroll_period``). ``repayment_plan`` is NOT client-controllable: the
+    single supported method (deduct from the payroll period containing the
+    request, disbursed the next month) is forced server-side.
 
     Returns ``{ name, status, message }``. Validation (amount > 0, within
     eligible amount, cutoff/quota, no-duplicate) runs in
@@ -291,7 +294,10 @@ def submit_advance_request(**kwargs) -> dict:
             "posting_date": getdate(kwargs.get("posting_date")) if kwargs.get("posting_date") else None,
             "requested_amount": kwargs.get("requested_amount"),
             "reason": kwargs.get("reason") or "",
-            "repayment_plan": kwargs.get("repayment_plan") or "Next Month",
+            # Single repayment method (2026-08 rule): always Next Month —
+            # deduct from the payroll period containing the posting_date,
+            # disbursed the following month. Any client-sent value is ignored.
+            "repayment_plan": REPAYMENT_PLAN_NEXT_MONTH,
             "workflow_state": "Draft",
             "docstatus": 0,
         }
@@ -406,9 +412,15 @@ def mark_paid(
     if doc.workflow_state != "Paid":
         doc.workflow_state = "Paid"
         doc.payment_status = "Paid"
-    if doc.workflow_state != "Paid":
-        doc.workflow_state = "Paid"
-        doc.payment_status = "Paid"
+        # Canonicalise the paid amount (2026-08 fix): approval flows that
+        # never stamp approved_amount left it at 0 — the review-line sum and
+        # the Additional Salary deduction then disagreed with the payout.
+        # Paying out means the REQUESTED amount was disbursed and approved.
+        try:
+            if float(doc.approved_amount or 0) <= 0:
+                doc.approved_amount = doc.requested_amount
+        except (TypeError, ValueError):
+            doc.approved_amount = doc.requested_amount
     if payment_entry:
         doc.linked_payment_entry = payment_entry
     doc.save()  # on_update → _create_advance_deduction
@@ -469,7 +481,16 @@ def reverse_advance_payment(
         frappe.throw(_("Chỉ yêu cầu ở trạng thái Paid mới có thể hoàn trả."))
 
     # Cancel the linked deduction first (best-effort, never aborts the flow).
-    reversed_deduction = doc._reverse_advance_deduction()
+    # force=True: the doc is still in the Paid state here, but an explicit HR
+    # reversal must cancel the deduction NOW (2026-08-20 fix — the pure
+    # leave-Paid predicate let the Additional Salary row survive and keep
+    # hitting the Salary Slip).
+    reversed_deduction = doc._reverse_advance_deduction(force=True)
+    if reversed_deduction:
+        # The reversal helper wrote link-field resets straight to the DB —
+        # reload so the state transition below saves against fresh timestamps
+        # instead of raising TimestampMismatchError.
+        doc.reload()
 
     if cancel_request:
         # Full cancel: the on_cancel hook re-runs the (now idempotent) reversal.

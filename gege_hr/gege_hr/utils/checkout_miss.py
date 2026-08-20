@@ -32,8 +32,18 @@ except Exception:  # pragma: no cover
     get_datetime = None  # type: ignore
     now_datetime = None  # type: ignore
 
+try:  # PHASE-1 FRAME helper (bench-safe import)
+    from gege_hr.gege_hr.utils import tz as tz_utils
+except Exception:  # pragma: no cover
+    tz_utils = None  # type: ignore
+
 
 WORK_SESSION_DOCTYPE = "VN Attendance Work Session"
+# Physical MariaDB table — raw SQL (guarded_update) needs the ``tab`` prefix;
+# passing the doctype name made the claim UPDATE fail with
+# "Table '...VN Attendance Work Session' doesn't exist" (errno 1146), so
+# _close_session threw and NO ticket was ever created (silent Error Log only).
+WORK_SESSION_TABLE = "tabVN Attendance Work Session"
 CHECKIN_DOCTYPE = "Employee Checkin"
 MISS_DOCTYPE = "VN Checkout Miss"
 SETTING_DOCTYPE = "VN HR Portal Setting"
@@ -181,7 +191,42 @@ def _find_open_sessions(employee: str, now_utc, buffer_minutes: int) -> list[dic
     except Exception:
         frappe.log_error(title="checkout_miss._find_open_sessions failed")
         return []
-    return rows or []
+
+    # FINDING-P1 fix: a REAL OUT punch may exist even while WS.actual_checkout
+    # is still blank (the punch missed the SI pairing window, so no recalc
+    # paired it yet). Closing such a session stamps a fake OUT ON TOP of the
+    # real one — double-OUT. Skip any session that already has an OUT log
+    # after its check-in; the recalc flow will pair it properly.
+    out_rows = []
+    if rows:
+        try:
+            out_rows = frappe.db.get_all(
+                "Employee Checkin",
+                filters={"employee": employee, "log_type": "OUT"},
+                fields=["name", "time"],
+                order_by="time asc",
+                limit_page_length=0,
+            )
+        except Exception:
+            out_rows = []
+    out_times = [str(r.get("time") or "") for r in out_rows if r.get("time")]
+    kept = []
+    for s in rows or []:
+        checkin = str(s.get("actual_checkin") or "")
+        pe = str(s.get("planned_end") or "")
+        # FINDING-P6: only an OUT INSIDE this session's own span (IN →
+        # planned_end + 6h late-checkout allowance) masks it. A REAL OUT from
+        # a LATER shift (e.g. today's checkout after a forgotten overnight
+        # OUT) always sorts after this session's IN — the old "any t > checkin"
+        # left the earlier session unclosed FOREVER (ticket never raised).
+        if checkin and pe:
+            limit = (get_datetime(pe) + timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S")
+            if any(checkin < t <= limit for t in out_times):
+                continue  # a real OUT inside this session's span — not "open"
+        elif checkin and any(t > checkin for t in out_times):
+            continue  # no planned_end to bound by — keep the old guard
+        kept.append(s)
+    return kept
 
 
 # --------------------------------------------------------------------------- #
@@ -202,7 +247,7 @@ def _close_session(session: dict, cfg: dict) -> str | None:
     from gege_hr.gege_hr.utils._db import guarded_update
 
     claimed = guarded_update(
-        f"UPDATE `{WORK_SESSION_DOCTYPE}` SET vn_auto_checkout = 1"
+        f"UPDATE `{WORK_SESSION_TABLE}` SET vn_auto_checkout = 1"
         " WHERE name = %(name)s AND vn_auto_checkout = 0",
         {"name": session["name"]},
     )
@@ -251,8 +296,11 @@ def _close_session(session: dict, cfg: dict) -> str | None:
             "occurrence_no": occ,
             "status": "Pending",
             "penalty_amount": penalty,
-            "grace_deadline": now_datetime()
-            + timedelta(hours=int(cfg.get("grace_hours", 24))),
+            # PHASE-1 FRAME: grace deadline in naive PORTAL WALL.
+            "grace_deadline": (
+                (tz_utils.wall(now_datetime()) if (tz_utils and now_datetime) else now_datetime())
+                + timedelta(hours=int(cfg.get("grace_hours", 24)))
+            ),
         }
     )
     miss.insert(ignore_permissions=True)
@@ -334,9 +382,16 @@ def run_hourly() -> dict:
     if not int(cfg.get("enabled", 1)):
         return {"closed": 0, "penalised": 0, "disabled": True}
 
-    # Overlap guard: skip if another tick is still running (TTL 55 min).
+    # Overlap guard (WP4): skip if another tick is still running. TTL was 55
+    # min — a worker killed mid-run left the lock stuck for nearly an hour
+    # (HC5). 10 min with an owner token instead: the next tick after a crash
+    # recovers quickly, and normal runs (seconds) still never overlap.
+    import os as _os
+    import random as _random
+
+    _owner = f"{_os.getpid()}:{_random.randint(1000, 9999)}"
     try:
-        lock = frappe.cache().set("gege_hr:cm:run_hourly_lock", 1, ex=3300, nx=True)
+        lock = frappe.cache().set("gege_hr:cm:run_hourly_lock", _owner, ex=600, nx=True)
         if not lock:
             return {"closed": 0, "penalised": 0, "skipped": "locked"}
     except Exception:
@@ -344,7 +399,12 @@ def run_hourly() -> dict:
 
     import datetime as _dt
 
-    now_utc = now_datetime() if now_datetime else _dt.datetime.utcnow()
+    # PHASE-1 FRAME: now in naive PORTAL WALL to match planned_end (wall).
+    _now_src = now_datetime() if now_datetime else None
+    if tz_utils is not None:
+        now_utc = tz_utils.wall(_now_src) if _now_src else tz_utils.now_in_portal().replace(tzinfo=None)
+    else:  # bench-free fallback
+        now_utc = _now_src or _dt.datetime.utcnow()
     cutoff = (now_utc - timedelta(minutes=int(cfg.get("buffer_minutes", 30)))).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
@@ -370,7 +430,15 @@ def run_hourly() -> dict:
     closed_total = 0
     for emp in employees:
         try:
-            closed_total += len(auto_close_missed_checkouts(emp))
+            n = len(auto_close_missed_checkouts(emp))
+            closed_total += n
+            if n:
+                # FINDING-P4 (E2E Group C): frappe.log_error() ROLLS BACK the
+                # connection. Without this per-employee commit, a LATER
+                # employee's exception → log_error would wipe THIS employee's
+                # claim (vn_auto_checkout) + WS write while the doc inserts
+                # (OUT log, ticket) stay committed — a half-closed session.
+                frappe.db.commit()
         except Exception:
             frappe.log_error(title=f"checkout_miss.run_hourly {emp}")
     penalised = penalise_expired()
@@ -379,6 +447,16 @@ def run_hourly() -> dict:
             frappe.cache().delete("gege_hr:cm:run_hourly_lock")
         except Exception:
             pass
+    # WP4: heartbeat at the END of a successful full pass (HC1/HC4).
+    try:
+        from gege_hr.gege_hr.utils.health import record_heartbeat
+
+        record_heartbeat(
+            "checkout_miss.run_hourly",
+            summary={"closed": closed_total, "penalised": penalised},
+        )
+    except Exception:
+        pass
     return {"closed": closed_total, "penalised": penalised}
 
 
@@ -389,7 +467,12 @@ def penalise_expired(now=None) -> int:
     """
     if frappe is None:
         return 0
-    now_utc = get_datetime(now) if now else now_datetime()
+    # PHASE-1 FRAME: compare grace_deadline (wall) against naive PORTAL WALL now.
+    _now_src = get_datetime(now) if now else (now_datetime() if now_datetime else None)
+    if tz_utils is not None:
+        now_utc = tz_utils.wall(_now_src) if _now_src else tz_utils.now_in_portal().replace(tzinfo=None)
+    else:  # bench-free fallback
+        now_utc = _now_src
     try:
         names = (
             frappe.db.get_all(

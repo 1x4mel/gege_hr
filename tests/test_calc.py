@@ -279,6 +279,21 @@ class TestCalculateWorkSession:
         assert r["ot_compensated_early_minutes"] == 30
         assert r["raw_overtime_hours"] == pytest.approx(1.5, abs=1e-6)
 
+    def test_inverted_pair_need_review(self):
+        # FINDING-P3 (E2E G2): orphan-OUT self-heal shape — the IN lands AFTER
+        # the existing OUT. The pair is inverted (OUT < IN) and must surface
+        # need_review, never pass silently with 0h.
+        si = base_shift(self.PS, self.PE)
+        logs = [
+            log(_vn(2026, 6, 20, 10, 0), "OUT"),
+            log(_vn(2026, 6, 20, 10, 38), "IN"),
+        ]
+        res = calc.calculate_work_session(si, logs, base_policy())
+        assert res["need_review"] == 1
+        assert res["inverted_pair"] == 1
+        assert res["missing_checkin"] == 0
+        assert res["missing_checkout"] == 0
+
     def test_missing_checkout_need_review_and_zero_within(self):
         si = base_shift(self.PS, self.PE)
         logs = [log(_vn(2026, 6, 20, 8, 0), "IN")]  # no OUT
@@ -578,19 +593,22 @@ class TestDbDt:
     MariaDB rejects them for Datetime columns, silently killing every Work
     Session insert. ``_db_dt`` must normalise to ``YYYY-MM-DD HH:MM:SS``."""
 
+    # PHASE-1 FRAME: true-UTC inputs (Z / offset / aware) are stored as naive
+    # PORTAL WALL (+7 on this portal) — the live DB storage frame.
+
     def test_iso_z_normalized(self):
-        assert calc._db_dt("2026-06-24T01:00:00Z") == "2026-06-24 01:00:00"
+        assert calc._db_dt("2026-06-24T01:00:00Z") == "2026-06-24 08:00:00"
 
     def test_lowercase_z(self):
-        assert calc._db_dt("2026-06-24T01:00:00z") == "2026-06-24 01:00:00"
+        assert calc._db_dt("2026-06-24T01:00:00z") == "2026-06-24 08:00:00"
 
     def test_offset_converted_to_utc(self):
-        # +07:00 → 00:00 UTC
-        assert calc._db_dt("2026-06-24T08:00:00+07:00") == "2026-06-24 01:00:00"
+        # +07:00 wall input → same wall instant persisted unchanged
+        assert calc._db_dt("2026-06-24T08:00:00+07:00") == "2026-06-24 08:00:00"
 
     def test_datetime_input(self):
         dt = datetime(2026, 6, 24, 1, 0, 0, tzinfo=ZoneInfo("UTC"))
-        assert calc._db_dt(dt) == "2026-06-24 01:00:00"
+        assert calc._db_dt(dt) == "2026-06-24 08:00:00"
 
     def test_naive_datetime_passthrough(self):
         dt = datetime(2026, 6, 24, 1, 0, 0)

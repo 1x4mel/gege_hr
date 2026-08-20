@@ -389,7 +389,13 @@ def create_user(
             "full_name": full_name,
             "send_welcome_email": 1 if send_welcome_email else 0,
             "enabled": 1,
-            "user_type": "Website User",
+            # FINDING-LC1 (E2E golden path): every real portal user is a
+            # "System User" — Frappe STRIPS non-website roles (Employee…) from
+            # Website Users on save, so the old "Website User" left new
+            # accounts with no roles and the portal was unusable for them.
+            # Desk access is still gated by role permissions (an Employee-only
+            # user cannot open /app).
+            "user_type": "System User",
         }
     )
     user.insert(ignore_permissions=True)
@@ -529,6 +535,20 @@ def link_user_to_employee(employee: str, user: str) -> dict:
     emp = frappe.get_doc("Employee", employee)
     old_user = emp.user_id
     emp.db_set("user_id", user)
+    # FINDING-LC1b (E2E golden path): Frappe strips the "Employee" role from
+    # users with no linked Employee record — a user created BEFORE their
+    # Employee (the normal users→employees flow order) loses the role at
+    # creation and the portal 403s for them. Now that the link exists, re-add
+    # the role so it persists.
+    try:
+        if not frappe.db.exists(
+            "Has Role", {"parent": user, "role": "Employee", "parenttype": "User"}
+        ):
+            u = frappe.get_doc("User", user)
+            u.append("roles", {"role": "Employee"})
+            u.save(ignore_permissions=True)
+    except Exception:
+        frappe.log_error(title="link_user_to_employee re-add Employee role failed")
     _audit_admin(
         _("Liên kết tài khoản với nhân viên"),
         reference_doctype="Employee",
@@ -2024,8 +2044,8 @@ def _portal_local_to_utc_str(value) -> str | None:
     dt = _parse_portal_dt(value)
     if dt is None:
         return None
-    dt = dt.replace(tzinfo=tz_utils.get_tzinfo())
-    return dt.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    # PHASE-1 FRAME: admin checkin writes naive PORTAL WALL (DB frame).
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _find_existing_checkin(employee: str, log_type: str, utc_time_str: str) -> str | None:
@@ -2042,12 +2062,15 @@ def _find_existing_checkin(employee: str, log_type: str, utc_time_str: str) -> s
     from gege_hr.gege_hr.utils import tz as tz_utils
 
     check_dt = get_datetime(utc_time_str)
-    portal_day = tz_utils.to_portal(check_dt).date()
-    tz = tz_utils.get_tzinfo()
-    start_local = datetime.combine(portal_day, datetime.min.time(), tzinfo=tz)
-    end_local = start_local + timedelta(days=1)
-    start_utc = start_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
-    end_utc = end_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    # PHASE-1 FRAME: Employee Checkin.time is naive PORTAL WALL — day window
+    # is the wall day, no UTC conversion.
+    if check_dt.tzinfo is not None:
+        check_dt = check_dt.astimezone(tz_utils.get_tzinfo()).replace(tzinfo=None)
+    portal_day = check_dt.date()
+    start_wall = datetime.combine(portal_day, datetime.min.time())
+    end_wall = start_wall + timedelta(days=1)
+    start_utc = start_wall.strftime("%Y-%m-%d %H:%M:%S")
+    end_utc = end_wall.strftime("%Y-%m-%d %H:%M:%S")
     order = "time asc" if log_type == "IN" else "time desc"
     rows = frappe.db.get_all(
         "Employee Checkin",

@@ -95,7 +95,9 @@ def payroll_api(monkeypatch):
     stub, utils = _build_stub_frappe(rows=rows)
     monkeypatch.setitem(sys.modules, "frappe", stub)
     monkeypatch.setitem(sys.modules, "frappe.utils", utils)
-    api = importlib.import_module("gege_hr.gege_hr.api.payroll")
+    # Reload so the module binds to THIS stub even when another test file has
+    # already imported (and reload-bound) api.payroll with a different stub.
+    api = importlib.reload(importlib.import_module("gege_hr.gege_hr.api.payroll"))
     return api, stub
 
 

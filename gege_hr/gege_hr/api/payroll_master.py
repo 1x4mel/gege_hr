@@ -94,8 +94,10 @@ def list_salary_structures(company: str = "", is_active: int = 1, limit: int = 2
     filters = []
     if company:
         filters.append(["company", "=", company])
-    if is_active:
-        filters.append(["is_active", "=", 1])
+    # Salary Structure.is_active is a Select("Yes"/"No"), NOT a Check. Map the
+    # truthy payload: 1 → Yes, 0 → No (0 used to fall through and return the
+    # unfiltered list, duplicating rows when callers merged both halves).
+    filters.append(["is_active", "=", "Yes" if is_active else "No"])
     rows = frappe.get_all(
         "Salary Structure",
         fields=["name", "company", "payroll_frequency", "is_active", "currency"],
@@ -103,6 +105,28 @@ def list_salary_structures(company: str = "", is_active: int = 1, limit: int = 2
         limit_page_length=pagination.clamp_limit(limit, default=200),
         order_by="name asc",
     )
+    # WP-QA-SSA: fixed (non-formula) earnings travel into the hourly pay via
+    # _employee_salary_components — expose the count so the Quick-Assign modal
+    # can warn "re-calculate to pick up allowances" BEFORE assigning.
+    try:
+        names = [r["name"] for r in rows if r.get("name")]
+        counts: dict = {}
+        if names:
+            for d in frappe.get_all(
+                "Salary Detail",
+                filters={
+                    "parent": ["in", names],
+                    "parentfield": "earnings",
+                    "amount_based_on_formula": 0,
+                },
+                fields=["parent"],
+            ):
+                counts[d["parent"]] = counts.get(d["parent"], 0) + 1
+        for r in rows:
+            r["fixed_allowance_count"] = counts.get(r["name"], 0)
+    except Exception:
+        for r in rows:
+            r.setdefault("fixed_allowance_count", 0)
     return rows
 
 
@@ -160,12 +184,15 @@ def save_salary_structure(
     if not earnings:
         frappe.throw(_("Bảng lương phải có ít nhất một khoản thu nhập (earnings)."))
 
+    # Salary Structure.is_active is a Select("Yes"/"No") — a raw boolean fails
+    # validation ("Is Active cannot be True").
+    is_active_flag = "Yes" if _coerce_bool(is_active) else "No"
     payload = {
         "doctype": "Salary Structure",
         "company": company,
         "payroll_frequency": payroll_frequency or "",
         "currency": currency or "VND",
-        "is_active": _coerce_bool(is_active),
+        "is_active": is_active_flag,
         "earnings": earnings,
         "deductions": deductions,
     }
@@ -173,7 +200,13 @@ def save_salary_structure(
     name = (name or "").strip()
     is_new = not name
     if is_new:
+        if frappe.db.exists("Salary Structure", label):
+            frappe.throw(_("Bảng lương {0} đã tồn tại.").format(label))
         payload["salary_structure"] = label
+        # Salary Structure carries no autoname (prompt/field-name doc) — the
+        # label must double as the document name or insert() throws
+        # "Please set the document name".
+        payload["name"] = label
         doc = frappe.get_doc(payload)
         doc.insert()
         ref = doc.name
@@ -184,7 +217,7 @@ def save_salary_structure(
         doc.company = company
         doc.payroll_frequency = payroll_frequency or ""
         doc.currency = currency or "VND"
-        doc.is_active = _coerce_bool(is_active)
+        doc.is_active = is_active_flag
         doc.set("earnings", earnings)
         doc.set("deductions", deductions)
         doc.save()
@@ -265,6 +298,334 @@ def assign_salary_structure(
         },
     )
     return {"name": doc.name}
+
+
+def _parse_employee_list(employees) -> list[str]:
+    """Whitelist params arrive as list or JSON-encoded list — coerce + dedupe."""
+    if isinstance(employees, str):
+        import json
+
+        try:
+            employees = json.loads(employees)
+        except Exception:
+            employees = [employees]
+    if not isinstance(employees, (list, tuple)):
+        employees = [employees] if employees else []
+    seen: list[str] = []
+    for e in employees:
+        eid = (e or "").strip() if isinstance(e, str) else ""
+        if eid and eid not in seen:
+            seen.append(eid)
+    return seen
+
+
+@frappe.whitelist()
+def ssa_status(employees) -> dict:
+    """Per-employee SSA readiness for the Quick-Assign modal (WP-QA-SSA).
+
+    ``assignable=True`` ⇔ the employee has NO submitted SSA at all — the only
+    case where bulk-assign is safe (draft-only employees are surfaced with
+    ``DRAFT_ONLY`` so HR can fix them at the Desk instead of double-creating).
+    """
+    _require_hr_admin()
+    ids = _parse_employee_list(employees)
+    items: list[dict] = []
+    for eid in ids:
+        emp_name = frappe.db.get_value("Employee", eid, "employee_name") or ""
+        submitted = frappe.get_all(
+            "Salary Structure Assignment",
+            filters={"employee": eid, "docstatus": 1},
+            fields=["name", "salary_structure", "from_date"],
+            order_by="from_date desc",
+            limit=1,
+        )
+        has_draft = bool(
+            frappe.get_all(
+                "Salary Structure Assignment",
+                filters={"employee": eid, "docstatus": 0},
+                limit=1,
+            )
+        )
+        if submitted:
+            row = submitted[0]
+            items.append(
+                {
+                    "employee": eid,
+                    "employee_name": emp_name,
+                    "has_submitted": True,
+                    "has_draft": has_draft,
+                    "structure": row.get("salary_structure"),
+                    "from_date": str(row.get("from_date") or ""),
+                    "assignable": False,
+                    "reason": "HAS_SSA",
+                }
+            )
+        elif has_draft:
+            items.append(
+                {
+                    "employee": eid,
+                    "employee_name": emp_name,
+                    "has_submitted": False,
+                    "has_draft": True,
+                    "structure": None,
+                    "from_date": "",
+                    "assignable": False,
+                    "reason": "DRAFT_ONLY",
+                }
+            )
+        else:
+            items.append(
+                {
+                    "employee": eid,
+                    "employee_name": emp_name,
+                    "has_submitted": False,
+                    "has_draft": False,
+                    "structure": None,
+                    "from_date": "",
+                    "assignable": True,
+                    "reason": "OK",
+                }
+            )
+    return {"items": items}
+
+
+@frappe.whitelist()
+def bulk_assign_salary_structure(
+    employees,
+    salary_structure: str,
+    from_date: str = "",
+    base: float = 0,
+) -> dict:
+    """Assign one Salary Structure to many employees (WP-QA-SSA Quick-Assign).
+
+    Loops the battle-tested :func:`assign_salary_structure` engine per employee
+    (overlap validation + audit rows included). No global transaction: every
+    employee lands in exactly one bucket —
+
+      assigned  SSA created + submitted
+      skipped   already has / overlap (Vietnamese reason from the engine)
+      failed    unexpected error (traceback logged per employee)
+
+    ``from_date=""`` (default) uses each employee's ``date_of_joining`` — always
+    retro-correct (≤ any period start). ``base`` is nominal metadata only: pay
+    amounts come from the hourly engine and are stamped over slip totals.
+    """
+    _require_hr_admin()
+    ids = _parse_employee_list(employees)
+    salary_structure = (salary_structure or "").strip()
+    if not ids:
+        frappe.throw(_("Danh sách nhân viên trống."))
+    if not salary_structure or not frappe.db.exists("Salary Structure", salary_structure):
+        frappe.throw(_("Bảng lương không tồn tại."))
+    st = frappe.db.get_value(
+        "Salary Structure", salary_structure, ["docstatus", "is_active"], as_dict=True
+    )
+    st = st if isinstance(st, dict) else {}
+    if st.get("docstatus") != 1 or st.get("is_active") != "Yes":
+        frappe.throw(_("Bảng lương {0} chưa submit hoặc đã ngừng hoạt động.").format(salary_structure))
+
+    # Fixed-amount earnings travel into the hourly pay via _employee_salary_components —
+    # surfaced so the UI can warn "re-calculate to pick up allowances".
+    try:
+        st_doc = frappe.get_doc("Salary Structure", salary_structure)
+        fixed_allowance_count = sum(
+            1
+            for r in (st_doc.earnings or [])
+            if r.amount and not r.amount_based_on_formula
+        )
+    except Exception:
+        fixed_allowance_count = 0
+
+    assigned: list[str] = []
+    skipped: list[dict] = []
+    failed: list[dict] = []
+    for eid in ids:
+        per_emp_from = (from_date or "").strip()
+        if not per_emp_from:
+            per_emp_from = str(
+                frappe.db.get_value("Employee", eid, "date_of_joining")
+                or getdate()
+            )
+        try:
+            assign_salary_structure(
+                employee=eid,
+                salary_structure=salary_structure,
+                from_date=per_emp_from,
+                base=base,
+            )
+            assigned.append(eid)
+        except Exception as exc:
+            reason = str(exc).strip().splitlines()[0] if str(exc).strip() else exc.__class__.__name__
+            bucket = skipped if _is_overlap_reason(reason) else failed
+            bucket.append({"employee": eid, "reason": reason[:200]})
+            if bucket is failed:
+                try:
+                    frappe.log_error(
+                        title="bulk assign SSA failed",
+                        message=f"{eid} → {salary_structure}\n{frappe.get_traceback()}",
+                    )
+                except Exception:
+                    pass
+
+    _audit_admin(
+        _("Bulk gán bảng lương {0} cho {1} nhân viên").format(salary_structure, len(assigned)),
+        reference_doctype="Salary Structure",
+        reference_name=salary_structure,
+        new_value={
+            "assigned": len(assigned),
+            "skipped": len(skipped),
+            "failed": len(failed),
+            "employees": assigned[:50],
+        },
+    )
+    frappe.db.commit()
+    message = _("Đã gán {0} nhân viên.").format(len(assigned))
+    if skipped or failed:
+        message = _("Đã gán {0} — bỏ qua {1}, lỗi {2}.").format(
+            len(assigned), len(skipped), len(failed)
+        )
+    return {
+        "assigned": assigned,
+        "skipped": skipped,
+        "failed": failed,
+        "total": len(ids),
+        "fixed_allowance_count": fixed_allowance_count,
+        "message": message,
+    }
+
+
+@frappe.whitelist()
+def cancel_salary_structure_assignment(employee: str, name: str, reason: str = "") -> dict:
+    """Cancel ONE submitted Salary Structure Assignment (WP-QA-SSA Sprint 3).
+
+    ``reason`` is mandatory and lands in the audit row — HR must justify every
+    unassignment (payroll traceability).
+    """
+    _require_hr_admin()
+    employee = (employee or "").strip()
+    name = (name or "").strip()
+    reason = (reason or "").strip()
+    if not employee or not frappe.db.exists("Employee", employee):
+        frappe.throw(_("Nhân viên không tồn tại."))
+    if not name or not frappe.db.exists("Salary Structure Assignment", name):
+        frappe.throw(_("Bản gán lương không tồn tại."))
+    if not reason:
+        frappe.throw(_("Lý do hủy gán là bắt buộc."))
+
+    doc = frappe.get_doc("Salary Structure Assignment", name)
+    if doc.employee != employee:
+        frappe.throw(_("Bản gán lương không thuộc nhân viên này."))
+    if doc.docstatus != 1:
+        frappe.throw(_("Chỉ có thể hủy bản gán đã submit."))
+
+    doc.cancel()
+    _audit_admin(
+        _("Hủy gán bảng lương {0} của {1}").format(doc.salary_structure, employee),
+        reference_doctype="Salary Structure Assignment",
+        reference_name=name,
+        employee=employee,
+        old_value={"salary_structure": doc.salary_structure, "from_date": str(doc.from_date)},
+        new_value={"cancelled": True, "reason": reason[:500]},
+    )
+    frappe.db.commit()
+    return {"name": name, "cancelled": True}
+
+
+@frappe.whitelist()
+def bulk_cancel_assignments(employees, reason: str = "") -> dict:
+    """Cancel the newest submitted SSA of each employee (WP-QA-SSA Sprint 3).
+
+    Mirrors ``bulk_assign_salary_structure`` buckets: ``cancelled`` /
+    ``skipped`` (no submitted SSA) / ``failed`` (linked slips & other errors,
+    traceback logged). ``reason`` is mandatory and audited once per employee.
+    """
+    _require_hr_admin()
+    ids = _parse_employee_list(employees)
+    reason = (reason or "").strip()
+    if not ids:
+        frappe.throw(_("Danh sách nhân viên trống."))
+    if not reason:
+        frappe.throw(_("Lý do hủy gán là bắt buộc."))
+
+    cancelled: list[str] = []
+    skipped: list[dict] = []
+    failed: list[dict] = []
+    for eid in ids:
+        latest = frappe.get_all(
+            "Salary Structure Assignment",
+            filters={"employee": eid, "docstatus": 1},
+            fields=["name"],
+            order_by="from_date desc",
+            limit=1,
+        )
+        if not latest:
+            skipped.append({"employee": eid, "reason": "Không có SSA đã submit"})
+            continue
+        try:
+            cancel_salary_structure_assignment(employee=eid, name=latest[0]["name"], reason=reason)
+            cancelled.append(eid)
+        except Exception as exc:
+            msg = str(exc).strip().splitlines()[0] if str(exc).strip() else exc.__class__.__name__
+            failed.append({"employee": eid, "reason": msg[:200]})
+            try:
+                frappe.log_error(
+                    title="bulk cancel SSA failed",
+                    message=f"{eid}\n{frappe.get_traceback()}",
+                )
+            except Exception:
+                pass
+    message = _("Đã hủy gán {0} nhân viên.").format(len(cancelled))
+    if skipped or failed:
+        message = _("Đã hủy {0} — bỏ qua {1}, lỗi {2}.").format(
+            len(cancelled), len(skipped), len(failed)
+        )
+    return {
+        "cancelled": cancelled,
+        "skipped": skipped,
+        "failed": failed,
+        "total": len(ids),
+        "message": message,
+    }
+
+
+@frappe.whitelist()
+def ssa_timeline(employee: str) -> dict:
+    """Full SSA history of one employee for the modal's timeline view.
+
+    Returns ``{employee, events: [{name, salary_structure, from_date, base,
+    docstatus, state, creation}]}`` with state ∈ Draft/Submitted/Cancelled —
+    newest first.
+    """
+    _require_hr_admin()
+    employee = (employee or "").strip()
+    if not employee or not frappe.db.exists("Employee", employee):
+        frappe.throw(_("Nhân viên không tồn tại."))
+    rows = frappe.get_all(
+        "Salary Structure Assignment",
+        filters={"employee": employee},
+        fields=["name", "salary_structure", "from_date", "base", "docstatus", "creation"],
+        order_by="creation desc",
+        limit_page_length=50,
+    )
+    state = {0: "Draft", 1: "Submitted", 2: "Cancelled"}
+    events = [
+        {
+            **r,
+            "from_date": str(r.get("from_date") or ""),
+            "state": state.get(r.get("docstatus"), "?"),
+        }
+        for r in rows
+    ]
+    return {"employee": employee, "events": events}
+
+
+def _is_overlap_reason(reason: str) -> bool:
+    """Engine already-has / overlap messages — retry-safe skips, not errors."""
+    r = (reason or "").lower()
+    return any(
+        k in r
+        for k in ("overlap", "đã có", "đã tồn tại", "already", "trùng", "hiệu lực")
+    )
 
 
 def _ensure_no_overlapping_assignment(employee, start, end):

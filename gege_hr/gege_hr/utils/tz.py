@@ -65,6 +65,35 @@ def now_in_portal(tz: str | None = None) -> datetime:
     return datetime.now(get_tzinfo(tz))
 
 
+# --------------------------------------------------------------------------- #
+# PHASE-1 CANONICAL FRAME — naive PORTAL WALL CLOCK (plans/tz-frame-unification-plan.md §3)
+#
+# The live DB stores attendance datetimes as naive PORTAL wall-clock strings
+# (proven by E2E Group B: the UTC-bound readers absorbed yesterday's 23:30 log
+# into "today" and the engine computed late=565' by +7-ing a wall value).
+# Until the Phase-2 migration to true UTC, EVERY reader/writer must go through
+# ``wall`` / ``portal_now_str`` so the whole app lives in ONE frame.
+# --------------------------------------------------------------------------- #
+def wall(dt: datetime | None) -> datetime | None:
+    """Normalise any datetime to a NAIVE PORTAL-WALL datetime (Phase-1 frame).
+
+    * aware → converted to the portal timezone, tzinfo dropped
+    * naive → assumed ALREADY portal-wall (the DB storage frame) — returned
+      unchanged. This is the deliberate inversion of the old UTC assumption.
+    """
+    if dt is None:
+        return None
+    if getattr(dt, "tzinfo", None) is not None:
+        return dt.astimezone(get_tzinfo()).replace(tzinfo=None)
+    return dt
+
+
+def portal_now_str() -> str:
+    """DB-safe ``YYYY-MM-DD HH:MM:SS`` in the PORTAL WALL frame — the Phase-1
+    stamp for ``Employee Checkin.time`` and every attendance writer."""
+    return now_in_portal().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def utc_now() -> datetime:
     """Current moment as an **aware UTC** datetime.
 

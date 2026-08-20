@@ -490,7 +490,11 @@ def _after_correction_state_change(doc, *, from_state, to_state) -> None:
                     "employee_name": miss.employee_name,
                     "time": get_datetime(real_out),
                     "log_type": "OUT",
-                    "vn_source_type": "Correction",
+                    # E2E-D3b: the Select field only accepts
+                    # ""/Mobile/App/Device/Manual/Import/Auto — "Correction"
+                    # made the insert throw and silently killed the whole
+                    # BUG-5 sync (fake OUT stayed, ticket never waived).
+                    "vn_source_type": "Manual",
                     "vn_auto_generated": 0,
                     "vn_checkout_miss": miss_name,
                 }
@@ -503,8 +507,18 @@ def _after_correction_state_change(doc, *, from_state, to_state) -> None:
                 "generated_checkin",
                 new_log_name,
             )
-            # Replace the fake OUT at planned_end with the real one.
+            # Replace the fake OUT at planned_end with the real one. The ticket
+            # LINKS the fake log (auto_checkout) — repoint it to the real OUT
+            # FIRST, or delete_doc raises LinkExistsError and the whole sync
+            # dies (E2E-D3b: fake OUT stayed, ticket never waived).
             if miss.auto_checkout:
+                frappe.db.set_value(
+                    "VN Checkout Miss",
+                    miss_name,
+                    "auto_checkout",
+                    new_log_name,
+                    update_modified=False,
+                )
                 frappe.delete_doc(
                     "Employee Checkin", miss.auto_checkout, ignore_permissions=True
                 )
@@ -515,9 +529,25 @@ def _after_correction_state_change(doc, *, from_state, to_state) -> None:
                     {
                         "actual_checkout": get_datetime(real_out),
                         "last_checkout_log": new_log_name,
+                        # Clear the synthetic-OUT flags: the UI shows the
+                        # APPROVED real checkout time (not "Quên chấm ra"/--:--)
+                        # and payroll pairs the real OUT.
+                        "vn_auto_checkout": 0,
+                        "missing_checkout": 0,
                     },
                     update_modified=False,
                 )
+                # The real-OUT insert above ENQUEUED an async WS recalc; that
+                # job may snapshot logs mid-transition (fake OUT still present)
+                # and overwrite this write with the stale pairing. Recompute
+                # synchronously from the FINAL log state so the request ends
+                # consistent — any later queued run converges to the same.
+                try:
+                    from gege_hr.gege_hr.utils import calc as calc_util
+
+                    calc_util.persist_work_session(miss.shift_instance, calculate_mode="batch")
+                except Exception:
+                    pass
 
         if (miss.status or "").strip() in ("Pending", "Explained", "Penalised"):
             ticket = frappe.get_doc("VN Checkout Miss", miss_name)
@@ -537,7 +567,8 @@ def _after_correction_state_change(doc, *, from_state, to_state) -> None:
         try:
             frappe.log_error(
                 title="checkout_miss correction sync failed",
-                message=f"{doc.get('name')} {from_state}->{to_state}",
+                message=f"{doc.get('name')} {from_state}->{to_state}\n"
+                + frappe.get_traceback(),
             )
         except Exception:
             pass

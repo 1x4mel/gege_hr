@@ -59,9 +59,9 @@ class VNEmployeeShiftInstance(Document):
             return
 
         planned_start, planned_end = tz_utils.planned_window(self.work_date, start_time, end_time)
-        utc = tz_utils.ZoneInfo("UTC")
-        self.planned_start = planned_start.astimezone(utc).strftime("%Y-%m-%d %H:%M:%S")
-        self.planned_end = planned_end.astimezone(utc).strftime("%Y-%m-%d %H:%M:%S")
+        # PHASE-1 FRAME: persist planned windows as naive PORTAL WALL.
+        self.planned_start = tz_utils.wall(planned_start).strftime("%Y-%m-%d %H:%M:%S")
+        self.planned_end = tz_utils.wall(planned_end).strftime("%Y-%m-%d %H:%M:%S")
         self.is_overnight = 1 if tz_utils.is_overnight(start_time, end_time) else 0
 
         # Half-day boundary at the midpoint of the shift.
@@ -106,4 +106,5 @@ class VNEmployeeShiftInstance(Document):
 
 
 def _fmt(dt):
-    return dt.astimezone(tz_utils.ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    """PHASE-1 FRAME: naive PORTAL WALL storage string."""
+    return tz_utils.wall(dt).strftime("%Y-%m-%d %H:%M:%S")

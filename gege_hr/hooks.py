@@ -17,6 +17,19 @@ app_email = "dev@gege.local"
 app_license = "MIT"
 
 # --------------------------------------------------------------------------- #
+# Scheduled jobs — the checkout-miss engine: auto-close forgotten checkouts
+# (synthetic OUT at planned end + ticket) and flip tickets past their grace
+# deadline to "Penalised". Previously NOT registered, so the engine only ran
+# opportunistically on the employee's NEXT check-in and expired tickets stayed
+# "Pending" forever (late explanations were still accepted).
+# --------------------------------------------------------------------------- #
+scheduler_events = {
+    "hourly": [
+        "gege_hr.gege_hr.utils.checkout_miss.run_hourly",
+    ],
+}
+
+# --------------------------------------------------------------------------- #
 # Doctype permission hooks (inbox-centric migration): the gege_hr approval
 # matrix authorises HR Manager / HR User to act on ANY pending request of these
 # doctypes (regardless of which employee filed it). Frappe's default per-employee
@@ -123,6 +136,71 @@ def sync_custom_fields():
     _seed_checkout_miss_defaults()
 
 
+def seed_advance_deduction_component():
+    """Ensure the default salary-advance deduction Salary Component exists.
+
+    ``utils.advance.DEFAULT_ADVANCE_DEDUCTION_COMPONENT`` ("Salary Advance")
+    is the component stamped onto every ``Additional Salary`` row a Paid VN
+    Salary Advance Request materialises. Without the component the HRMS
+    insert fails validation and the hook logs-and-skips — the advance never
+    reaches the Salary Slip. Idempotent; bench-guarded no-op otherwise.
+    """
+    import frappe
+
+    from gege_hr.gege_hr.utils.advance import DEFAULT_ADVANCE_DEDUCTION_COMPONENT
+
+    try:
+        if frappe.db.exists("Salary Component", DEFAULT_ADVANCE_DEDUCTION_COMPONENT):
+            return
+        doc = frappe.get_doc(
+            {
+                "doctype": "Salary Component",
+                "salary_component": DEFAULT_ADVANCE_DEDUCTION_COMPONENT,
+                "name": DEFAULT_ADVANCE_DEDUCTION_COMPONENT,
+                "type": "Deduction",
+                "description": "Khấu trừ ứng lương — trừ vào lương kỳ chứa ngày xin ứng",
+            }
+        )
+        doc.insert(ignore_permissions=True)
+    except Exception:
+        pass
+
+
+def normalize_advance_repayment_plans():
+    """Migrate legacy repayment plans to the single supported method.
+
+    Business rule (2026-08): only ``Next Month`` — an advance requested within
+    a payroll period is deducted from that period's salary (paid the next
+    month). Legacy ``Installment``/``Custom``/blank rows are rewritten.
+    Idempotent; best-effort no-op outside a bench or without the doctype.
+    """
+    import frappe
+
+    from gege_hr.gege_hr.utils.advance import REPAYMENT_PLAN_NEXT_MONTH
+
+    try:
+        rows = frappe.get_all(
+            "VN Salary Advance Request",
+            filters={"docstatus": ["<", 2]},
+            fields=["name", "repayment_plan"],
+        )
+        stale = [
+            r["name"]
+            for r in (rows or [])
+            if (r.get("repayment_plan") or "") != REPAYMENT_PLAN_NEXT_MONTH
+        ]
+        for name in stale:
+            frappe.db.set_value(
+                "VN Salary Advance Request",
+                name,
+                "repayment_plan",
+                REPAYMENT_PLAN_NEXT_MONTH,
+                update_modified=False,
+            )
+    except Exception:
+        pass
+
+
 def _seed_checkout_miss_defaults():
     """Seed the checkout-miss config on VN HR Portal Setting if unset.
 
@@ -172,8 +250,12 @@ def create_seed_data():
 scheduler_events = {
     # Daily, just after midnight portal time: generate shift instances for the
     # configured horizon and auto-mark absentees from the previous day.
+    # Plan v2 (confirm-early & auto-lock): daily auto-confirm of overdue
+    # unacknowledged payslips (default 3 days — VN HR Portal Setting
+    # vn_payslip_autoconfirm_days; 0 disables).
     "daily": [
         "gege_hr.gege_hr.api.shift.generate_daily_shift_instances",
+        "gege_hr.gege_hr.api.payslip_ack.run_payslip_autoconfirm",
     ],
     "cron": {
         # 02:00 portal time → auto-mark absent (stubbed; full engine in M2).
@@ -181,6 +263,17 @@ scheduler_events = {
         # Every hour: auto-close forgotten checkouts (employees who didn't
         # return) + flip expired Pending tickets to Penalised. Chính sách A.
         "0 * * * *": ["gege_hr.gege_hr.utils.checkout_miss.run_hourly"],
+        # WP4: every 10 minutes — a dead engine must be VISIBLE (Notification
+        # to HR Managers + WARN Error Log) within ~2h, not after a week of
+        # payroll complaints.
+        "*/10 * * * *": ["gege_hr.gege_hr.utils.health.alert_if_unhealthy"],
+        # WP8: 07:00 daily — Error Log digest (top-10 titles, last 24h).
+        "0 7 * * *": ["gege_hr.gege_hr.utils.health.daily_error_digest"],
+        # WP5: 07:10 daily — nudge HR about Active employees missing SSA/bank.
+        "10 7 * * *": ["gege_hr.gege_hr.api.onboarding.notify_missing_payroll_profile"],
+        # WP6: 07:30 every day — auto-close LAST month's payroll (attempts on
+        # days 1-5, alerts daily afterwards while blocked; stops at Draft).
+        "30 7 * * *": ["gege_hr.gege_hr.api.payroll.auto_close_payroll"],
     },
 }
 
@@ -222,6 +315,13 @@ doc_events = {
     "VN Attendance Work Session": {
         "on_update": "gege_hr.gege_hr.api.attendance_sync.on_work_session_update",
     },
+    # WP3 (F-LC17 prod-side): block hard-deleting an Employee that still has
+    # attendance data (dangling Shift Assignments once broke the whole
+    # company's materialisation) + handle Active → Left cleanly.
+    "Employee": {
+        "on_trash": "gege_hr.gege_hr.api.employee_lifecycle.guard_employee_delete",
+        "on_update": "gege_hr.gege_hr.api.employee_lifecycle.handle_employee_status_change",
+    },
 }
 
 # --------------------------------------------------------------------------- #
@@ -256,8 +356,11 @@ boot_session = "gege_hr.gege_hr.api.auth.get_boot_data"
 # --------------------------------------------------------------------------- #
 after_migrate = [
     "gege_hr.hooks.sync_custom_fields",
+    "gege_hr.hooks.seed_advance_deduction_component",
+    "gege_hr.hooks.normalize_advance_repayment_plans",
     "gege_hr.gege_hr.api.setup_permissions.grant_hr_permissions",
 ]
+
 after_install = [
     "gege_hr.hooks.sync_custom_fields",
     "gege_hr.hooks.create_seed_data",

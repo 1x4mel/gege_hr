@@ -42,6 +42,29 @@ def _strptime(s: str, fmt: str):  # pragma: no cover
     return _dt.strptime(s, fmt).date()
 
 
+# --------------------------------------------------------------------------- #
+# Repayment plan — business rule (2026-08): exactly ONE supported method.
+# An advance requested within payroll period P (e.g. 01/07–31/07) is recovered
+# by deducting it from period P's salary (paid out the following month) —
+# "trừ vào lương chuẩn bị tới kỳ nhận". The legacy ``Installment``/``Custom``
+# options are retired; every input coerces to ``Next Month``.
+# --------------------------------------------------------------------------- #
+REPAYMENT_PLAN_NEXT_MONTH = "Next Month"
+
+
+def normalize_repayment_plan(value) -> str:
+    """Coerce any repayment-plan input to the single supported plan.
+
+    ``Next Month`` is the only repayment method: the advance requested within a
+    payroll period is deducted from that period's salary, disbursed the next
+    month. Legacy ``Installment``/``Custom`` rows, blank values and arbitrary
+    client payloads all normalise to ``Next Month`` so the DocType validate
+    hook, the submit API and the migrate patch share one rule.
+    Pure / bench-free.
+    """
+    return REPAYMENT_PLAN_NEXT_MONTH
+
+
 def compute_eligible_amount(base_salary: float, policy: dict | None) -> float:
     """Largest advance the policy permits against ``base_salary`` (plan §22).
 

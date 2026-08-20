@@ -102,8 +102,9 @@ def my_schedule(
                         "start_time": str(st.start_time),
                         "end_time": str(st.end_time),
                         "is_overnight": tz_utils.is_overnight(st.start_time, st.end_time),
-                        "planned_start": tz_utils.utc_iso(planned_start),
-                        "planned_end": tz_utils.utc_iso(planned_end),
+                        # PHASE-1 FRAME: naive wall ISO (no Z) for the SPA.
+                        "planned_start": tz_utils.wall(planned_start).isoformat(),
+                        "planned_end": tz_utils.wall(planned_end).isoformat(),
                         "shift_assignment": a.name,
                         "work_location": wl,
                         "work_location_name": loc_label_by_name.get(wl) if wl else None,
@@ -161,8 +162,9 @@ def generate_shift_instances(days: int | None = None) -> dict:
     """Manually-triggerable generator (HR UI button)."""
     frappe.only_for(["HR Manager", "HR User", "System Manager"])
     horizon = int(days or SHIFT_INSTANCE_HORIZON_DAYS)
-    created = _materialise_shift_instances(horizon)
-    return {"ok": True, "created": created}
+    res = _materialise_shift_instances(horizon)
+    # WP3: skip-count surfaced so one bad assignment is VISIBLE, not silent.
+    return {"ok": True, "created": res["created"], "skipped": res["skipped"]}
 
 
 @frappe.whitelist()
@@ -185,7 +187,7 @@ def backfill_shift_instances(
     win_end = getdate(to_date) if to_date else today
     if win_end < win_start:
         win_start, win_end = win_end, win_start
-    created = _materialise_shift_instances(
+    res = _materialise_shift_instances(
         from_date=win_start, to_date=win_end, employee=employee
     )
     return {
@@ -193,7 +195,9 @@ def backfill_shift_instances(
         "from_date": win_start.isoformat(),
         "to_date": win_end.isoformat(),
         "employee": employee,
-        "created": created,
+        "created": res["created"],
+        "skipped": res["skipped"],
+        "errors": res["errors"],
     }
 
 
@@ -206,7 +210,19 @@ def generate_daily_shift_instances(*args, **kwargs) -> int:
     Idempotent: existing instance rows are skipped.
     """
     horizon = SHIFT_INSTANCE_HORIZON_DAYS
-    return _materialise_shift_instances(horizon)
+    res = _materialise_shift_instances(horizon)
+    # WP4: heartbeat only when the full pass succeeded (failures inside are
+    # logged per-assignment by the WP3 guard; the job still "ran").
+    try:
+        from gege_hr.gege_hr.utils import health as _health
+
+        _health.record_heartbeat(
+            "shift.generate_daily_shift_instances",
+            summary={"created": res.get("created"), "skipped": res.get("skipped")},
+        )
+    except Exception:
+        pass
+    return res
 
 
 def _materialise_shift_instances(
@@ -214,7 +230,16 @@ def _materialise_shift_instances(
     from_date=None,
     to_date=None,
     employee: str | None = None,
-) -> int:
+) -> dict:
+    """Expand active Shift Assignments into per-day VN Employee Shift Instances.
+
+    WP3 (F-LC17): ONE broken assignment (duplicate window, validation error,
+    corrupt Shift Type…) must never abort the WHOLE company's materialisation.
+    Each assignment is wrapped: a failure is logged (title
+    ``materialise SI failed <employee>``), rolled back, counted as ``skipped``,
+    and the loop continues. Returns ``{"created": n, "skipped": m,
+    "errors": [<employee>...]}``.
+    """
     today = tz_utils.now_in_portal().date()
     if from_date or to_date:
         # Explicit backfill window (may cover past dates).
@@ -236,15 +261,34 @@ def _materialise_shift_instances(
         fields=sa_fields,
     )
     created = 0
+    skipped = 0
+    errors: list[str] = []
     for a in assignments:
-        a_start = getdate(a.start_date)
-        a_end = getdate(a.end_date) if a.end_date else win_end
-        day = max(a_start, win_start)
-        while day <= min(a_end, win_end):
-            if _ensure_shift_instance(a, day):
-                created += 1
-            day = add_days(day, 1)
-    return created
+        try:
+            a_start = getdate(a.start_date)
+            a_end = getdate(a.end_date) if a.end_date else win_end
+            day = max(a_start, win_start)
+            while day <= min(a_end, win_end):
+                if _ensure_shift_instance(a, day):
+                    created += 1
+                day = add_days(day, 1)
+        except Exception:
+            # WP3 guard: roll back THIS assignment's partial writes, log, and
+            # keep going — other employees still get their instances (MH1).
+            skipped += 1
+            errors.append(a.get("employee") or a.get("name") or "?")
+            try:
+                frappe.log_error(
+                    title=f"materialise SI failed {a.get('employee')}",
+                    message=frappe.get_traceback(),
+                )
+            except Exception:
+                pass
+            try:
+                frappe.db.rollback()
+            except Exception:
+                pass
+    return {"created": created, "skipped": skipped, "errors": errors}
 
 
 def _ensure_shift_instance(assignment: dict, day: date) -> bool:
@@ -333,8 +377,8 @@ def _st_int(shift_type_doc, field: str, default: int) -> int:
 
 
 def _frappe_dt(dt) -> str:
-    """Format an aware datetime as Frappe's "YYYY-MM-DD HH:MM:SS" (UTC storage)."""
-    return dt.astimezone(tz_utils.ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    """PHASE-1 FRAME: format an aware datetime as naive PORTAL WALL storage string."""
+    return tz_utils.wall(dt).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def on_shift_instance_submit(doc, method: str | None = None) -> None:

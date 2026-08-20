@@ -304,3 +304,190 @@ def onboarding_list(
         total = frappe.db.count(ONBOARDING_DOCTYPE, filters=filters or None)
 
     return {"data": rows, "total": total}
+
+
+# --------------------------------------------------------------------------- #
+# WP5 — payroll profile (SSA + bank) completion + nudges
+# --------------------------------------------------------------------------- #
+@frappe.whitelist()
+def complete_payroll_profile(
+    employee: str,
+    salary_structure: str | None = None,
+    base: float | None = None,
+    bank_ac_no: str | None = None,
+    bank_name: str | None = None,
+    bank_branch: str | None = None,
+    from_date: str | None = None,
+) -> dict:
+    """Create/refresh the employee's Salary Structure Assignment + bank fields.
+
+    Idempotent (OB1/OB4): an existing submitted SSA is left untouched unless a
+    new ``salary_structure``/``base`` is given; bank fields are updated in
+    place. HR-gated. Kills the ``missing account_no`` napas-export failures and
+    the WP1 ``failed_lines`` (no-SSA) slip errors at their onboarding source.
+    """
+    _require_hr()
+    if not employee:
+        frappe.throw("Cần employee.")
+    employee = str(employee).strip()
+
+    emp = frappe.get_doc("Employee", employee)
+    changed = []
+
+    # --- Bank fields -------------------------------------------------------- #
+    if bank_ac_no:
+        emp.bank_ac_no = bank_ac_no
+        changed.append("bank_ac_no")
+    if bank_name:
+        emp.bank_name = bank_name
+        changed.append("bank_name")
+    try:
+        if bank_branch and hasattr(emp, "bank_branch"):
+            emp.bank_branch = bank_branch
+            changed.append("bank_branch")
+    except Exception:
+        pass
+    if changed:
+        emp.save(ignore_permissions=True)
+
+    # --- SSA ---------------------------------------------------------------- #
+    ssa_name = None
+    existing_ssa = frappe.db.get_value(
+        "Salary Structure Assignment",
+        {"employee": employee, "docstatus": 1},
+        "name",
+    )
+    if not existing_ssa:
+        if not (salary_structure and base):
+            frappe.throw(
+                "Nhân viên chưa có SSA — cần salary_structure + base để tạo mới."
+            )
+        company = emp.company or frappe.db.get_value("Employee", employee, "company")
+        ssa = frappe.get_doc(
+            {
+                "doctype": "Salary Structure Assignment",
+                "employee": employee,
+                "salary_structure": salary_structure,
+                "company": company,
+                "base": float(base or 0),
+                "from_date": from_date or emp.date_of_joining or frappe.utils.today(),
+            }
+        )
+        ssa.insert(ignore_permissions=True)
+        try:
+            ssa.submit()
+        except Exception:
+            frappe.log_error(title=f"SSA submit failed {employee}")
+        ssa_name = ssa.name
+        changed.append("ssa")
+
+    return {
+        "ok": True,
+        "employee": employee,
+        "ssa": ssa_name or existing_ssa,
+        "changed": changed,
+        "complete": _payroll_profile_complete(employee),
+    }
+
+
+def _payroll_profile_complete(employee: str) -> bool:
+    """SSA submitted AND bank account present."""
+    try:
+        has_ssa = bool(
+            frappe.db.get_value(
+                "Salary Structure Assignment", {"employee": employee, "docstatus": 1}, "name"
+            )
+        )
+    except Exception:
+        has_ssa = False
+    try:
+        bank = frappe.db.get_value("Employee", employee, "bank_ac_no")
+    except Exception:
+        bank = None
+    return has_ssa and bool(bank)
+
+
+@frappe.whitelist()
+def missing_payroll_profiles() -> list[dict]:
+    """Active employees onboarded > 3 days ago still missing SSA or bank.
+
+    Feeds the dashboard "Cần bổ sung hồ sơ" card (OB2) and the daily nudge.
+    """
+    _require_hr()
+    try:
+        from datetime import date as _d, timedelta as _td
+
+        cutoff = (_d.today() - _td(days=3)).isoformat()
+        rows = (
+            frappe.db.get_all(
+                "Employee",
+                filters={"status": "Active", "date_of_joining": ["<=", cutoff]},
+                fields=["name", "employee_name", "company", "date_of_joining", "bank_ac_no"],
+            )
+            or []
+        )
+    except Exception:
+        return []
+    out = []
+    for r in rows:
+        missing = []
+        if not r.get("bank_ac_no"):
+            missing.append("bank")
+        try:
+            has_ssa = frappe.db.get_value(
+                "Salary Structure Assignment",
+                {"employee": r["name"], "docstatus": 1},
+                "name",
+            )
+        except Exception:
+            has_ssa = None
+        if not has_ssa:
+            missing.append("ssa")
+        if missing:
+            out.append(
+                {
+                    "employee": r["name"],
+                    "employee_name": r.get("employee_name"),
+                    "company": r.get("company"),
+                    "date_of_joining": r.get("date_of_joining"),
+                    "missing": missing,
+                }
+            )
+    return out
+
+
+def notify_missing_payroll_profile() -> dict:
+    """Daily cron — ONE grouped notification to HR Managers (OB3).
+
+    Deduped per day: if today's notification already exists, skip.
+    """
+    if frappe is None:
+        return {"notified": 0}
+    try:
+        rows = missing_payroll_profiles()
+    except Exception:
+        rows = []
+    if not rows:
+        return {"notified": 0}
+
+    today = frappe.utils.today()
+    subject = f"[GeGe HR] {len(rows)} NV thiếu hồ sơ lương ({today})"
+    # Dedupe: 1 notification/day (grouped, never spam).
+    try:
+        already = frappe.db.exists(
+            "Notification Log", {"subject": subject}
+        )
+    except Exception:
+        already = None
+    if already:
+        return {"notified": 0, "deduped": True}
+
+    from gege_hr.gege_hr.utils import health as _health
+
+    lines = [f"• {r['employee_name'] or r['employee']} — thiếu: {', '.join(r['missing'])}" for r in rows]
+    _health._notify_users(
+        _health._hr_manager_users(),
+        subject,
+        "Các nhân viên Active sau thiếu SSA / tài khoản ngân hàng:\n" + "\n".join(lines),
+    )
+    return {"notified": len(rows)}

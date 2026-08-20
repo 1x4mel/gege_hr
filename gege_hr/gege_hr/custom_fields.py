@@ -234,6 +234,117 @@ salary_slip_fields = [
         "options": "VN Payroll Review Period",
         "read_only": 1,
     },
+    # ---- Payslip ack & QR payout (plans/payslip-ack-qr-payment-plan.md) ----
+    {
+        "fieldname": "vn_ack_break",
+        "fieldtype": "Section Break",
+        "label": "VN Ack & Payout",
+    },
+    {
+        "fieldname": "vn_ack_status",
+        "fieldtype": "Select",
+        "in_list_view": 1,
+        "in_standard_filter": 1,
+        "label": "VN Ack Status",
+        "options": "\nRequested\nAwaiting Payment\nPaid",
+        "read_only": 1,
+    },
+    {
+        "fieldname": "vn_ack_note",
+        "fieldtype": "Small Text",
+        "label": "VN Adjustment Request Note",
+        "read_only": 1,
+    },
+    {
+        "fieldname": "vn_ack_at",
+        "fieldtype": "Datetime",
+        "label": "VN Ack At",
+        "read_only": 1,
+    },
+    {
+        "fieldname": "vn_payment_ref",
+        "fieldtype": "Data",
+        "label": "VN Payment Reference",
+        "read_only": 1,
+    },
+    {
+        "fieldname": "vn_payee_bank_bin",
+        "fieldtype": "Data",
+        "label": "VN Payee Bank BIN",
+        "read_only": 1,
+    },
+    {
+        "fieldname": "vn_payee_bank_name",
+        "fieldtype": "Data",
+        "label": "VN Payee Bank Name",
+        "read_only": 1,
+    },
+    {
+        "fieldname": "vn_payee_account_no",
+        "fieldtype": "Data",
+        "label": "VN Payee Account No",
+        "read_only": 1,
+    },
+    {
+        "fieldname": "vn_payee_account_name",
+        "fieldtype": "Data",
+        "label": "VN Payee Account Name",
+        "read_only": 1,
+    },
+    {
+        "fieldname": "vn_payee_qr_text",
+        "fieldtype": "Long Text",
+        "label": "VN Payee VietQR Text",
+        "read_only": 1,
+    },
+    {
+        "fieldname": "vn_payment_proof",
+        "fieldtype": "Attach Image",
+        "label": "VN Payment Proof",
+        "read_only": 1,
+    },
+    {
+        "fieldname": "vn_paid_at",
+        "fieldtype": "Datetime",
+        "label": "VN Paid At",
+        "read_only": 1,
+    },
+    {
+        "fieldname": "vn_paid_by",
+        "fieldtype": "Link",
+        "label": "VN Paid By",
+        "options": "User",
+        "read_only": 1,
+    },
+    # ---- Plan v2 (confirm-early & auto-lock): who/when confirmed, when the
+    # slip became employee-visible (auto-confirm deadline anchor), and the
+    # FINAL rejection of an adjustment request (Employee may not re-request). --
+    {
+        "fieldname": "vn_ack_source",
+        "fieldtype": "Select",
+        "in_standard_filter": 1,
+        "label": "VN Ack Source",
+        "options": "Employee\nAuto",
+        "read_only": 1,
+    },
+    {
+        "fieldname": "vn_visible_at",
+        "fieldtype": "Datetime",
+        "label": "VN Employee Visible At",
+        "read_only": 1,
+    },
+    {
+        "fieldname": "vn_ack_rejected_at",
+        "fieldtype": "Datetime",
+        "label": "VN Adjustment Rejected At",
+        "read_only": 1,
+    },
+    {
+        "fieldname": "vn_ack_rejected_reason",
+        "fieldtype": "Small Text",
+        "label": "VN Adjustment Rejected Reason",
+        "read_only": 1,
+    },
 ]
 
 # --------------------------------------------------------------------------- #
@@ -512,6 +623,63 @@ portal_payroll_fields = [
         "default": "360",
         "description": "Sau planned_end + buffer mới tự đóng. 360ph (6h) cho NV kịp checkout muộn/OT mà không bị đóng oan.",
     },
+    {
+        "fieldname": "vn_adjustment_presets",
+        "fieldtype": "Small Text",
+        "label": "Adjustment Presets (JSON)",
+        "default": "[]",
+        "description": "Danh sách mẫu điều chỉnh thủ công [{adjustment_type, description, amount}] — dropdown 'Chọn mẫu' ở popup Tính lương.",
+    },
+]
+
+# --------------------------------------------------------------------------- #
+# A.11 HRMS portal-lifecycle fields — Leave Encashment / Compensatory Leave
+# Request / Travel Request (plan-test-complete-hr-extra G4/P0bis).
+#
+# The stock HRMS schemas do NOT carry a portal-review status the leave_extra /
+# employee_services APIs need ("Rejected" is not a valid Leave Encashment
+# status option; Compensatory Leave Request & Travel Request have no ``status``
+# column at all — Travel dates live in the ``itinerary`` child table). The
+# ``vn_status`` Select is the single source of truth for the portal lifecycle
+# (Draft → Approved / Rejected), ``vn_note`` stores the reject reason, and the
+# Travel-specific ``vn_from_date`` / ``vn_to_date`` / ``vn_purpose`` /
+# ``vn_total_cost`` fields mirror the portal submission contract onto the doc.
+# --------------------------------------------------------------------------- #
+_PORTAL_LIFECYCLE_FIELDS = [
+    {
+        "fieldname": "vn_status",
+        "fieldtype": "Select",
+        "label": "VN Portal Status",
+        "options": "Draft\nApproved\nRejected",
+        "default": "Draft",
+        "read_only": 1,
+        "description": "Trạng thái portal (gege_hr); trạng thái gốc của HRMS nằm ở docstatus.",
+    },
+    {
+        "fieldname": "vn_note",
+        "fieldtype": "Small Text",
+        "label": "VN Portal Note",
+        "read_only": 1,
+        "description": "Ghi chú portal — lý do từ chối, ...",
+    },
+]
+
+travel_request_portal_fields = _PORTAL_LIFECYCLE_FIELDS + [
+    {"fieldname": "vn_travel_col1", "fieldtype": "Column Break"},
+    {"fieldname": "vn_from_date", "fieldtype": "Date", "label": "VN From Date", "read_only": 1},
+    {"fieldname": "vn_to_date", "fieldtype": "Date", "label": "VN To Date", "read_only": 1},
+    {
+        "fieldname": "vn_purpose",
+        "fieldtype": "Small Text",
+        "label": "VN Purpose of Travel",
+        "read_only": 1,
+    },
+    {
+        "fieldname": "vn_total_cost",
+        "fieldtype": "Currency",
+        "label": "VN Estimated Cost",
+        "read_only": 1,
+    },
 ]
 
 
@@ -528,4 +696,8 @@ def get_custom_fields() -> dict:
         "Department": department_fields,
         "VN Attendance Work Session": work_session_checkout_miss_fields,
         "VN HR Portal Setting": portal_payroll_fields,
+        # HRMS portal-lifecycle fields (leave_extra / employee_services APIs)
+        "Leave Encashment": _PORTAL_LIFECYCLE_FIELDS,
+        "Compensatory Leave Request": _PORTAL_LIFECYCLE_FIELDS,
+        "Travel Request": travel_request_portal_fields,
     }

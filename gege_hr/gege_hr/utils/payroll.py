@@ -150,6 +150,78 @@ def aggregate_work_sessions(work_sessions: list[dict]) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# WP2 (F-LC13) — REAL-hours period summary from Work Session rows
+# --------------------------------------------------------------------------- #
+def summarize_work_sessions(
+    work_sessions: list[dict],
+    *,
+    hours_per_day: float = 8.0,
+    extra_leave_days: float = 0.0,
+) -> dict:
+    """Summarise a period's Work Session rows into REAL payable numbers.
+
+    Prod-readiness WP2 (F-LC13): review lines used to show ``regular_hours=0``
+    and a flat ``payable_days`` even when the employee had worked days — the
+    hours never came from the actual Work Sessions. This pure fold is the new
+    source of truth:
+
+    * ``regular_hours``  = Σ ``regular_hours`` of non-review rows
+    * ``overtime_hours`` = Σ ``approved_overtime_hours`` (OT must be approved)
+    * ``payable_days``   = Σ ``round(regular_hours / hours_per_day, 2)`` per
+      row; a full paid-leave row (``has_leave`` with no worked hours) counts
+      1 payable day; ``extra_leave_days`` adds approved leave days that have
+      NO Work Session at all (PR2)
+    * ``need_review`` rows contribute NOTHING (PR5) and are counted so the
+      line can raise a warning flag
+    * ``absent`` rows count into ``absent_days`` and pay nothing (PR8)
+
+    ``hours_per_day`` defaults to 8 (Shift Type norm); non-positive values
+    fall back to 8. Pure — no frappe.
+    """
+    hpd = _num(hours_per_day, 8.0)
+    if hpd <= 0:
+        hpd = 8.0
+
+    regular_hours = 0.0
+    overtime_hours = 0.0
+    payable_days = 0.0
+    leave_days = _num(extra_leave_days, 0.0)
+    absent_days = 0
+    need_review_days = 0
+    worked_days = 0
+
+    for row in work_sessions or []:
+        if _ws_get(row, "need_review") >= 1:
+            need_review_days += 1
+            continue  # PR5: unresolved review days pay nothing
+        rh = _ws_get(row, "regular_hours")
+        regular_hours += rh
+        overtime_hours += _ws_get(row, "approved_overtime_hours")
+        if _ws_get(row, "absent") >= 1:
+            absent_days += 1  # PR8: absent, unpayable
+            continue
+        if rh > 0:
+            payable_days += round(rh / hpd, 2)
+            worked_days += 1
+        elif _ws_get(row, "has_leave") >= 1:
+            # Pure paid-leave day (approved leave, no punches) → 1 payable day.
+            payable_days += 1
+            leave_days += 1
+    payable_days += _num(extra_leave_days, 0.0)
+
+    return {
+        "regular_hours": round2(regular_hours),
+        "overtime_hours": round2(overtime_hours),
+        "payable_days": round2(payable_days),
+        "leave_days": round2(leave_days),
+        "absent_days": absent_days,
+        "need_review_days": need_review_days,
+        "worked_days": worked_days,
+        "session_count": len(work_sessions or []),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Pure line computation — summary → review line amounts
 # --------------------------------------------------------------------------- #
 
@@ -687,6 +759,11 @@ def compute_hourly_line(
     return {
         "base_salary": round2(hourly_rate),
         "gross_pay": round2(gross),
+        # E2E bug 2026-08-20: the advance was subtracted from net/deduction
+        # totals but the ``salary_advance_deduction`` KEY was missing from the
+        # return shape — the review line / payslip field stayed 0 while the
+        # money WAS deducted (invisible deduction). Mirror compute_line.
+        "salary_advance_deduction": round2(salary_advance_deduction),
         "total_deduction": round2(
             standard_deductions + total_extra_ded + late_penalty + checkout_miss_penalty + salary_advance_deduction
         ),
@@ -736,3 +813,243 @@ def compute_late_penalty(
                     total += daily_rate
                 break
     return round2(total)
+
+
+# --------------------------------------------------------------------------- #
+# WP2 — bench loaders for the REAL-hours summary
+# --------------------------------------------------------------------------- #
+def _employee_hours_per_day(employee: str) -> float:
+    """Hours-per-day from the employee's active Shift Type (default 8).
+
+    Reads the custom ``vn_hours_per_day`` on the Shift Type of the employee's
+    active Shift Assignment when present; falls back to 8 (labour norm).
+    """
+    if frappe is None:
+        return 8.0
+    try:
+        st_name = frappe.db.get_value(
+            "Shift Assignment",
+            {
+                "employee": employee,
+                "docstatus": 1,
+                "status": "Active",
+                "start_date": ["<=", frappe.utils.today()],
+            },
+            "shift_type",
+        )
+        if st_name:
+            hpd = frappe.db.get_value("Shift Type", st_name, "vn_hours_per_day")
+            if hpd:
+                return max(float(hpd), 0.0001)
+    except Exception:
+        pass
+    return 8.0
+
+
+def load_employee_period_summary(employee: str, from_date, to_date) -> dict:
+    """WP2 (F-LC13) — REAL-hours summary of one employee's period.
+
+    Combines:
+
+    * the employee's VN Attendance Work Session rows in the window (the WS
+      engine's own numbers — payable/OT/late all come from there), and
+    * approved non-LWP leave days that have NO worked session that date
+      (each adds 1 payable day — PR2),
+
+    into :func:`summarize_work_sessions`. Guarded end-to-end so a missing
+    table outside a bench yields a neutral (zeroed) summary instead of an
+    exception.
+    """
+    if frappe is None:
+        return summarize_work_sessions([])
+    try:
+        rows = (
+            frappe.db.get_all(
+                "VN Attendance Work Session",
+                filters={
+                    "employee": employee,
+                    "docstatus": ["<", 2],
+                    "work_date": ["between", [from_date, to_date]],
+                },
+                fields=[
+                    "work_date",
+                    "regular_hours",
+                    "approved_overtime_hours",
+                    "need_review",
+                    "absent",
+                    "has_leave",
+                ],
+            )
+            or []
+        )
+    except Exception:
+        rows = []
+
+    worked_dates = {str(r.get("work_date")) for r in rows if _num(r.get("regular_hours")) > 0}
+
+    # Approved, non-LWP leave days inside the window with no worked session.
+    extra_leave_days = 0.0
+    try:
+        from datetime import date as _d, timedelta as _td
+
+        d0 = _d.fromisoformat(str(from_date)[:10])
+        d1 = _d.fromisoformat(str(to_date)[:10])
+        las = (
+            frappe.db.get_all(
+                "Leave Application",
+                filters={
+                    "employee": employee,
+                    "docstatus": 1,
+                    "from_date": ["<=", to_date],
+                    "to_date": [">=", from_date],
+                },
+                fields=["from_date", "to_date", "leave_type"],
+            )
+            or []
+        )
+        lwp_types = set(
+            frappe.get_all("Leave Type", filters={"is_lwp": 1}, pluck="name") or []
+        )
+        leave_dates: set[str] = set()
+        for la in las:
+            if (la.get("leave_type") or "") in lwp_types:
+                continue
+            lf = _d.fromisoformat(str(la["from_date"])[:10])
+            lt = _d.fromisoformat(str(la["to_date"])[:10])
+            day = max(lf, d0)
+            while day <= min(lt, d1):
+                leave_dates.add(day.isoformat())
+                day += _td(days=1)
+        extra_leave_days = float(len(leave_dates - worked_dates))
+    except Exception:
+        extra_leave_days = 0.0
+
+    return summarize_work_sessions(
+        rows,
+        hours_per_day=_employee_hours_per_day(employee),
+        extra_leave_days=extra_leave_days,
+    )
+
+
+def pending_checkout_miss_tickets(company: str | None, from_date, to_date) -> int:
+    """WP2 (PR6) — Pending checkout-miss tickets blocking payroll calculation.
+
+    A Pending ticket means the checkout-miss outcome (penalise / waive) is not
+    final; calculating pay on top of it risks a wrong penalty. The API layer
+    BLOCKS calculation while any ticket is still pending.
+    """
+    if frappe is None:
+        return 0
+    try:
+        filters = {
+            "status": "Pending",
+            "work_date": ["between", [from_date, to_date]],
+        }
+        if company:
+            filters["company"] = company
+        return int(frappe.db.count("VN Checkout Miss", filters) or 0)
+    except Exception:
+        return 0
+
+
+# Lock states of VN Ack (2026-08 ack/pay plan): once an employee has CONFIRMED
+# a payslip (or it has been paid), the whole period is frozen for recalc.
+VN_ACK_LOCK_STATES = ("Awaiting Payment", "Paid")
+
+
+def period_has_adjustment_requests(period_name: str) -> int:
+    """Count ``Requested`` (adjustment) slips of the period.
+
+    The adjustment loop (plans/payslip-ack-qr-payment-plan.md): when an
+    employee flags a published payslip as wrong, HR must be able to REOPEN
+    the terminal ``Published`` period — recalculate → approve → regenerate →
+    republish. ``Requested`` alone (no confirmed lock) is exactly the signal
+    that reopening is legitimate. Bench-free safe.
+    """
+    if frappe is None or not period_name:
+        return 0
+    try:
+        return int(
+            frappe.db.count(
+                "Salary Slip",
+                {"vn_payroll_review_period": period_name, "vn_ack_status": "Requested"},
+            )
+            or 0
+        )
+    except Exception:
+        return 0
+
+
+def period_ack_progress(period_name: str) -> dict:
+    """Ack progress of a period's visible slips for the Review badge.
+
+    Returns ``{"total": N, "confirmed": N, "requested": N}`` (visible slips
+    only — withheld employees are excluded). ``confirmed == total > 0`` is the
+    auto-lock condition (plan v2 §6.4). Bench-free safe."""
+    if frappe is None or not period_name:
+        return {"total": 0, "confirmed": 0, "requested": 0}
+    try:
+        rows = frappe.db.get_all(
+            "Salary Slip",
+            filters={"vn_payroll_review_period": period_name, "docstatus": ["<", 2]},
+            fields=["vn_employee_visible", "vn_ack_status"],
+        )
+    except Exception:
+        return {"total": 0, "confirmed": 0, "requested": 0}
+    visible = [r for r in rows if int(r.get("vn_employee_visible") or 0) == 1]
+    confirmed = sum(1 for r in visible if (r.get("vn_ack_status") or "") in ("Awaiting Payment", "Paid"))
+    requested = sum(1 for r in visible if (r.get("vn_ack_status") or "") == "Requested")
+    return {"total": len(visible), "confirmed": confirmed, "requested": requested}
+
+
+def period_has_confirmed_slips(period_name: str) -> int:
+    """Count slips of the period locked by an employee confirmation.
+
+    Business rule (2026-08, user decision #2): a single confirmed/paid slip
+    freezes the ENTIRE period — calculate/approve/generate/publish must all
+    refuse so the amounts the employee acknowledged can never change. Slips
+    in the ``Requested`` (adjustment) state do NOT lock: that is exactly the
+    loop where HR fixes the line, recalculates and republishes.
+    Bench-free safe.
+    """
+    if frappe is None or not period_name:
+        return 0
+    try:
+        return int(
+            frappe.db.count(
+                "Salary Slip",
+                {
+                    "vn_payroll_review_period": period_name,
+                    "vn_ack_status": ["in", VN_ACK_LOCK_STATES],
+                },
+            )
+            or 0
+        )
+    except Exception:
+        return 0
+
+
+def pending_advance_requests(company: str | None, from_date, to_date) -> int:
+    """Approved-not-yet-Paid salary advance requests blocking payroll calc.
+
+    Business rule (2026-08): an advance requested within period P (e.g.
+    01/07–31/07) is deducted from period P's salary — disbursed the next
+    month. The deduction only materialises once the request reaches ``Paid``;
+    calculating the period while a request is still ``Approved`` would
+    silently drop its deduction (the next period's window no longer contains
+    the posting_date). The API layer therefore BLOCKS calculation until every
+    in-window request is Paid / Rejected / Cancelled. Bench-free safe.
+    """
+    if frappe is None:
+        return 0
+    try:
+        filters = {
+            "workflow_state": "Approved",
+            "posting_date": ["between", [from_date, to_date]],
+            "docstatus": ["<", 2],
+        }
+        if company:
+            filters["company"] = company
+        return int(frappe.db.count("VN Salary Advance Request", filters) or 0)
+    except Exception:
+        return 0

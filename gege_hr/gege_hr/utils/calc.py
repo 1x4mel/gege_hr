@@ -58,20 +58,28 @@ def _last_log_of_type(logs: Iterable[dict], log_type: str) -> datetime | None:
 
 
 def _as_dt(value: Any) -> datetime:
-    """Coerce a Frappe datetime string / datetime into a portal-aware datetime."""
+    """Coerce a raw datetime/string into a PORTAL-AWARE datetime.
+
+    PHASE-1 FRAME: naive values are ALREADY portal wall (the live DB storage
+    frame — this was the late=565' bug: +7-ing a wall value). Naive → attach
+    the portal tzinfo directly; aware → fold via ``to_portal``.
+    """
     if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=tz_utils.get_tzinfo())
         return tz_utils.to_portal(value)
     if not value:
         return None
-    # Frappe stores "YYYY-MM-DD HH:MM:SS" (UTC, naive). Normalize then convert.
     text = str(value).replace("T", " ")
     if text.endswith("Z"):
         text = text[:-1]
     try:
-        naive = datetime.fromisoformat(text)
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
-    return tz_utils.to_portal(naive)
+    if parsed.tzinfo is not None:  # true offset string → fold to portal
+        return tz_utils.to_portal(parsed)
+    return parsed.replace(tzinfo=tz_utils.get_tzinfo())
 
 
 def _db_dt(value) -> str | None:
@@ -85,11 +93,10 @@ def _db_dt(value) -> str | None:
     """
     if value is None:
         return None
+    # PHASE-1 FRAME: fold everything to naive PORTAL WALL (tz.wall) so WS rows
+    # persist in the same frame as Employee Checkin.time.
     if isinstance(value, datetime):
-        dt = value
-        if dt.tzinfo is not None:
-            dt = dt.astimezone(tz_utils.ZoneInfo("UTC")).replace(tzinfo=None)
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        return tz_utils.wall(value).strftime("%Y-%m-%d %H:%M:%S")
     raw = str(value).strip()
     if not raw:
         return None
@@ -98,9 +105,7 @@ def _db_dt(value) -> str | None:
         dt = datetime.fromisoformat(iso)
     except ValueError:
         return raw  # let the caller decide; better than dropping the value
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(tz_utils.ZoneInfo("UTC")).replace(tzinfo=None)
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+    return tz_utils.wall(dt).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _night_band(policy: dict) -> tuple[time, time]:
@@ -386,7 +391,15 @@ def calculate_work_session(
 
     missing_checkin = actual_checkin is None
     missing_checkout = actual_checkout is None
-    need_review = missing_checkin or missing_checkout
+    # FINDING-P3 (E2E G2): an INVERTED pair (last OUT strictly BEFORE the
+    # first IN — the orphan-OUT self-heal shape) used to pass silently with
+    # 0h / huge early-leave and need_review=0. Flag it so HR sees the anomaly.
+    inverted_pair = bool(
+        actual_checkin is not None
+        and actual_checkout is not None
+        and actual_checkout < actual_checkin
+    )
+    need_review = missing_checkin or missing_checkout or inverted_pair
 
     # If either end is missing, fall back to a zero-length window so downstream
     # math stays numerically safe (paid 0, no OT, no negative hours).
@@ -522,6 +535,7 @@ def calculate_work_session(
         # Flags
         "missing_checkin": int(missing_checkin),
         "missing_checkout": int(missing_checkout),
+        "inverted_pair": int(inverted_pair),
         "absent": 0,
         "need_review": int(bool(need_review)),
         # Audit
@@ -1022,12 +1036,20 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
                 "time": [">=", _wlo.strftime("%Y-%m-%d %H:%M:%S")],
                 "time": ["<=", _whi.strftime("%Y-%m-%d %H:%M:%S")],
             },
-            fields=["name", "time", "log_type"],
+            fields=["name", "time", "log_type", "vn_auto_generated"],
             order_by="time asc",
         )
         or []
     )
     logs = _filter_logs_to_window(logs, si["planned_start"], si["planned_end"], si)
+    # FINDING-P5: derive the auto-close claim flag from the OUT log marker
+    # (vn_auto_generated) so every recalc — the fake-OUT insert's enqueue, the
+    # admin period recalc, monthly close — SELF-HEALS vn_auto_checkout instead
+    # of losing it (a lost flag flipped "Quên chấm ra" back to a green day and
+    # hid the ticket state from payroll/UI).
+    auto_checkout_flag = any(
+        lg.get("vn_auto_generated") and lg.get("log_type") == "OUT" for lg in logs
+    )
 
     policy = load_policy(si.get("attendance_policy"), si["employee"])
 
@@ -1046,6 +1068,8 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
 
     payload = _ws_payload(si, calc, policy)
     payload["review_reason"] = "\n".join(review_reasons) if review_reasons else None
+    if auto_checkout_flag:
+        payload["vn_auto_checkout"] = 1
 
     if ws_name:
         ws = frappe.get_doc("VN Attendance Work Session", ws_name)
@@ -1166,6 +1190,8 @@ def _review_reasons(calc: dict) -> list[str]:
         reasons.append("Thiếu check-in (IN).")
     if calc["missing_checkout"]:
         reasons.append("Thiếu check-out (OUT).")
+    if calc.get("inverted_pair"):
+        reasons.append("Giờ ra trước giờ vào (OUT < IN) — cần xem lại.")
     if calc["total_actual_hours"] > calc.get("vn_max_total_work_hours", 20) and calc.get(
         "vn_max_total_work_hours"
     ):

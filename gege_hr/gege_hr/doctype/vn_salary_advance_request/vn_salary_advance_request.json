@@ -19,7 +19,7 @@
   {"fieldname": "approved_amount", "default": "0", "fieldtype": "Currency", "label": "Approved Amount", "options": "Company:company:default_currency", "read_only": 1},
   {"fieldname": "col2", "fieldtype": "Column Break"},
   {"fieldname": "reason", "fieldtype": "Small Text", "label": "Reason", "reqd": 1},
-  {"fieldname": "repayment_plan", "default": "Next Month", "fieldtype": "Select", "in_list_view": 1, "label": "Repayment Plan", "options": "Next Month\nInstallment\nCustom"},
+  {"fieldname": "repayment_plan", "default": "Next Month", "fieldtype": "Select", "in_list_view": 1, "label": "Repayment Plan", "options": "Next Month"},
   {"fieldname": "workflow_break", "fieldtype": "Section Break", "label": "Status"},
   {"fieldname": "workflow_state", "default": "Draft", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Workflow State", "options": "Draft\nPending Manager\nPending HR\nApproved\nRejected\nPaid\nCancelled"},
   {"fieldname": "col3", "fieldtype": "Column Break"},

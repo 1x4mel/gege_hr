@@ -8,6 +8,7 @@ from frappe.utils import getdate, today
 from gege_hr.gege_hr.utils.advance import (
     compute_eligible_amount,
     is_past_cutoff,
+    normalize_repayment_plan,
     pick_advance_policy,
 )
 from gege_hr.gege_hr.utils.naming import set_yymmdd_name
@@ -20,6 +21,7 @@ __all__ = [
     "compute_eligible_amount",
     "pick_advance_policy",
     "is_past_cutoff",
+    "normalize_repayment_plan",
 ]
 
 
@@ -47,6 +49,7 @@ class VNSalaryAdvanceRequest(Document):
         set_yymmdd_name(self, "autoname")
 
     def validate(self):
+        self._normalize_repayment_plan()
         self._normalize_employee_name()
         self._normalize_company()
         self._normalize_posting_date()
@@ -94,8 +97,17 @@ class VNSalaryAdvanceRequest(Document):
         except Exception:
             return
 
+        from gege_hr.gege_hr.utils.advance import (
+            advance_deduction_amount,
+            build_additional_salary_payload,
+        )
+
         try:
-            amount = float(self.approved_amount or 0)
+            # Fallback to requested_amount: approval flows that never stamp
+            # approved_amount must still materialise the deduction (E2E bug
+            # 2026-08-20: Paid with approved_amount=0 silently skipped the
+            # Additional Salary row, so the advance was never recovered).
+            amount = advance_deduction_amount(self.as_dict())
         except (TypeError, ValueError):
             amount = 0.0
         if amount <= 0:
@@ -105,8 +117,6 @@ class VNSalaryAdvanceRequest(Document):
             except Exception:
                 pass
             return
-
-        from gege_hr.gege_hr.utils.advance import build_additional_salary_payload
 
         payload = build_additional_salary_payload(self.as_dict())
         try:
@@ -145,7 +155,7 @@ class VNSalaryAdvanceRequest(Document):
                 message=f"{self.name} -> {link}",
             )
 
-    def _reverse_advance_deduction(self) -> bool:
+    def _reverse_advance_deduction(self, force: bool = False) -> bool:
         """Cancel the linked ``Additional Salary`` deduction when reversing a
         ``Paid`` request.
 
@@ -154,12 +164,21 @@ class VNSalaryAdvanceRequest(Document):
         all of which are logged but never abort the cancel transition). After a
         successful cancellation the request's link fields are cleared and
         ``payment_status`` reset to ``Unpaid`` via :func:`reset_after_reversal`.
+
+        ``force=True`` (E2E bug 2026-08-20): the API ``reverse_advance_payment``
+        reverses a doc that is STILL in the ``Paid`` state — the pure predicate
+        (which only fires once the doc has LEFT ``Paid``) returned False and the
+        deduction row survived, so the advance kept hitting the Salary Slip
+        after an explicit HR reversal. Only the link presence is required then.
         """
         from gege_hr.gege_hr.utils.advance import (
             linked_deduction_should_reverse,
         )
 
-        if not linked_deduction_should_reverse(self.as_dict()):
+        if force:
+            if not (self.linked_additional_salary or "").strip():
+                return False
+        elif not linked_deduction_should_reverse(self.as_dict()):
             return False
 
         try:
@@ -217,6 +236,16 @@ class VNSalaryAdvanceRequest(Document):
     # ------------------------------------------------------------------ #
     # Normalisation & computation
     # ------------------------------------------------------------------ #
+    def _normalize_repayment_plan(self):
+        """Single repayment method (2026-08 rule): always ``Next Month``.
+
+        An advance requested within payroll period P (e.g. 01/07–31/07) is
+        recovered from period P's salary — disbursed the following month.
+        Legacy ``Installment``/``Custom`` values coerce here so direct bench
+        edits / imports can't smuggle another plan in.
+        """
+        self.repayment_plan = normalize_repayment_plan(self.repayment_plan)
+
     def _normalize_employee_name(self):
         if self.employee and not self.employee_name:
             self.employee_name = frappe.db.get_value("Employee", self.employee, "employee_name")

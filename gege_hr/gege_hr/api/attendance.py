@@ -78,21 +78,21 @@ def _resolve_employee(employee: str | None) -> str:
 def _checkins_for(employee: str, day: date) -> list[dict]:
     """All Employee Checkin rows for ``employee`` on a portal-date ``day``.
 
-    Frappe stores datetimes as UTC; convert the portal-day bounds to UTC first
-    and query with a list-of-conditions filter (the field appears twice).
+    PHASE-1 FRAME: ``Employee Checkin.time`` is stored as naive PORTAL WALL
+    (plans/tz-frame-unification-plan.md §0 evidence). Query bounds are the
+    wall-clock day window — NO UTC conversion (the old UTC bounds shifted the
+    window by the portal offset and absorbed neighbouring days' logs).
     """
     employee = emp_utils.emp_name(employee)
-    tz = tz_utils.get_tzinfo()
-    utc = tz_utils.ZoneInfo("UTC")
-    start_utc = datetime.combine(day, datetime.min.time(), tzinfo=tz).astimezone(utc)
-    end_utc = datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=tz).astimezone(utc)
+    start = datetime.combine(day, datetime.min.time())
+    end = datetime.combine(day + timedelta(days=1), datetime.min.time())
     return (
         frappe.db.get_all(
             "Employee Checkin",
             filters=[
                 ["employee", "=", employee],
-                ["time", ">=", start_utc.strftime("%Y-%m-%d %H:%M:%S")],
-                ["time", "<", end_utc.strftime("%Y-%m-%d %H:%M:%S")],
+                ["time", ">=", start.strftime("%Y-%m-%d %H:%M:%S")],
+                ["time", "<", end.strftime("%Y-%m-%d %H:%M:%S")],
             ],
             fields=["name", "employee", "time", "log_type", "device_id", "latitude", "longitude"],
             order_by="time asc",
@@ -122,8 +122,10 @@ def _today_shift(employee: str, day: date) -> dict | None:
         "start_time": str(start_time),
         "end_time": str(end_time),
         "is_overnight": tz_utils.is_overnight(start_time, end_time),
-        "planned_start": tz_utils.utc_iso(planned_start),
-        "planned_end": tz_utils.utc_iso(planned_end),
+        # PHASE-1 FRAME: emit naive PORTAL-WALL ISO (no Z). Readers parse via
+        # tz.wall so legacy "…Z" strings still fold correctly.
+        "planned_start": tz_utils.wall(planned_start).isoformat(),
+        "planned_end": tz_utils.wall(planned_end).isoformat(),
         "work_date": day.isoformat(),
     }
 
@@ -137,7 +139,9 @@ def _derive_button_state(shift: dict | None, checkins: list[dict], now_local: da
     if _is_date_locked(shift["work_date"]):
         return STATE["LOCKED"]
 
-    planned_start = tz_utils.to_portal(datetime.fromisoformat(shift["planned_start"].replace("Z", "+00:00")))
+    # PHASE-1 FRAME: fold both sides to naive wall before comparing.
+    now_local = tz_utils.wall(now_local)
+    planned_start = tz_utils.wall(datetime.fromisoformat(shift["planned_start"].replace("Z", "+00:00")))
     earliest_in = planned_start - timedelta(minutes=_shift_minutes("vn_earliest_checkin_minutes", 60))
 
     has_in = any((c.log_type or "").upper() in ("IN", "CLOCK IN") for c in checkins)
@@ -183,10 +187,10 @@ def _first_in_last_out(checkins: list[dict]) -> tuple[object, object]:
 
 
 def _to_portal_dt(value):
-    """Normalise a raw checkin ``time`` (datetime/ISO/SQL str) → portal-local dt.
+    """Normalise a raw checkin ``time`` (datetime/ISO/SQL str) → portal WALL dt.
 
-    Frappe stores datetimes as UTC (naive); the helper treats them as UTC then
-    converts to the portal timezone (plan v5 §2.7). Returns ``None`` for falsy.
+    PHASE-1 FRAME: naive values are ALREADY portal wall (the DB storage frame)
+    and pass through unchanged; aware values are folded via ``tz.wall``.
     """
     if not value:
         return None
@@ -205,9 +209,8 @@ def _to_portal_dt(value):
                 value = datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
             except ValueError:
                 return None
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=tz_utils.ZoneInfo("UTC"))
-    return tz_utils.to_portal(value)
+    # PHASE-1 FRAME: naive == portal wall → pass through; aware → fold to wall.
+    return tz_utils.wall(value)
 
 
 def _status_key(
@@ -259,11 +262,13 @@ def _session_context(shift: dict | None, checkins: list[dict], now_local: dateti
     if not shift:
         return None
 
+    # PHASE-1 FRAME: everything below compares naive WALL datetimes.
+    now_local = tz_utils.wall(now_local)
     first_in_raw, last_out_raw = _first_in_last_out(checkins)
-    planned_start = tz_utils.to_portal(
+    planned_start = tz_utils.wall(
         datetime.fromisoformat(shift["planned_start"].replace("Z", "+00:00"))
     )
-    planned_end = tz_utils.to_portal(
+    planned_end = tz_utils.wall(
         datetime.fromisoformat(shift["planned_end"].replace("Z", "+00:00"))
     )
     actual_in = _to_portal_dt(first_in_raw)
@@ -353,6 +358,20 @@ def today_status(employee: str | None = None) -> dict:
     checkins = _checkins_for(emp, day) if shift else []
     now_local = tz_utils.now_in_portal()
     button_state = _derive_button_state(shift, checkins, now_local)
+
+    # Overnight open session — an IN from yesterday is still unpaired (the
+    # employee worked past midnight and has not checked out). The NEXT tap is
+    # an OUT (mobile_checkin's session parity), so the button must offer
+    # CHECK-OUT even before today's shift window opens. Without this, the
+    # employee sees "Chưa đến giờ chấm công" and cannot close last night's
+    # shift from the app.
+    if shift and button_state in (STATE["BEFORE_WINDOW"], STATE["CAN_CHECK_IN"]):
+        try:
+            yst_logs = _checkins_for(emp, day - timedelta(days=1))
+            if _decide_log_type(list(checkins) + list(yst_logs)) == "OUT":
+                button_state = STATE["CAN_CHECK_OUT"]
+        except Exception:
+            frappe.log_error(title="today_status: overnight parity check failed")
 
     setting = _portal_setting()
     work_location = _work_location_for(emp, day)
@@ -447,12 +466,101 @@ def mobile_checkin(
 
     shift = _today_shift(emp, day)
     checkins = _checkins_for(emp, day)
-    log_type = "OUT" if _has_in_only(checkins) else "IN"
+
+    # ── Overnight-aware parity ─────────────────────────────────────────────
+    # Merge YESTERDAY's logs in so an overnight session opened yesterday
+    # (IN 23:30) is closed by today's tap (→ OUT) instead of wrongly starting
+    # a new IN that breaks the shift's hours. Stale overnight sessions were
+    # already auto-closed above; their synthetic OUT is the newest log, so
+    # parity correctly resolves to IN (new session).
+    recent_logs = list(checkins)
+    try:
+        recent_logs.extend(_checkins_for(emp, day - timedelta(days=1)))
+    except Exception:
+        frappe.log_error(title="mobile_checkin: yesterday logs fetch failed")
+    log_type = _decide_log_type(recent_logs)
 
     # Geofence server-side pre-check (best-effort; client already guards).
     _enforce_geofence(emp, latitude, longitude)
 
     server_now = tz_utils.now_in_portal()
+
+    # ── Duplicate-intent guard (at-least-once protection) ──────────────────
+    # A prior request may have persisted its log but lost the HTTP response;
+    # the re-tap seconds later must NOT create an OUT-right-after-IN (a
+    # 0-hour "completed" day corrupts payroll). Offline replay passes: its
+    # intent timestamp is far older than the last persisted log.
+    #
+    # FRAME NOTE — ``client_ts`` (via tz.parse_client_timestamp) is TRUE UTC,
+    # while persisted ``Employee Checkin.time`` values are written with
+    # ``tz.utc_now_str()`` whose frame tracks the SERVER clock (true UTC on a
+    # UTC host, OS-local +7h on some benches). Derive the live offset once and
+    # shift the client intent into the log frame so the delta is meaningful
+    # on ANY deployment.
+    intent_dt = client_ts if client_ts is not None else server_now
+    if client_ts is not None:
+        # client_ts is TRUE UTC; the persisted logs live in the PORTAL frame
+        # (``now_in_portal`` — the frame every reader in this app compares
+        # against). Shift the intent by the live portal↔UTC offset so the
+        # delta against the last log is meaningful on any deployment.
+        true_utc = _parse_log_dt(client_ts)
+        true_utc_now = datetime.now(tz_utils.ZoneInfo("UTC")).replace(tzinfo=None)
+        server_now_naive = (
+            server_now.replace(tzinfo=None) if server_now.tzinfo else server_now
+        )
+        if true_utc is not None:
+            intent_dt = true_utc + (server_now_naive - true_utc_now)
+    last_log = max(
+        (c for c in recent_logs if c.get("time")),
+        key=lambda c: _parse_log_dt(c.get("time")),
+        default=None,
+    )
+    if last_log is not None and _is_duplicate_intent(last_log.get("time"), intent_dt):
+        try:
+            frappe.get_doc(
+                {
+                    "doctype": "VN Mobile Checkin Attempt",
+                    "employee": emp,
+                    "client_request_id": client_request_id,
+                    "device_id": device_id,
+                    "client_timestamp": client_ts,
+                    "server_timestamp": tz_utils.utc_now_str(),
+                    "intended_log_type": log_type,
+                    "status": "Duplicate",
+                }
+            ).insert()
+            frappe.db.commit()
+        except Exception:
+            frappe.log_error(title="mobile_checkin: duplicate audit failed")
+        return _checkin_result(
+            emp,
+            message=(
+                "Lượt chấm vừa trước đó đã được ghi — bỏ qua lượt trùng trong "
+                "vòng vài giây để tránh sai công."
+            ),
+        )
+
+    # ── Self-heal warning: orphan OUT today ────────────────────────────────
+    # When today holds an OUT with no IN (external device / sync artefact),
+    # parity self-heals this tap as IN — but the IN's timestamp is the TAP
+    # time, not the real arrival, so the day still cannot be paid correctly.
+    # Flag the session for review + tell the employee to file a correction.
+    selfheal_warning = None
+    if log_type == "IN" and _has_out_only(checkins):
+        selfheal_warning = (
+            "Hôm nay có lượt RA nhưng thiếu lượt VÀO — lượt chấm này được ghi "
+            "theo giờ bấm. Vui lòng nộp yêu cầu điều chỉnh (Thiếu giờ vào) với "
+            "giờ vào thật để công được tính đúng."
+        )
+        try:
+            frappe.db.set_value(
+                "VN Attendance Work Session",
+                {"employee": emp, "work_date": day.isoformat(), "docstatus": ["<", 2]},
+                {"need_review": 1},
+                update_modified=False,
+            )
+        except Exception:
+            frappe.log_error(title="mobile_checkin: selfheal need_review failed")
 
     # Audit record (VN Mobile Checkin Attempt) — created before the checkin so a
     # failure leaves an audit trail.
@@ -487,7 +595,9 @@ def mobile_checkin(
             "doctype": "Employee Checkin",
             "employee": emp,
             "log_type": log_type,
-            "time": tz_utils.utc_now_str(),
+            # PHASE-1 FRAME: stamp in PORTAL WALL (matches the live DB frame;
+            # see tz.wall / plan §3). Phase-2 flips this back to utc_now_str.
+            "time": tz_utils.portal_now_str(),
             "device_id": device_id or "gege_hr-mobile",
             "latitude": flt(latitude) if latitude is not None else None,
             "longitude": flt(longitude) if longitude is not None else None,
@@ -518,8 +628,10 @@ def mobile_checkin(
             # Gamification must never block a successful check-in.
             frappe.log_error(title="VN gamification: apply_session_xp failed", message=f"emp={emp}")
 
-    refreshed = _checkin_result(emp, shift=shift)
+    refreshed = _checkin_result(emp, shift=shift, message=selfheal_warning)
     refreshed["log_type"] = log_type
+    if selfheal_warning:
+        refreshed["need_review"] = True
     if game_result and not game_result.get("skipped"):
         refreshed["gamification"] = game_result
 
@@ -527,10 +639,10 @@ def mobile_checkin(
     # exists for today, surface a prompt so the employee submits one.
     if log_type == "OUT" and shift:
         try:
-            pe = tz_utils.to_portal(
+            pe = tz_utils.wall(
                 datetime.fromisoformat(shift["planned_end"].replace("Z", "+00:00"))
             )
-            now_p = tz_utils.to_portal(server_now)
+            now_p = tz_utils.wall(server_now)
             if now_p > pe:
                 ot_hours = round((now_p - pe).total_seconds() / 3600.0, 1)
                 if ot_hours > 0:
@@ -554,10 +666,16 @@ def mobile_checkin(
     return refreshed
 
 
-def _has_in_only(checkins: list[dict]) -> bool:
-    has_in = any((c.log_type or "").upper() in ("IN", "CLOCK IN") for c in checkins)
-    has_out = any((c.log_type or "").upper() in ("OUT", "CLOCK OUT") for c in checkins)
-    return has_in and not has_out
+# Check-in parity / duplicate guards live in the bench-free pure module
+# utils/checkin_parity.py (see its docstring for the R1/R2 payroll-integrity
+# fixes + the full test matrix in tests/test_mobile_checkin_parity.py).
+from gege_hr.gege_hr.utils.checkin_parity import (  # noqa: E402
+    decide_log_type as _decide_log_type,
+    has_in_only as _has_in_only,
+    has_out_only as _has_out_only,
+    is_duplicate_intent as _is_duplicate_intent,
+    parse_log_dt as _parse_log_dt,
+)
 
 
 def _enforce_geofence(employee: str, latitude, longitude) -> None:
@@ -773,6 +891,7 @@ def my_logs(
             "need_review",
             "missing_checkin",
             "missing_checkout",
+            "vn_auto_checkout",
         ],
         order_by="work_date desc",
         limit_page_length=500,
@@ -811,6 +930,9 @@ def my_logs(
                 "absent": bool(r.absent),
                 "missing_checkin": bool(r.missing_checkin),
                 "missing_checkout": bool(r.missing_checkout),
+                # Engine-synthesised OUT (checkout-miss auto-close): the UI must
+                # keep showing "Quên chấm ra", not a green completed day.
+                "vn_auto_checkout": bool(r.vn_auto_checkout),
                 "need_review": bool(r.need_review),
             }
         )
@@ -887,9 +1009,10 @@ def _monthly_overtime_hours(rows: list[dict]) -> float:
             # as_time() inside planned_window() normalises both timedelta
             # (MariaDB TIME) and datetime.time (Frappe Time) inputs.
             _, pe_local = tz_utils.planned_window(d, win[0], win[1])
-            # Compare in the SAME portal frame: out_time is naive UTC per Frappe.
-            out_local = tz_utils.to_portal(get_datetime(out_time))
-            delta = (out_local - pe_local).total_seconds()
+            # PHASE-1 FRAME: out_time is naive PORTAL WALL — fold pe to wall too.
+            pe_wall = tz_utils.wall(pe_local)
+            out_wall = tz_utils.wall(get_datetime(out_time))
+            delta = (out_wall - pe_wall).total_seconds()
             if delta > 0:
                 total_minutes += delta / 60.0
         except Exception:
@@ -1225,6 +1348,8 @@ def team_attendance(
                 "early_leave_minutes",
                 "approved_overtime_hours",
                 "raw_overtime_hours",
+                "missing_checkout",
+                "vn_auto_checkout",
             ],
         )
         ws_map = {str(r.work_date): r for r in ws_rows}
@@ -1298,9 +1423,13 @@ def team_attendance(
                 # window is a stray/wrong-day one (common with overnight auto-
                 # attendance) → hide it so we never show the previous night's
                 # checkout nor a false "về sớm".
+                # PHASE-1 FRAME: Attendance in/out are naive WALL — fold the
+                # planned window to wall so the comparisons stay same-frame.
                 ps_local, pe_local = tz_utils.planned_window(cur, shift_start, shift_end)
+                ps_local = tz_utils.wall(ps_local)
+                pe_local = tz_utils.wall(pe_local)
                 if att.in_time:
-                    in_local = tz_utils.to_portal(get_datetime(att.in_time))
+                    in_local = tz_utils.wall(get_datetime(att.in_time))
                     if ps_local <= in_local <= pe_local:
                         if att.late_entry:
                             disp_status = "Late"
@@ -1308,7 +1437,7 @@ def team_attendance(
                     else:
                         checkin_time = None
                 if att.out_time:
-                    out_local = tz_utils.to_portal(get_datetime(att.out_time))
+                    out_local = tz_utils.wall(get_datetime(att.out_time))
                     if out_local >= ps_local:
                         early_min = max(0, int((pe_local - out_local).total_seconds() // 60))
                     else:
@@ -1324,6 +1453,15 @@ def team_attendance(
                     "early_leave_minutes": early_min,
                     "approved_overtime_hours": ot_hours,
                     "raw_overtime_hours": raw_ot,
+                    # `missing_checkout` = "session has no OUT yet" — calc.py
+                    # sets it for EVERY session lacking an OUT, including one
+                    # that is MID-SHIFT right now. The team grid therefore must
+                    # NOT read it as "forgot to check out"; it decides via the
+                    # shift-end window. `vn_auto_checkout` is the actual
+                    # engine-synthesised fake-OUT marker (auto-close) — the UI
+                    # masks that OUT time as '--:--' and renders orange.
+                    "missing_checkout": bool(ws and ws.missing_checkout),
+                    "vn_auto_checkout": bool(ws and ws.vn_auto_checkout),
                 }
             )
             # Summary chips: count by the DERIVED late/early/OT values (not just
@@ -1956,10 +2094,13 @@ def recalculate_period(
         start, end = end, start
 
     instances_created = 0
+    materialise_skipped = 0
     if backfill:
-        instances_created = shift_api._materialise_shift_instances(
+        mat = shift_api._materialise_shift_instances(
             from_date=start, to_date=end, employee=employee
         )
+        instances_created = mat.get("created", 0)
+        materialise_skipped = mat.get("skipped", 0)
 
     si_filters = {"work_date": ["between", [start, end]], "docstatus": 1}
     if employee:
@@ -1969,6 +2110,7 @@ def recalculate_period(
     )
 
     sessions_recalculated = 0
+    errors: list[str] = []  # WP3 (MH2): per-SI failures surface to the UI
     for si_name in shift_instances:
         # Skip Locked sessions (CAS guard in persist_work_session).
         status = frappe.db.get_value("VN Attendance Work Session", {"shift_instance": si_name}, "calculation_status")
@@ -1978,9 +2120,14 @@ def recalculate_period(
             if calc.persist_work_session(si_name, calculate_mode="batch"):
                 sessions_recalculated += 1
         except Exception:
+            errors.append(si_name)
             frappe.log_error(
                 frappe.get_traceback(), f"Work Session recalc failed for {si_name}"
             )
+            try:
+                frappe.db.rollback()  # don't poison the remaining batch
+            except Exception:
+                pass
 
     # Auto-resolve stale "Unmatched Checkin" exceptions now covered.
     exceptions_resolved = 0
@@ -2033,8 +2180,10 @@ def recalculate_period(
         "to_date": end.isoformat(),
         "employee": employee,
         "instances_created": instances_created,
+        "materialise_skipped": materialise_skipped,
         "sessions_recalculated": sessions_recalculated,
         "exceptions_resolved": exceptions_resolved,
+        "errors": errors,  # WP3: SI names that failed — UI links to exceptions
     }
 
 
@@ -2092,6 +2241,16 @@ def auto_mark_absent_job() -> None:
             )
         except Exception:
             continue
+    # WP4: heartbeat ONLY after a full successful pass (HC4).
+    try:
+        from gege_hr.gege_hr.utils import health as _health
+
+        _health.record_heartbeat(
+            "attendance.auto_mark_absent_job",
+            summary={"instances": len(instances)},
+        )
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #

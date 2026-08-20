@@ -91,6 +91,80 @@ def _audit_search_or_filters(search: str | None) -> list | None:
     return [[field, "like", like] for field in _AUDIT_SEARCH_FIELDS]
 
 
+# WP11 — CSV export ceiling: 10k rows keeps the response bounded even for a
+# noisy month (a full audit export can be re-run per-month window).
+EXPORT_MAX_ROWS = 10000
+
+
+@frappe.whitelist()
+def export_audit_csv(
+    company: str | None = None,
+    employee: str | None = None,
+    audit_type: str | None = None,
+    category: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    search: str | None = None,
+    download: int = 0,
+) -> dict:
+    """WP11 — export filtered audit events as an Excel-safe CSV.
+
+    Same filter contract as :func:`audit_events` (type/category/employee/date
+    window/free-text). Returns ``{filename, content, rows, truncated}``; with
+    ``download=1`` the response is switched to a binary file download. Capped
+    at :data:`EXPORT_MAX_ROWS` (``truncated`` flags the cut).
+    """
+    _require_hr()
+    empty = {"filename": None, "content": None, "rows": 0, "truncated": False}
+    if not _table_ready():
+        return empty
+
+    filters: dict = {}
+    if company:
+        filters["company"] = company
+    if employee:
+        filters["employee"] = employee
+    if category and not audit_type:
+        types = audit_utils.AUDIT_CATEGORIES.get(category)
+        if types:
+            filters["audit_type"] = ("in", list(types))
+    elif audit_type:
+        filters["audit_type"] = audit_type
+    if from_date or to_date:
+        window = _date_window(from_date, to_date)
+        if window:
+            filters["work_date"] = window
+    or_filters = _audit_search_or_filters(search)
+
+    rows = (
+        frappe.get_all(
+            DOCTYPE,
+            filters=filters or None,
+            or_filters=or_filters or None,
+            fields=list(_LIST_FIELDS),
+            order_by="created_at desc",
+            limit_page_length=EXPORT_MAX_ROWS + 1,  # +1 detects the truncation
+        )
+        or []
+    )
+    truncated = len(rows) > EXPORT_MAX_ROWS
+    rows = rows[:EXPORT_MAX_ROWS]
+    csv_text = audit_utils.build_audit_csv([audit_utils.audit_row(r) for r in rows])
+
+    if download:
+        frappe.response.filename = f"audit_export_{getdate().isoformat()}.csv"
+        frappe.response.filecontent = csv_text.encode("utf-8")
+        frappe.response.type = "binary"
+        return {"rows": len(rows), "truncated": truncated}
+
+    return {
+        "filename": f"audit_export_{getdate().isoformat()}.csv",
+        "content": csv_text,
+        "rows": len(rows),
+        "truncated": truncated,
+    }
+
+
 # Lightweight fields needed to compute the SPA summary tiles server-side (the
 # full set, not just the current page) — DNA §6.6 A.
 _AUDIT_SUMMARY_FIELDS = ["name", "employee", "actor", "created_at"]

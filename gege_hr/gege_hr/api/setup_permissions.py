@@ -161,8 +161,10 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
         "Payroll Manager": {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
     },
     "Additional Salary": {
-        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "cancel": 1},
-        "Payroll Manager": {"read": 1, "write": 1, "create": 1, "cancel": 1},
+        # submit included: HRMS Leave Encashment on_submit inserts the
+        # Additional Salary directly at docstatus=1 (encashment payout).
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
+        "Payroll Manager": {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
     },
     # --- VN request doctypes: HR Manager full lifecycle so the approval inbox can
     # read + advance state (approve_request / reject_request) on every request
