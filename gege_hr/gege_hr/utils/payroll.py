@@ -765,7 +765,11 @@ def compute_hourly_line(
         # money WAS deducted (invisible deduction). Mirror compute_line.
         "salary_advance_deduction": round2(salary_advance_deduction),
         "total_deduction": round2(
-            standard_deductions + total_extra_ded + late_penalty + checkout_miss_penalty + salary_advance_deduction
+            standard_deductions
+            + total_extra_ded
+            + late_penalty
+            + checkout_miss_penalty
+            + salary_advance_deduction
         ),
         "net_pay": round2(net),
         "hourly_rate": round2(hourly_rate),
@@ -907,9 +911,7 @@ def load_employee_period_summary(employee: str, from_date, to_date) -> dict:
             )
             or []
         )
-        lwp_types = set(
-            frappe.get_all("Leave Type", filters={"is_lwp": 1}, pluck="name") or []
-        )
+        lwp_types = set(frappe.get_all("Leave Type", filters={"is_lwp": 1}, pluck="name") or [])
         leave_dates: set[str] = set()
         for la in las:
             if (la.get("leave_type") or "") in lwp_types:

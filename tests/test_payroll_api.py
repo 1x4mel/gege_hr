@@ -54,9 +54,7 @@ def _build_stub_frappe(rows=None, reject_as_dict=True):
             self.last_kwargs = kwargs
             self.last_fields = fields
             if reject_as_dict and "as_dict" in kwargs:
-                raise TypeError(
-                    "DatabaseQuery.execute() got an unexpected keyword argument 'as_dict'"
-                )
+                raise TypeError("DatabaseQuery.execute() got an unexpected keyword argument 'as_dict'")
             return [dict(r) for r in self.rows]
 
         def get_value(self, *a, **k):

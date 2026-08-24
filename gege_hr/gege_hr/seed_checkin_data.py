@@ -88,9 +88,7 @@ def _strip_accents(value: str) -> str:
     """
     import unicodedata
 
-    return "".join(
-        c for c in unicodedata.normalize("NFKD", value) if unicodedata.category(c) != "Mn"
-    )
+    return "".join(c for c in unicodedata.normalize("NFKD", value) if unicodedata.category(c) != "Mn")
 
 
 # --------------------------------------------------------------------------- #
@@ -222,7 +220,7 @@ def load_records(path: str = DEFAULT_CSV_PATH) -> list[dict]:
         if not row or not any((c or "").strip() for c in row):
             continue
 
-        def cell(field: str) -> str:
+        def cell(field: str, *, row: list = row) -> str:
             pos = col.get(field)
             if pos is None or pos >= len(row):
                 return ""
@@ -514,16 +512,12 @@ def build_work_sessions(
     }
 
     company = _ensure_company() or COMPANY
-    report["shift_assignments"] = _ensure_shift_assignments(
-        employees, shifts, company, start, end
-    )
+    report["shift_assignments"] = _ensure_shift_assignments(employees, shifts, company, start, end)
 
     try:
         from gege_hr.gege_hr.api import attendance as att
 
-        report["recalculate"] = str(
-            att.recalculate_period(start, end, backfill=1)
-        )
+        report["recalculate"] = str(att.recalculate_period(start, end, backfill=1))
     except Exception as exc:  # noqa: BLE001
         _log(f"seed_checkin_data: recalculate_period failed: {exc}")
         report["recalculate"] = f"error: {exc}"
@@ -539,9 +533,7 @@ def build_work_sessions(
     try:
         from gege_hr.gege_hr.api import attendance_sync
 
-        report["attendance_backfill"] = str(
-            attendance_sync.backfill_attendance(start, end)
-        )
+        report["attendance_backfill"] = str(attendance_sync.backfill_attendance(start, end))
     except Exception as exc:  # noqa: BLE001
         _log(f"seed_checkin_data: backfill_attendance failed: {exc}")
         report["attendance_backfill"] = f"error: {exc}"
@@ -1189,13 +1181,11 @@ def run(
         summary["shift_types"] = _ensure_shift_types(shift_names)
     except Exception:
         _log("seed_checkin_data: shift type step failed")
-    shift_set = set(summary["shift_types"]) | {
-        n for n in shift_names if _exists("Shift Type", n)
-    }
+    shift_set = set(summary["shift_types"]) | {n for n in shift_names if _exists("Shift Type", n)}
 
     # 1) Users (email → password 123456)
     users = 0
-    for emp_id, info in employees.items():
+    for _emp_id, info in employees.items():
         if _ensure_user(info["email"], info["name"]):
             users += 1
     summary["users"] = users

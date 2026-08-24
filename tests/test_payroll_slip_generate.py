@@ -70,9 +70,7 @@ class FakeSlip:
         for k, v in (payload or {}).items():
             setattr(self, k, v)
         self.name = f"SLIP-{next(counter)}"
-        self.meta = FakeMeta(
-            ["earnings", "gross_pay", "net_pay", "total_deduction", "vn_overtime_amount"]
-        )
+        self.meta = FakeMeta(["earnings", "gross_pay", "net_pay", "total_deduction", "vn_overtime_amount"])
 
     def insert(self, **_kw):
         if self._insert_raises:
@@ -278,7 +276,7 @@ def api(monkeypatch):
         frappe_mod.log_error = stub.log_error
         frappe_mod.throw = stub.throw
         frappe_mod._ = lambda s: s
-        frappe_mod.whitelist = lambda *a, **k: (a[0] if a and callable(a[0]) else (lambda f: f))
+        frappe_mod.whitelist = lambda *a, **k: a[0] if a and callable(a[0]) else (lambda f: f)
         frappe_mod.utils = utils
         frappe_mod.session = types.SimpleNamespace(user="hr@example.com")
         frappe_mod.ValidationError = FrappeError
@@ -301,10 +299,12 @@ def api(monkeypatch):
 
         import gege_hr.gege_hr.api as api_pkg
         import gege_hr.gege_hr.utils as utils_pkg
+
         monkeypatch.setattr(api_pkg, "audit", fake_audit, raising=False)
         monkeypatch.setattr(utils_pkg, "employee", fake_emp, raising=False)
 
         import gege_hr.gege_hr.utils.payroll as calc_mod
+
         # monkeypatch (not bare assignment) so the cached module's frappe ref is
         # restored on teardown — no cross-test contamination.
         monkeypatch.setattr(calc_mod, "frappe", frappe_mod, raising=False)
@@ -471,6 +471,7 @@ def test_generate_for_line_raises_without_ssa(api):
 # =========================================================================== #
 # WP-FIX-SSA — classified resolver (_resolve_ssa) aligned with HRMS semantics
 # =========================================================================== #
+
 
 # --------------------------------------------------------------------------- #
 # T1 — boundary: SSA effective exactly on period.from_date is valid

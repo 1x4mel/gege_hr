@@ -113,9 +113,7 @@ class TestAfterOtStateChange:
         # Reload with a state recorder we can read after the call.
         _, state = _install_stub(monkeypatch)
         importlib.reload(approval)
-        approval._after_ot_state_change(
-            _ot_doc(), from_state="Pending Manager", to_state="Approved"
-        )
+        approval._after_ot_state_change(_ot_doc(), from_state="Pending Manager", to_state="Approved")
         assert len(state["enqueue_calls"]) == 1
         target, kw = state["enqueue_calls"][0]
         assert target == "gege_hr.gege_hr.utils.calc.persist_work_session"
@@ -143,9 +141,7 @@ class TestAfterOtStateChange:
     def test_recalc_on_leave_approved(self, approval, monkeypatch):
         _, state = _install_stub(monkeypatch)
         importlib.reload(approval)
-        approval._after_ot_state_change(
-            _ot_doc(), from_state="Approved", to_state="Rejected"
-        )
+        approval._after_ot_state_change(_ot_doc(), from_state="Approved", to_state="Rejected")
         assert len(state["enqueue_calls"]) == 1
 
     def test_no_recalc_on_pending_to_pending(self, approval, monkeypatch):
@@ -161,9 +157,7 @@ class TestAfterOtStateChange:
         # (Confirmed is also engine-active), but Approved→Approved is a no-op.
         _, state = _install_stub(monkeypatch)
         importlib.reload(approval)
-        approval._after_ot_state_change(
-            _ot_doc(), from_state="Approved", to_state="Approved"
-        )
+        approval._after_ot_state_change(_ot_doc(), from_state="Approved", to_state="Approved")
         assert state["enqueue_calls"] == []
 
     def test_noop_for_non_ot_doctype(self, approval, monkeypatch):
@@ -219,7 +213,8 @@ class TestRecalcBestEffort:
         from gege_hr.gege_hr.utils import calc as calc_mod
 
         monkeypatch.setattr(
-            calc_mod, "persist_work_session",
+            calc_mod,
+            "persist_work_session",
             lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not recalc")),
         )
         approval._recalc_ot_shift_instance("EMP-1", "2026-08-14", None)

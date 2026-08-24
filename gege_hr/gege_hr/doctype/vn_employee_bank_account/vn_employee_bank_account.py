@@ -42,9 +42,7 @@ class VNEmployeeBankAccount(Document):
     def _validate_account_no(self):
         acc = str(self.account_no or "").strip()
         if not (acc.isdigit() and _ACCOUNT_MIN <= len(acc) <= _ACCOUNT_MAX):
-            frappe.throw(
-                _("Số tài khoản phải gồm {0}–{1} chữ số.").format(_ACCOUNT_MIN, _ACCOUNT_MAX)
-            )
+            frappe.throw(_("Số tài khoản phải gồm {0}–{1} chữ số.").format(_ACCOUNT_MIN, _ACCOUNT_MAX))
         self.account_no = acc
         if not (self.account_name or "").strip():
             frappe.throw(_("Thiếu tên chủ tài khoản."))

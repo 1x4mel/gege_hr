@@ -541,9 +541,7 @@ def link_user_to_employee(employee: str, user: str) -> dict:
     # creation and the portal 403s for them. Now that the link exists, re-add
     # the role so it persists.
     try:
-        if not frappe.db.exists(
-            "Has Role", {"parent": user, "role": "Employee", "parenttype": "User"}
-        ):
+        if not frappe.db.exists("Has Role", {"parent": user, "role": "Employee", "parenttype": "User"}):
             u = frappe.get_doc("User", user)
             u.append("roles", {"role": "Employee"})
             u.save(ignore_permissions=True)
@@ -600,9 +598,7 @@ def get_user_detail(user: str) -> dict:
     out["enabled"] = bool(doc.enabled)
     out["user_type"] = doc.user_type
     out["roles"] = frappe.db.get_all("Has Role", filters={"parent": user}, pluck="role") or []
-    linked = frappe.db.get_value(
-        "Employee", {"user_id": user}, ["name", "employee_name"], as_dict=True
-    )
+    linked = frappe.db.get_value("Employee", {"user_id": user}, ["name", "employee_name"], as_dict=True)
     out["linked_employee"] = linked.name if linked else None
     out["linked_employee_name"] = linked.employee_name if linked else None
     return out
@@ -654,9 +650,7 @@ def update_user(user: str, **values) -> dict:
 
 
 @frappe.whitelist()
-def reset_user_password(
-    user: str, new_password: str | None = None, send_email: int = 1
-) -> dict:
+def reset_user_password(user: str, new_password: str | None = None, send_email: int = 1) -> dict:
     """Reset a user's password without leaving the portal.
 
     Two modes:
@@ -953,17 +947,17 @@ def get_employee_filter_options() -> dict:
         if field in _MASTER_MAP:
             master_dt, label_field, extra_filters = _MASTER_MAP[field]
             try:
-                rows = frappe.db.get_all(
-                    master_dt,
-                    filters=extra_filters,
-                    fields=["name", label_field],
-                    order_by="name asc",
-                    limit_page_length=500,
-                ) or []
-                out[field] = [
-                    {"value": r["name"], "label": r.get(label_field) or r["name"]}
-                    for r in rows
-                ]
+                rows = (
+                    frappe.db.get_all(
+                        master_dt,
+                        filters=extra_filters,
+                        fields=["name", label_field],
+                        order_by="name asc",
+                        limit_page_length=500,
+                    )
+                    or []
+                )
+                out[field] = [{"value": r["name"], "label": r.get(label_field) or r["name"]} for r in rows]
             except Exception:
                 out[field] = []
             continue
@@ -1268,11 +1262,7 @@ def _assert_shift_assignment_cancel_safe(doc) -> None:
         limit=1,
     )
     if linked_checkin:
-        frappe.throw(
-            _("Không thể kết thúc ca: đã có lượt chấm công {0} liên kết.").format(
-                linked_checkin[0]
-            )
-        )
+        frappe.throw(_("Không thể kết thúc ca: đã có lượt chấm công {0} liên kết.").format(linked_checkin[0]))
     linked_attendance = frappe.db.get_all(
         "Attendance",
         filters={
@@ -1285,9 +1275,7 @@ def _assert_shift_assignment_cancel_safe(doc) -> None:
     )
     if linked_attendance:
         frappe.throw(
-            _("Không thể kết thúc ca: đã có bản chấm công {0} liên kết.").format(
-                linked_attendance[0]
-            )
+            _("Không thể kết thúc ca: đã có bản chấm công {0} liên kết.").format(linked_attendance[0])
         )
 
 
@@ -1513,9 +1501,7 @@ def create_shift_assignment(
     # block when the clock timings actually overlap (morning + evening = OK).
     allow_multi = False
     try:
-        allow_multi = bool(
-            frappe.db.get_single_value("HR Settings", "allow_multiple_shift_assignments")
-        )
+        allow_multi = bool(frappe.db.get_single_value("HR Settings", "allow_multiple_shift_assignments"))
     except Exception:
         allow_multi = False
     if not allow_multi:
@@ -1531,9 +1517,7 @@ def create_shift_assignment(
             or_filters=[["end_date", ">=", start], ["end_date", "is", "not set"]],
             fields=["name", "shift_type", "start_date", "end_date"],
         )
-        conflicts = [
-            d for d in existing if _shifts_have_overlapping_timings(shift_type, d.shift_type)
-        ]
+        conflicts = [d for d in existing if _shifts_have_overlapping_timings(shift_type, d.shift_type)]
         if conflicts:
             frappe.throw(
                 _("Nhân viên đã có ca làm việc trùng giờ trong khoảng này: {0}").format(
@@ -2037,9 +2021,6 @@ def _portal_local_to_utc_str(value) -> str | None:
     The input is interpreted in the configured portal timezone
     (Asia/Ho_Chi_Minh), mirroring :func:`utils.tz.now_in_portal`.
     """
-    from zoneinfo import ZoneInfo
-
-    from gege_hr.gege_hr.utils import tz as tz_utils
 
     dt = _parse_portal_dt(value)
     if dt is None:
@@ -2055,7 +2036,6 @@ def _find_existing_checkin(employee: str, log_type: str, utc_time_str: str) -> s
     instead of inserting a duplicate. Returns the docname or ``None``.
     """
     from datetime import datetime
-    from zoneinfo import ZoneInfo
 
     from frappe.utils import get_datetime
 
@@ -2102,9 +2082,7 @@ def _upsert_employee_checkin(employee: str, docname: str | None, log_type: str, 
     if not docname:
         docname = _find_existing_checkin(employee, log_type, utc_time_str)
     if docname and frappe.db.exists("Employee Checkin", docname):
-        frappe.db.set_value(
-            "Employee Checkin", docname, "time", utc_time_str, update_modified=False
-        )
+        frappe.db.set_value("Employee Checkin", docname, "time", utc_time_str, update_modified=False)
         try:
             doc = frappe.get_doc("Employee Checkin", docname)
             att_api.on_employee_checkin_create(doc)
@@ -2172,8 +2150,9 @@ def admin_custom_checkin(
         _dt = _parse_portal_dt(_raw_val)
         if _dt and _is_locked(_dt.date().isoformat()):
             frappe.throw(
-                _("Ngày {0} (giờ {1}) thuộc kỳ công đã khoá — không thể sửa chấm công. Hãy mở khóa kỳ công trước.")
-                .format(_dt.date().isoformat(), _label)
+                _(
+                    "Ngày {0} (giờ {1}) thuộc kỳ công đã khoá — không thể sửa chấm công. Hãy mở khóa kỳ công trước."
+                ).format(_dt.date().isoformat(), _label)
             )
 
     # Reject an obvious inversion (Ra trước Vào). We compare the manager's raw

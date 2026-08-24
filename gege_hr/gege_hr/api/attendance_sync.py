@@ -13,6 +13,7 @@ Locked decisions (``plans/hr-fix-plan.md`` §QUYẾT ĐỊNH):
   * the ``Attendance`` row is **submitted** only when the work day belongs to a
     *Locked* ``VN Monthly Attendance Period``.
 """
+
 from __future__ import annotations
 
 import frappe

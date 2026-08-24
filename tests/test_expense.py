@@ -109,7 +109,18 @@ class _Frappe:
     def get_doc(self, doctype, name):
         return self.store.get((doctype, name))
 
-    def get_all(self, doctype, filters=None, or_filters=None, fields=None, order_by=None, limit_start=0, limit_page_length=0, pluck=None, **k):
+    def get_all(
+        self,
+        doctype,
+        filters=None,
+        or_filters=None,
+        fields=None,
+        order_by=None,
+        limit_start=0,
+        limit_page_length=0,
+        pluck=None,
+        **k,
+    ):
         rows = list(self.list_rows.get(doctype, []))
 
         def _match(r, cond):
@@ -183,7 +194,9 @@ def test_normalize_expenses_drops_zero_and_maps(mod):
 
 def test_claim_total(mod):
     m, _ = mod
-    assert m.claim_total([{"expense_type": "A", "amount": 100}, {"expense_type": "B", "amount": 25.5}]) == 125.5
+    assert (
+        m.claim_total([{"expense_type": "A", "amount": 100}, {"expense_type": "B", "amount": 25.5}]) == 125.5
+    )
     assert m.claim_total([]) == 0.0
 
 

@@ -41,6 +41,12 @@ ignore = [
 # hooks.py legitimately sets app_* config before imports (Frappe convention).
 "hooks.py" = ["E402"]
 
+[tool.ruff.lint.isort]
+# Keep aliased from-imports (x as _x, y as _y) merged in ONE statement —
+# matches the codebase style and keeps mid-file `# noqa: E402` import
+# blocks (attendance parity guards) intact instead of being split.
+combine-as-imports = true
+
 [tool.ruff.format]
 # Black-compatible formatting (the Frappe default).
 quote-style = "double"

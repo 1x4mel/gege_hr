@@ -25,11 +25,13 @@ from frappe import _
 from frappe.utils import add_days, flt, get_datetime, getdate
 
 from gege_hr.gege_hr.api import audit as audit_api
-from gege_hr.gege_hr.utils import _db as _db_mod
-from gege_hr.gege_hr.utils import employee as emp_utils
-from gege_hr.gege_hr.utils import gamification as game
-from gege_hr.gege_hr.utils import pagination
-from gege_hr.gege_hr.utils import tz as tz_utils
+from gege_hr.gege_hr.utils import (
+    _db as _db_mod,
+    employee as emp_utils,
+    gamification as game,
+    pagination,
+    tz as tz_utils,
+)
 from gege_hr.gege_hr.utils.ratelimit import rate_limit
 from gege_hr.gege_hr.utils.request_workflow import send_for_approval
 
@@ -265,21 +267,13 @@ def _session_context(shift: dict | None, checkins: list[dict], now_local: dateti
     # PHASE-1 FRAME: everything below compares naive WALL datetimes.
     now_local = tz_utils.wall(now_local)
     first_in_raw, last_out_raw = _first_in_last_out(checkins)
-    planned_start = tz_utils.wall(
-        datetime.fromisoformat(shift["planned_start"].replace("Z", "+00:00"))
-    )
-    planned_end = tz_utils.wall(
-        datetime.fromisoformat(shift["planned_end"].replace("Z", "+00:00"))
-    )
+    planned_start = tz_utils.wall(datetime.fromisoformat(shift["planned_start"].replace("Z", "+00:00")))
+    planned_end = tz_utils.wall(datetime.fromisoformat(shift["planned_end"].replace("Z", "+00:00")))
     actual_in = _to_portal_dt(first_in_raw)
     actual_out = _to_portal_dt(last_out_raw)
 
-    deviation = (
-        int(round((actual_in - planned_start).total_seconds() / 60.0)) if actual_in else None
-    )
-    checkout_deviation = (
-        int(round((actual_out - planned_end).total_seconds() / 60.0)) if actual_out else None
-    )
+    deviation = int(round((actual_in - planned_start).total_seconds() / 60.0)) if actual_in else None
+    checkout_deviation = int(round((actual_out - planned_end).total_seconds() / 60.0)) if actual_out else None
 
     if actual_in and not actual_out:
         elapsed = int(max(0, (now_local - actual_in).total_seconds() / 60.0))
@@ -460,8 +454,9 @@ def mobile_checkin(
     # via ``today_status``; enforce it server-side too.
     if _is_date_locked(day.isoformat()):
         frappe.throw(
-            _("Hôm nay ({0}) thuộc kỳ công đã khoá — không thể chấm công. Liên hệ HR để mở khóa kỳ.")
-            .format(day.isoformat())
+            _("Hôm nay ({0}) thuộc kỳ công đã khoá — không thể chấm công. Liên hệ HR để mở khóa kỳ.").format(
+                day.isoformat()
+            )
         )
 
     shift = _today_shift(emp, day)
@@ -505,9 +500,7 @@ def mobile_checkin(
         # delta against the last log is meaningful on any deployment.
         true_utc = _parse_log_dt(client_ts)
         true_utc_now = datetime.now(tz_utils.ZoneInfo("UTC")).replace(tzinfo=None)
-        server_now_naive = (
-            server_now.replace(tzinfo=None) if server_now.tzinfo else server_now
-        )
+        server_now_naive = server_now.replace(tzinfo=None) if server_now.tzinfo else server_now
         if true_utc is not None:
             intent_dt = true_utc + (server_now_naive - true_utc_now)
     last_log = max(
@@ -618,9 +611,7 @@ def mobile_checkin(
                 checkout_deviation_minutes=(
                     session_ctx["checkout_deviation_minutes"] if session_ctx else None
                 ),
-                planned_duration_minutes=(
-                    session_ctx["planned_duration_minutes"] if session_ctx else None
-                ),
+                planned_duration_minutes=(session_ctx["planned_duration_minutes"] if session_ctx else None),
                 elapsed_minutes=session_ctx["elapsed_minutes"] if session_ctx else None,
                 is_overnight=bool(shift and shift.get("is_overnight")),
             )
@@ -639,9 +630,7 @@ def mobile_checkin(
     # exists for today, surface a prompt so the employee submits one.
     if log_type == "OUT" and shift:
         try:
-            pe = tz_utils.wall(
-                datetime.fromisoformat(shift["planned_end"].replace("Z", "+00:00"))
-            )
+            pe = tz_utils.wall(datetime.fromisoformat(shift["planned_end"].replace("Z", "+00:00")))
             now_p = tz_utils.wall(server_now)
             if now_p > pe:
                 ot_hours = round((now_p - pe).total_seconds() / 3600.0, 1)
@@ -671,7 +660,6 @@ def mobile_checkin(
 # fixes + the full test matrix in tests/test_mobile_checkin_parity.py).
 from gege_hr.gege_hr.utils.checkin_parity import (  # noqa: E402
     decide_log_type as _decide_log_type,
-    has_in_only as _has_in_only,
     has_out_only as _has_out_only,
     is_duplicate_intent as _is_duplicate_intent,
     parse_log_dt as _parse_log_dt,
@@ -1303,7 +1291,9 @@ def team_attendance(
         ):
             shift_meta[st.name] = {"start_time": st.start_time, "end_time": st.end_time}
 
-    shift_window_cache: dict[str, tuple] = {n: (m.get("start_time"), m.get("end_time")) for n, m in shift_meta.items()}
+    shift_window_cache: dict[str, tuple] = {
+        n: (m.get("start_time"), m.get("end_time")) for n, m in shift_meta.items()
+    }
 
     def _shift_window(shift_name: str | None):
         if not shift_name:
@@ -1393,13 +1383,13 @@ def team_attendance(
 
             # Work Session is the source of truth; Attendance is fallback for
             # days where the engine hasn't run yet. Handle att=None gracefully.
-            disp_status = (att.status if att else "Present")
+            disp_status = att.status if att else "Present"
             late_min = 0
             early_min = 0
             ot_hours = 0.0
             raw_ot = 0.0
-            checkin_time = (att.in_time if att else None)
-            checkout_time = (att.out_time if att else None)
+            checkin_time = att.in_time if att else None
+            checkout_time = att.out_time if att else None
             shift_start, shift_end = _shift_window(getattr(att, "shift", None))
             if ws and (ws.actual_checkin or ws.actual_checkout):
                 # Authoritative Work Session: correct overnight pairing, and
@@ -1468,7 +1458,7 @@ def team_attendance(
             # the raw Attendance flags) so the totals match what the cells show.
             # Work-Session-derived late/early are not reflected in att.late_entry,
             # so the minute thresholds are authoritative here.
-            att_status = (att.status if att else disp_status)
+            att_status = att.status if att else disp_status
             if att_status == "Present":
                 summary["present"] += 1
                 if (getattr(att, "late_entry", 0) if att else 0) or late_min > 0:
@@ -1627,12 +1617,16 @@ def _ws_search_or_filters(search: str | None) -> list | None:
         valid = set(frappe.meta.get_table_columns(_WORK_SESSION_DOCTYPE) or [])
     except Exception:
         valid = set()
-    cols = [c for c in _WORK_SESSION_SEARCH_FIELDS if c in valid] if valid else [
-        "name",
-        "employee",
-        "employee_name",
-        "shift_type",
-    ]
+    cols = (
+        [c for c in _WORK_SESSION_SEARCH_FIELDS if c in valid]
+        if valid
+        else [
+            "name",
+            "employee",
+            "employee_name",
+            "shift_type",
+        ]
+    )
     _like = f"%{pagination.escape_like(q)}%"
     return [[c, "like", _like] for c in cols] or None
 
@@ -2096,24 +2090,22 @@ def recalculate_period(
     instances_created = 0
     materialise_skipped = 0
     if backfill:
-        mat = shift_api._materialise_shift_instances(
-            from_date=start, to_date=end, employee=employee
-        )
+        mat = shift_api._materialise_shift_instances(from_date=start, to_date=end, employee=employee)
         instances_created = mat.get("created", 0)
         materialise_skipped = mat.get("skipped", 0)
 
     si_filters = {"work_date": ["between", [start, end]], "docstatus": 1}
     if employee:
         si_filters["employee"] = employee
-    shift_instances = frappe.db.get_all(
-        "VN Employee Shift Instance", filters=si_filters, pluck="name"
-    )
+    shift_instances = frappe.db.get_all("VN Employee Shift Instance", filters=si_filters, pluck="name")
 
     sessions_recalculated = 0
     errors: list[str] = []  # WP3 (MH2): per-SI failures surface to the UI
     for si_name in shift_instances:
         # Skip Locked sessions (CAS guard in persist_work_session).
-        status = frappe.db.get_value("VN Attendance Work Session", {"shift_instance": si_name}, "calculation_status")
+        status = frappe.db.get_value(
+            "VN Attendance Work Session", {"shift_instance": si_name}, "calculation_status"
+        )
         if status == "Locked":
             continue
         try:
@@ -2121,9 +2113,7 @@ def recalculate_period(
                 sessions_recalculated += 1
         except Exception:
             errors.append(si_name)
-            frappe.log_error(
-                frappe.get_traceback(), f"Work Session recalc failed for {si_name}"
-            )
+            frappe.log_error(frappe.get_traceback(), f"Work Session recalc failed for {si_name}")
             try:
                 frappe.db.rollback()  # don't poison the remaining batch
             except Exception:
@@ -2236,9 +2226,7 @@ def auto_mark_absent_job() -> None:
         if has_leave:
             continue
         try:
-            frappe.db.set_value(
-                "VN Attendance Work Session", ws_name, {"absent": 1, "payable_day": 0}
-            )
+            frappe.db.set_value("VN Attendance Work Session", ws_name, {"absent": 1, "payable_day": 0})
         except Exception:
             continue
     # WP4: heartbeat ONLY after a full successful pass (HC4).

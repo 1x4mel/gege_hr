@@ -18,8 +18,7 @@ from __future__ import annotations
 import frappe
 from frappe import _
 
-from gege_hr.gege_hr.utils import leave_blackout as blackout_utils
-from gege_hr.gege_hr.utils import pagination
+from gege_hr.gege_hr.utils import leave_blackout as blackout_utils, pagination
 
 DOCTYPE = "VN Leave Blackout Period"
 _LIST_FIELDS = [

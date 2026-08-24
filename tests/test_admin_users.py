@@ -257,9 +257,7 @@ def admin(monkeypatch):
     audit_calls = []
     monkeypatch.setattr(mod, "_audit_admin", lambda *a, **k: audit_calls.append((a, k)))
 
-    return types.SimpleNamespace(
-        mod=mod, stub=stub, db=db, pw_calls=pw_calls, audit_calls=audit_calls
-    )
+    return types.SimpleNamespace(mod=mod, stub=stub, db=db, pw_calls=pw_calls, audit_calls=audit_calls)
 
 
 # --------------------------------------------------------------------------- #

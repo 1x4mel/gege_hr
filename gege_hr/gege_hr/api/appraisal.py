@@ -6,6 +6,7 @@ portal: an employee lists/creates/tracks their Goals (progress → auto status) 
 reads their Appraisals; an HR/Manager lists cycles + everyone's goals/appraisals.
 Pure helpers are split out for unit testing (no frappe).
 """
+
 from __future__ import annotations
 
 import frappe
@@ -109,9 +110,7 @@ def _summarize_goals(rows) -> dict:
         st = r.get("status") if isinstance(r, dict) else getattr(r, "status", None)
         if st in counts:
             counts[st] += 1
-        progress_sum += _num(
-            r.get("progress") if isinstance(r, dict) else getattr(r, "progress", None)
-        )
+        progress_sum += _num(r.get("progress") if isinstance(r, dict) else getattr(r, "progress", None))
     completion = round(progress_sum / total, 1) if total else 0.0
     return {
         "total": total,

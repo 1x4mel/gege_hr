@@ -105,7 +105,7 @@ class StubFrappe:
         frappe_mod.throw = lambda msg, exc=None: (_ for _ in ()).throw(FrappeError(msg))
         frappe_mod.ValidationError = FrappeError
         frappe_mod.PermissionError = FrappeError
-        frappe_mod.whitelist = lambda *a, **k: (a[0] if a and callable(a[0]) else (lambda f: f))
+        frappe_mod.whitelist = lambda *a, **k: a[0] if a and callable(a[0]) else (lambda f: f)
 
         utils_mod = types.ModuleType("frappe.utils")
         utils_mod.getdate = lambda v=None: v

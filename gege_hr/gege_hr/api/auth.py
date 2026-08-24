@@ -12,8 +12,7 @@ from __future__ import annotations
 import frappe
 from frappe import _
 
-from gege_hr.gege_hr.utils import employee as emp_utils
-from gege_hr.gege_hr.utils import tz as tz_utils
+from gege_hr.gege_hr.utils import employee as emp_utils, tz as tz_utils
 
 
 @frappe.whitelist(allow_guest=True)

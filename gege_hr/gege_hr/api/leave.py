@@ -23,13 +23,10 @@ from contextlib import contextmanager
 
 import frappe
 from frappe import _
-from frappe.utils import cint, getdate
-from frappe.utils import today as frappe_today
+from frappe.utils import cint, getdate, today as frappe_today
 
 from gege_hr.gege_hr.api import audit as audit_api
-from gege_hr.gege_hr.utils import employee as emp_utils
-from gege_hr.gege_hr.utils import leave as leave_utils
-from gege_hr.gege_hr.utils import notify
+from gege_hr.gege_hr.utils import employee as emp_utils, leave as leave_utils, notify
 from gege_hr.gege_hr.utils.request_workflow import send_for_approval
 
 
@@ -117,7 +114,7 @@ def leave_type_options(employee: str | None = None) -> list[dict]:
     # bare except below used to swallow, silently returning [] (empty dropdown).
     try:
         rows = frappe.db.get_all("Leave Type", fields=["name"], order_by="name")
-    except Exception as exc:  # bench-safe: keep the view alive if HR is absent
+    except Exception:  # bench-safe: keep the view alive if HR is absent
         frappe.log_error(frappe.get_traceback(), "leave_type_options")
         rows = []
     out = []
@@ -504,8 +501,13 @@ def request_cancellation(name: str | None = None, reason: str | None = None) -> 
             {"share_doctype": "VN Leave Cancellation Request", "share_name": cr.name, "user": approver},
         ):
             frappe.share.add_docshare(
-                "VN Leave Cancellation Request", cr.name, approver,
-                read=1, write=1, submit=1, share=1,
+                "VN Leave Cancellation Request",
+                cr.name,
+                approver,
+                read=1,
+                write=1,
+                submit=1,
+                share=1,
             )
     except Exception:
         frappe.log_error(title="share cancellation request with approver failed")

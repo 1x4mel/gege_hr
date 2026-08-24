@@ -9,6 +9,7 @@ is never double-counted, so retries / re-syncs are safe.
 All persistent state lives on the ``VN Employee Portal Profile`` doctype
 (per-employee, never touches Frappe HR's standard tables).
 """
+
 from __future__ import annotations
 
 import json
@@ -38,30 +39,62 @@ LEVELS = [
 # profile dict *after* the session XP has been applied, so counters are current.
 # ---------------------------------------------------------------------------
 BADGES = [
-    {"code": "first_checkin", "name": "Bước đầu tiên", "emoji": "🎫",
-     "desc": "Lần chấm công đầu tiên",
-     "check": lambda p: (p.get("xp_total") or 0) > 0},
-    {"code": "early5", "name": "Người chim sớm", "emoji": "🐦",
-     "desc": "Vào sớm 5 lần trong tháng",
-     "check": lambda p: (p.get("early_count_month") or 0) >= 5},
-    {"code": "early10", "name": "Kỷ lục gia rạng đông", "emoji": "🌅",
-     "desc": "Vào sớm 10 lần trong tháng",
-     "check": lambda p: (p.get("early_count_month") or 0) >= 10},
-    {"code": "streak7", "name": "Tuần vàng", "emoji": "🔥",
-     "desc": "Đúng giờ 7 ngày liên tiếp",
-     "check": lambda p: (p.get("current_streak") or 0) >= 7},
-    {"code": "streak30", "name": "Tháng sắt", "emoji": "💎",
-     "desc": "Đúng giờ 30 ngày liên tiếp",
-     "check": lambda p: (p.get("current_streak") or 0) >= 30},
-    {"code": "perfect_day", "name": "Ngày hoàn hảo", "emoji": "✨",
-     "desc": "Sớm + đủ ca + check-out đúng",
-     "check": lambda p: (p.get("perfect_day_count") or 0) >= 1},
-    {"code": "level_a", "name": "Hạng A", "emoji": "🅰️",
-     "desc": "Đạt level 4",
-     "check": lambda p: (p.get("level") or 1) >= 4},
-    {"code": "level_s", "name": "Hạng S", "emoji": "🅢",
-     "desc": "Đạt level 5",
-     "check": lambda p: (p.get("level") or 1) >= 5},
+    {
+        "code": "first_checkin",
+        "name": "Bước đầu tiên",
+        "emoji": "🎫",
+        "desc": "Lần chấm công đầu tiên",
+        "check": lambda p: (p.get("xp_total") or 0) > 0,
+    },
+    {
+        "code": "early5",
+        "name": "Người chim sớm",
+        "emoji": "🐦",
+        "desc": "Vào sớm 5 lần trong tháng",
+        "check": lambda p: (p.get("early_count_month") or 0) >= 5,
+    },
+    {
+        "code": "early10",
+        "name": "Kỷ lục gia rạng đông",
+        "emoji": "🌅",
+        "desc": "Vào sớm 10 lần trong tháng",
+        "check": lambda p: (p.get("early_count_month") or 0) >= 10,
+    },
+    {
+        "code": "streak7",
+        "name": "Tuần vàng",
+        "emoji": "🔥",
+        "desc": "Đúng giờ 7 ngày liên tiếp",
+        "check": lambda p: (p.get("current_streak") or 0) >= 7,
+    },
+    {
+        "code": "streak30",
+        "name": "Tháng sắt",
+        "emoji": "💎",
+        "desc": "Đúng giờ 30 ngày liên tiếp",
+        "check": lambda p: (p.get("current_streak") or 0) >= 30,
+    },
+    {
+        "code": "perfect_day",
+        "name": "Ngày hoàn hảo",
+        "emoji": "✨",
+        "desc": "Sớm + đủ ca + check-out đúng",
+        "check": lambda p: (p.get("perfect_day_count") or 0) >= 1,
+    },
+    {
+        "code": "level_a",
+        "name": "Hạng A",
+        "emoji": "🅰️",
+        "desc": "Đạt level 4",
+        "check": lambda p: (p.get("level") or 1) >= 4,
+    },
+    {
+        "code": "level_s",
+        "name": "Hạng S",
+        "emoji": "🅢",
+        "desc": "Đạt level 5",
+        "check": lambda p: (p.get("level") or 1) >= 5,
+    },
 ]
 
 
@@ -206,16 +239,18 @@ def apply_session_xp(
     if is_perfect:
         perfect += 1
 
-    doc.update({
-        "xp_total": new_xp,
-        "level": level,
-        "current_streak": streak,
-        "best_streak": best,
-        "early_count_month": early_m,
-        "ontime_count_month": ontime_m,
-        "perfect_day_count": perfect,
-        "last_xp_date": work_date,
-    })
+    doc.update(
+        {
+            "xp_total": new_xp,
+            "level": level,
+            "current_streak": streak,
+            "best_streak": best,
+            "early_count_month": early_m,
+            "ontime_count_month": ontime_m,
+            "perfect_day_count": perfect,
+            "last_xp_date": work_date,
+        }
+    )
 
     # ----- badges -----
     profile_view = {

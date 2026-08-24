@@ -8,4 +8,5 @@ class VNSchedulerHeartbeat(Document):
     """WP4 — one row per scheduler job; ``last_run`` advances on every
     successful execution so :mod:`gege_hr.gege_hr.utils.health` can detect a
     dead engine within hours instead of weeks."""
+
     pass

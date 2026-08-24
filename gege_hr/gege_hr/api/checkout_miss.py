@@ -5,6 +5,7 @@ Fronts the VN Checkout Miss doctype created by the auto-close engine
 (waive/penalise/close); employees can view their own tickets and submit an
 explanation (optionally opening a Correction Request for a real late checkout).
 """
+
 from __future__ import annotations
 
 import frappe
@@ -161,9 +162,7 @@ def list_checkout_misses(
 
 
 @frappe.whitelist()
-def resolve_checkout_miss(
-    name: str, action: str, note: str | None = None, waive_penalty: int = 0
-) -> dict:
+def resolve_checkout_miss(name: str, action: str, note: str | None = None, waive_penalty: int = 0) -> dict:
     """HR — resolve a ticket. ``action`` ∈ waive / penalise / close.
 
     BUG-7 fix: state machine — ``Closed`` is terminal and a no-op re-resolve
@@ -285,26 +284,20 @@ def explain_checkout_miss(
     name = (name or "").strip()
     if not name or not frappe.db.exists(MISS_DOCTYPE, name):
         frappe.throw(_("Ticket không tồn tại."))
-    ticket = (
-        frappe.db.get_value(MISS_DOCTYPE, name, ["employee", "status"], as_dict=True)
-        or {}
-    )
+    ticket = frappe.db.get_value(MISS_DOCTYPE, name, ["employee", "status"], as_dict=True) or {}
     ticket_emp = ticket.get("employee")
     emp = emp_utils.get_employee_for_user()
     # BUG-3 fix: a user with no Employee record must not explain anyone's ticket
     # (the old `if emp and ...` check silently passed when emp was None).
     if not emp or (ticket_emp and emp != ticket_emp):
-        frappe.throw(_("Bạn chỉ được giải trình ticket của mình."),
-                     frappe.PermissionError)
+        frappe.throw(_("Bạn chỉ được giải trình ticket của mình."), frappe.PermissionError)
     # BUG-1 fix: only Pending/Explained tickets accept an explanation — flipping
     # a Penalised ticket back to Explained would silently drop the payroll
     # penalty (load_checkout_miss_penalty only counts Penalised non-waived).
     status = (ticket.get("status") or "").strip()
     if status not in ("Pending", "Explained"):
         frappe.throw(
-            _("Ticket ở trạng thái {0} — không thể giải trình nữa.").format(
-                status or "?"
-            ),
+            _("Ticket ở trạng thái {0} — không thể giải trình nữa.").format(status or "?"),
             frappe.ValidationError,
         )
     # Grace-deadline hard-stop: even while the status is still Pending (the
@@ -367,10 +360,7 @@ def explain_checkout_miss(
     frappe.db.set_value(MISS_DOCTYPE, name, updates)
     # Audit the employee's explanation (best-effort — same contract as resolve).
     try:
-        ctx = (
-            frappe.db.get_value(MISS_DOCTYPE, name, ["work_date", "company"], as_dict=True)
-            or {}
-        )
+        ctx = frappe.db.get_value(MISS_DOCTYPE, name, ["work_date", "company"], as_dict=True) or {}
         audit_api.log(
             "Checkout Miss Explain",
             company=ctx.get("company"),

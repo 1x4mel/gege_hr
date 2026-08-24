@@ -13,6 +13,7 @@ Design (mirrors ``catalog_master`` / ``holiday_master`` patterns):
   list (replace strategy — the SPA always sends the complete step array).
 * Every mutation audited as a ``Manual Override`` :doc:`VN Audit Event`.
 """
+
 from __future__ import annotations
 
 import frappe
@@ -170,6 +171,12 @@ def approval_matrix_options() -> dict:
         "companies": [r.name for r in frappe.db.get_all("Company", ["name"])],
         "transaction_types": (tt_field.options or "").split("\n") if tt_field else [],
         "apply_to_options": (at_field.options or "").split("\n") if at_field else [],
-        "approver_types": ["Line Manager", "Department Head", "HR User", "HR Manager",
-                           "Specific User", "Specific Role"],
+        "approver_types": [
+            "Line Manager",
+            "Department Head",
+            "HR User",
+            "HR Manager",
+            "Specific User",
+            "Specific Role",
+        ],
     }

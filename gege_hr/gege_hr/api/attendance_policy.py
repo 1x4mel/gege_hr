@@ -13,6 +13,7 @@ Design (mirrors ``approval_matrix``):
   child penalty table.
 * Every mutation audited as a ``Manual Override`` :doc:`VN Audit Event`.
 """
+
 from __future__ import annotations
 
 import frappe
@@ -191,5 +192,6 @@ def policy_options() -> dict:
         "overtime_rounding_method_options": _opts("overtime_rounding_method"),
         "missing_checkin_action_options": _opts("missing_checkin_action"),
         "missing_checkout_action_options": _opts("missing_checkout_action"),
-        "penalty_type_options": _opts("penalty_type") or ["Fixed Amount", "Per Minute", "Percentage", "Half Day", "Full Day"],
+        "penalty_type_options": _opts("penalty_type")
+        or ["Fixed Amount", "Per Minute", "Percentage", "Half Day", "Full Day"],
     }

@@ -105,7 +105,18 @@ class _Frappe:
     def get_doc(self, doctype, name):
         return self.store.get((doctype, name))
 
-    def get_all(self, doctype, filters=None, or_filters=None, fields=None, order_by=None, limit_start=0, limit_page_length=0, pluck=None, **k):
+    def get_all(
+        self,
+        doctype,
+        filters=None,
+        or_filters=None,
+        fields=None,
+        order_by=None,
+        limit_start=0,
+        limit_page_length=0,
+        pluck=None,
+        **k,
+    ):
         rows = list(self.list_rows.get(doctype, []))
 
         def _match(r, cond):
@@ -316,7 +327,11 @@ def test_reject_encashment_submitted_cancels(mod):  # LE-B09
     res = m.reject_leave_encashment(created["name"], reason="sai số")
     assert res["status"] == "Rejected"
     assert doc.docstatus == 2  # cancelled
-    assert ("Leave Encashment", created["name"], {"vn_status": "Rejected", "vn_note": res["note"]}) in stub.set_values
+    assert (
+        "Leave Encashment",
+        created["name"],
+        {"vn_status": "Rejected", "vn_note": res["note"]},
+    ) in stub.set_values
 
 
 def test_reject_encashment_without_reason(mod):  # LE-B10
@@ -349,17 +364,13 @@ def test_submit_comp_off_requires_dates(mod):  # LE-B13
 def test_submit_comp_off_rejects_inverted_range(mod):  # LE-B12 (G1)
     m, _ = mod
     with pytest.raises(Exception) as ei:
-        m.submit_comp_off(
-            employee="HR-EMP-1", work_from_date="2026-08-10", work_to_date="2026-08-01"
-        )
+        m.submit_comp_off(employee="HR-EMP-1", work_from_date="2026-08-10", work_to_date="2026-08-01")
     assert "không được trước ngày bắt đầu" in str(ei.value)
 
 
 def test_submit_comp_off_maps_work_end_date(mod):  # LE-B11 + HRMS fieldname
     m, stub = mod
-    res = m.submit_comp_off(
-        employee="HR-EMP-1", work_from_date="2026-08-01", work_to_date="2026-08-01"
-    )
+    res = m.submit_comp_off(employee="HR-EMP-1", work_from_date="2026-08-01", work_to_date="2026-08-01")
     doc = stub.store[("Compensatory Leave Request", res["name"])]
     assert getattr(doc, "work_end_date", None) == "2026-08-01"  # real HRMS column
     assert doc.vn_status == "Draft"
@@ -368,7 +379,10 @@ def test_submit_comp_off_maps_work_end_date(mod):  # LE-B11 + HRMS fieldname
 def test_approve_comp_off(mod):  # G9 — pinned final status
     m, _ = mod
     created = m.submit_comp_off(
-        employee="HR-EMP-1", leave_type="Compensatory Off", work_from_date="2026-08-01", work_to_date="2026-08-01"
+        employee="HR-EMP-1",
+        leave_type="Compensatory Off",
+        work_from_date="2026-08-01",
+        work_to_date="2026-08-01",
     )
     res = m.approve_comp_off(created["name"])
     assert res["status"] == "Approved"
@@ -376,9 +390,7 @@ def test_approve_comp_off(mod):  # G9 — pinned final status
 
 def test_approve_comp_off_cancelled_blocked(mod):  # LE-B10 variant
     m, stub = mod
-    created = m.submit_comp_off(
-        employee="HR-EMP-1", work_from_date="2026-08-01", work_to_date="2026-08-01"
-    )
+    created = m.submit_comp_off(employee="HR-EMP-1", work_from_date="2026-08-01", work_to_date="2026-08-01")
     stub.store[("Compensatory Leave Request", created["name"])].docstatus = 2
     with pytest.raises(Exception) as ei:
         m.approve_comp_off(created["name"])
@@ -387,9 +399,7 @@ def test_approve_comp_off_cancelled_blocked(mod):  # LE-B10 variant
 
 def test_reject_comp_off_draft(mod):  # G4
     m, _ = mod
-    created = m.submit_comp_off(
-        employee="HR-EMP-1", work_from_date="2026-08-01", work_to_date="2026-08-01"
-    )
+    created = m.submit_comp_off(employee="HR-EMP-1", work_from_date="2026-08-01", work_to_date="2026-08-01")
     res = m.reject_comp_off(created["name"], reason="thiếu attendance")
     assert res["status"] == "Rejected"
 

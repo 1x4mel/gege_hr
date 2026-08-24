@@ -29,8 +29,7 @@ from frappe import _
 from frappe.utils import now_datetime
 
 from gege_hr.gege_hr.api import audit as audit_api
-from gege_hr.gege_hr.utils import attendance_period as ap
-from gege_hr.gege_hr.utils import employee as emp_utils
+from gege_hr.gege_hr.utils import attendance_period as ap, employee as emp_utils
 
 PERIOD_DOCTYPE = "VN Monthly Attendance Period"
 LINE_DOCTYPE = "VN Monthly Attendance Line"

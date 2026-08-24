@@ -61,7 +61,7 @@ class StubFrappe:
                 return None
 
             def set_value(inner, doctype, name, updates=None, *more, **_kw):
-                for key, row in outer.heartbeats.items():
+                for _key, row in outer.heartbeats.items():
                     if row.get("name") == name:
                         row.update(updates if isinstance(updates, dict) else {updates: more[0]})
                 return None
@@ -226,9 +226,9 @@ def test_hc3_snapshot_lists_all_jobs(health_mod):
 
 def test_classify_boundaries(health_mod):
     _, mod = health_mod
-    assert mod.classify("checkout_miss.run_hourly", None) == "red"      # never ran
+    assert mod.classify("checkout_miss.run_hourly", None) == "red"  # never ran
     assert mod.classify("checkout_miss.run_hourly", 30) == "green"
-    assert mod.classify("checkout_miss.run_hourly", 95) == "amber"      # >75% of 120
+    assert mod.classify("checkout_miss.run_hourly", 95) == "amber"  # >75% of 120
     assert mod.classify("checkout_miss.run_hourly", 130) == "red"
 
 

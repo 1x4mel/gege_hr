@@ -200,14 +200,16 @@ def test_dv4_device_timezone_used(dev, monkeypatch):
 def test_wrong_secret_rejected(dev):
     _, mod = dev
     with pytest.raises(FrappeError) as ei:
-        mod.device_import(_payload({"badge": "1", "time": "2026-08-18 08:00:00", "type": "IN"}), device_secret="nope")
+        mod.device_import(
+            _payload({"badge": "1", "time": "2026-08-18 08:00:00", "type": "IN"}), device_secret="nope"
+        )
     assert "secret" in str(ei.value).lower()
 
 
 # batch quá lớn → chặn
 def test_oversized_batch_rejected(dev):
     _, mod = dev
-    big = _payload(*[{"badge": str(i), "time": f"2026-08-18 08:00:00", "type": "IN"} for i in range(501)])
+    big = _payload(*[{"badge": str(i), "time": "2026-08-18 08:00:00", "type": "IN"} for i in range(501)])
     with pytest.raises(FrappeError) as ei:
         mod.device_import(big, device_secret="s3cret")
     assert "500" in str(ei.value)

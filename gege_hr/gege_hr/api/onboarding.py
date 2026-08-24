@@ -7,6 +7,7 @@ starts a ``VN Employee Onboarding`` for a new hire, and ticks the task checklist
 to completion. Pure helpers (progress / status / due-date instantiation) are kept
 separate from the frappe I/O so they can be unit-tested without a bench.
 """
+
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -29,7 +30,16 @@ ONBOARDING_FIELDS = [
     "status",
     "progress",
 ]
-_TASK_FIELDS = ["task_name", "assignee", "due_in_days", "due_date", "status", "completed_at", "completed_by", "note"]
+_TASK_FIELDS = [
+    "task_name",
+    "assignee",
+    "due_in_days",
+    "due_date",
+    "status",
+    "completed_at",
+    "completed_by",
+    "note",
+]
 
 
 def _require_hr() -> None:
@@ -169,11 +179,11 @@ def start_onboarding(
     if template:
         try:
             tpl = frappe.get_doc(TEMPLATE_DOCTYPE, template)
-            for t in (tpl.tasks or []):
+            for t in tpl.tasks or []:
                 doc.append("tasks", instantiate_task(t, boarding_date))
         except Exception:
             frappe.log_error(title="onboarding.start_onboarding template load failed")
-    for t in (tasks or []):
+    for t in tasks or []:
         doc.append("tasks", instantiate_task(t, boarding_date))
 
     doc.progress = compute_progress(doc.tasks)
@@ -201,7 +211,7 @@ def complete_task(name: str, task_name: str, status: str = "Done", note: str | N
     if doc.status == "Cancelled":
         frappe.throw("Onboarding đã huỷ — không thể đánh dấu task.")
     target = None
-    for t in (doc.tasks or []):
+    for t in doc.tasks or []:
         if _t(t, "task_name") == task_name and _t(t, "status") not in ("Done", "Skipped"):
             target = t
             break
@@ -359,9 +369,7 @@ def complete_payroll_profile(
     )
     if not existing_ssa:
         if not (salary_structure and base):
-            frappe.throw(
-                "Nhân viên chưa có SSA — cần salary_structure + base để tạo mới."
-            )
+            frappe.throw("Nhân viên chưa có SSA — cần salary_structure + base để tạo mới.")
         company = emp.company or frappe.db.get_value("Employee", employee, "company")
         ssa = frappe.get_doc(
             {
@@ -394,9 +402,7 @@ def _payroll_profile_complete(employee: str) -> bool:
     """SSA submitted AND bank account present."""
     try:
         has_ssa = bool(
-            frappe.db.get_value(
-                "Salary Structure Assignment", {"employee": employee, "docstatus": 1}, "name"
-            )
+            frappe.db.get_value("Salary Structure Assignment", {"employee": employee, "docstatus": 1}, "name")
         )
     except Exception:
         has_ssa = False
@@ -474,9 +480,7 @@ def notify_missing_payroll_profile() -> dict:
     subject = f"[GeGe HR] {len(rows)} NV thiếu hồ sơ lương ({today})"
     # Dedupe: 1 notification/day (grouped, never spam).
     try:
-        already = frappe.db.exists(
-            "Notification Log", {"subject": subject}
-        )
+        already = frappe.db.exists("Notification Log", {"subject": subject})
     except Exception:
         already = None
     if already:

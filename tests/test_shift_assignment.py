@@ -89,14 +89,8 @@ class _FakeDB:
         # scoped by employee resolve correctly (parity G5 bulk partial test).
         filters = kw.get("filters")
         if isinstance(filters, list):
-            eq = {
-                f[0]: f[2]
-                for f in filters
-                if isinstance(f, (list, tuple)) and len(f) == 3 and f[1] == "="
-            }
-            base = [
-                r for r in base if not isinstance(r, dict) or all(r.get(k) == v for k, v in eq.items())
-            ]
+            eq = {f[0]: f[2] for f in filters if isinstance(f, (list, tuple)) and len(f) == 3 and f[1] == "="}
+            base = [r for r in base if not isinstance(r, dict) or all(r.get(k) == v for k, v in eq.items())]
         pluck = kw.get("pluck")
         if pluck:
             return [r[pluck] if isinstance(r, dict) else r for r in base]
@@ -244,9 +238,7 @@ def test_create_blocks_only_when_timings_overlap(admin):
         }
     ]
     with pytest.raises(Exception):
-        mod.create_shift_assignment(
-            employee="E-1", shift_type="Day", start_date="2026-06-01"
-        )
+        mod.create_shift_assignment(employee="E-1", shift_type="Day", start_date="2026-06-01")
     # Same-date overlap but DISJOINT timing (Evening) → allowed (no throw).
     db.rows["Shift Assignment"] = [
         {
@@ -259,9 +251,7 @@ def test_create_blocks_only_when_timings_overlap(admin):
             "end_date": "2026-12-31",
         }
     ]
-    doc = mod.create_shift_assignment(
-        employee="E-1", shift_type="Evening", start_date="2026-06-01"
-    )
+    doc = mod.create_shift_assignment(employee="E-1", shift_type="Evening", start_date="2026-06-01")
     assert doc["name"]  # created + submitted
 
 
@@ -443,9 +433,7 @@ def test_bulk_requires_employees_and_shift(admin):
     with pytest.raises(Exception):
         mod.bulk_create_shift_assignments(employees=[], shift_type="Day", start_date="2026-06-01")
     with pytest.raises(Exception):
-        mod.bulk_create_shift_assignments(
-            employees=["E-1"], shift_type="", start_date="2026-06-01"
-        )
+        mod.bulk_create_shift_assignments(employees=["E-1"], shift_type="", start_date="2026-06-01")
 
 
 # --------------------------------------------------------------------------- #

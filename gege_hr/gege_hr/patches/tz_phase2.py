@@ -72,7 +72,9 @@ def utc_offset_hours(tzname: str) -> float:
     return now.utcoffset().total_seconds() / 3600.0
 
 
-def plan_for_meta(meta_fields: dict[str, str], configured: tuple[str, str, list[str]]) -> tuple[str, str, list[str]]:
+def plan_for_meta(
+    meta_fields: dict[str, str], configured: tuple[str, str, list[str]]
+) -> tuple[str, str, list[str]]:
     """Trim a configured plan entry to the fields that actually exist as
     Datetime columns on the DocType. ``meta_fields`` maps fieldname →
     fieldtype. The filter field is kept only when present too."""
@@ -148,7 +150,7 @@ def _run_signed(lock_date: str, dry_run: bool, rollback: bool) -> dict:
     # Plan first — abort on ANY post-lock row BEFORE touching anything.
     plans = []
     for configured in MIGRATE_PLAN:
-        doctype, filter_field, fields = plan_for_meta(_meta_fields(doctype), configured)
+        doctype, filter_field, fields = plan_for_meta(_meta_fields(configured[0]), configured)
         if not fields:
             summary["tables"][doctype] = {"skipped": "no datetime fields on meta"}
             continue

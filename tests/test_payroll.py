@@ -522,7 +522,9 @@ def test_employee_advance_deductions_excludes_closed_states(fake_frappe):
     )
     P.frappe = fake_frappe
     try:
-        assert P.employee_advance_deductions("C1", ["EMP-1"], "2026-07-01", "2026-07-31") == {"EMP-1": 1_000_000}
+        assert P.employee_advance_deductions("C1", ["EMP-1"], "2026-07-01", "2026-07-31") == {
+            "EMP-1": 1_000_000
+        }
     finally:
         P.frappe = None
 
@@ -599,11 +601,36 @@ def test_period_ack_progress_counts_visible_only(fake_frappe):
     fake_frappe.db.register(
         "Salary Slip",
         [
-            {"vn_payroll_review_period": "PRP-B", "vn_employee_visible": 1, "vn_ack_status": "Awaiting Payment", "docstatus": 0},
-            {"vn_payroll_review_period": "PRP-B", "vn_employee_visible": 1, "vn_ack_status": "Paid", "docstatus": 0},
-            {"vn_payroll_review_period": "PRP-B", "vn_employee_visible": 1, "vn_ack_status": "", "docstatus": 0},
-            {"vn_payroll_review_period": "PRP-B", "vn_employee_visible": 1, "vn_ack_status": "Requested", "docstatus": 0},
-            {"vn_payroll_review_period": "PRP-B", "vn_employee_visible": 0, "vn_ack_status": "Paid", "docstatus": 0},  # withheld → ignored
+            {
+                "vn_payroll_review_period": "PRP-B",
+                "vn_employee_visible": 1,
+                "vn_ack_status": "Awaiting Payment",
+                "docstatus": 0,
+            },
+            {
+                "vn_payroll_review_period": "PRP-B",
+                "vn_employee_visible": 1,
+                "vn_ack_status": "Paid",
+                "docstatus": 0,
+            },
+            {
+                "vn_payroll_review_period": "PRP-B",
+                "vn_employee_visible": 1,
+                "vn_ack_status": "",
+                "docstatus": 0,
+            },
+            {
+                "vn_payroll_review_period": "PRP-B",
+                "vn_employee_visible": 1,
+                "vn_ack_status": "Requested",
+                "docstatus": 0,
+            },
+            {
+                "vn_payroll_review_period": "PRP-B",
+                "vn_employee_visible": 0,
+                "vn_ack_status": "Paid",
+                "docstatus": 0,
+            },  # withheld → ignored
         ],
     )
     P.frappe = fake_frappe
@@ -664,19 +691,49 @@ def test_load_checkout_miss_penalty_sums_penalised(fake_frappe):
     fake_frappe.db.register(
         "VN Checkout Miss",
         [
-            {"employee": "EMP-1", "status": "Penalised", "penalty_waived": 0, "docstatus": 1,
-             "work_date": "2026-06-05", "penalty_amount": 100_000},
-            {"employee": "EMP-1", "status": "Penalised", "penalty_waived": 0, "docstatus": 1,
-             "work_date": "2026-06-20", "penalty_amount": 100_000},
+            {
+                "employee": "EMP-1",
+                "status": "Penalised",
+                "penalty_waived": 0,
+                "docstatus": 1,
+                "work_date": "2026-06-05",
+                "penalty_amount": 100_000,
+            },
+            {
+                "employee": "EMP-1",
+                "status": "Penalised",
+                "penalty_waived": 0,
+                "docstatus": 1,
+                "work_date": "2026-06-20",
+                "penalty_amount": 100_000,
+            },
             # excluded: waived
-            {"employee": "EMP-1", "status": "Penalised", "penalty_waived": 1, "docstatus": 1,
-             "work_date": "2026-06-10", "penalty_amount": 100_000},
+            {
+                "employee": "EMP-1",
+                "status": "Penalised",
+                "penalty_waived": 1,
+                "docstatus": 1,
+                "work_date": "2026-06-10",
+                "penalty_amount": 100_000,
+            },
             # excluded: still Pending
-            {"employee": "EMP-1", "status": "Pending", "penalty_waived": 0, "docstatus": 1,
-             "work_date": "2026-06-12", "penalty_amount": 100_000},
+            {
+                "employee": "EMP-1",
+                "status": "Pending",
+                "penalty_waived": 0,
+                "docstatus": 1,
+                "work_date": "2026-06-12",
+                "penalty_amount": 100_000,
+            },
             # excluded: other employee
-            {"employee": "EMP-2", "status": "Penalised", "penalty_waived": 0, "docstatus": 1,
-             "work_date": "2026-06-12", "penalty_amount": 100_000},
+            {
+                "employee": "EMP-2",
+                "status": "Penalised",
+                "penalty_waived": 0,
+                "docstatus": 1,
+                "work_date": "2026-06-12",
+                "penalty_amount": 100_000,
+            },
         ],
     )
     P.frappe = fake_frappe

@@ -16,6 +16,7 @@ created/approved/rejected through the portal stamps ``vn_status`` (Draft /
 Approved / Rejected) and lists coalesce ``status = vn_status || docstatus
 fallback`` so the SPA contract stays unchanged.
 """
+
 from __future__ import annotations
 
 import frappe
@@ -273,7 +274,9 @@ def _list(
         )
         # `frappe.db.count` does not accept `or_filters` → count via names (DNA §6.6 A).
         total = len(
-            frappe.get_all(doctype, filters=flt or None, or_filters=or_filters, fields=["name"], limit_page_length=0)
+            frappe.get_all(
+                doctype, filters=flt or None, or_filters=or_filters, fields=["name"], limit_page_length=0
+            )
             or []
         )
     except Exception:
@@ -376,7 +379,11 @@ def _default_leave_period(company: str | None = None):
         if company:
             base["company"] = company
         rows = frappe.get_all(
-            "Leave Period", filters={**base, "is_active": 1}, pluck="name", order_by="from_date desc", limit_page_length=1
+            "Leave Period",
+            filters={**base, "is_active": 1},
+            pluck="name",
+            order_by="from_date desc",
+            limit_page_length=1,
         )
         if not rows:
             rows = frappe.get_all(
@@ -397,9 +404,7 @@ def submit_leave_encashment(employee=None, leave_type=None, encashment_days=None
     # G3 — never request more days than the employee still has allocated.
     remaining = remaining_leave_days(emp, leave_type)
     if remaining is not None and days > remaining + 1e-9:
-        frappe.throw(
-            f"Số ngày đổi ({days:g}) vượt số dư phép còn lại ({remaining:g}) của loại phép này."
-        )
+        frappe.throw(f"Số ngày đổi ({days:g}) vượt số dư phép còn lại ({remaining:g}) của loại phép này.")
     company = frappe.db.get_value("Employee", emp, "company")
     doc = frappe.new_doc(ENCASHMENT_DOCTYPE)
     doc.employee = emp
@@ -618,8 +623,7 @@ def _status_options(doctype: str) -> list:
     try:
         opts += [
             r
-            for r in frappe.db.get_all(doctype, fields=["vn_status"], pluck=True, limit_page_length=0)
-            or []
+            for r in frappe.db.get_all(doctype, fields=["vn_status"], pluck=True, limit_page_length=0) or []
             if r
         ]
     except Exception:
@@ -654,9 +658,7 @@ def leave_extra_options() -> dict:
     """Filter options for the gear popover (DNA §6.4 / §6.2)."""
     try:
         leave_types = (
-            frappe.get_all(
-                "Leave Type", filters={_encashable_flag(): 1}, pluck="name", order_by="name asc"
-            )
+            frappe.get_all("Leave Type", filters={_encashable_flag(): 1}, pluck="name", order_by="name asc")
             or []
         )
     except Exception:

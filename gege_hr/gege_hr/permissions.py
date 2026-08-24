@@ -16,9 +16,13 @@ logs / ledger / side-effects), WITHOUT any ``ignore_permissions`` bypass.
 Register per-doctype in ``hooks.py``::
 
     from gege_hr.gege_hr.permissions import MATRIX_DOCTYPES
+
     has_permission = {dt: "gege_hr.gege_hr.permissions.has_permission" for dt in MATRIX_DOCTYPES}
-    permission_query_conditions = {dt: "gege_hr.gege_hr.permissions.permission_query_conditions" for dt in MATRIX_DOCTYPES}
+    permission_query_conditions = {
+        dt: "gege_hr.gege_hr.permissions.permission_query_conditions" for dt in MATRIX_DOCTYPES
+    }
 """
+
 from __future__ import annotations
 
 import frappe

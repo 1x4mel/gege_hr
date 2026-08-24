@@ -49,8 +49,7 @@ class _FakeDoc:
 class StubFrappe:
     """Minimal frappe stub capturing db calls for assertions."""
 
-    def __init__(self, *, sessions=None, occurrence=0, enabled=1, existing_miss=False,
-                 settings=None):
+    def __init__(self, *, sessions=None, occurrence=0, enabled=1, existing_miss=False, settings=None):
         self._counter = iter(range(100000, 999999))
         # work sessions with IN but no OUT (the "open" ones the engine queries).
         self._sessions = sessions or []
@@ -58,9 +57,9 @@ class StubFrappe:
         self._enabled = enabled
         self._existing_miss = existing_miss
         self._settings = settings or {}
-        self.created_docs = []          # payloads passed to get_doc
-        self.set_values = []            # (doctype, name, updates)
-        self.sql_claims = []            # (query, params) — guarded UPDATE claims
+        self.created_docs = []  # payloads passed to get_doc
+        self.set_values = []  # (doctype, name, updates)
+        self.sql_claims = []  # (query, params) — guarded UPDATE claims
         self._last_affected = 0
         self.committed = False
 
@@ -181,10 +180,18 @@ def test_t1_normal_in_out_no_autoclose(cm):
 def test_t2_day_in_only_autocloses_at_planned_end(cm):
     """T2: day shift IN-only → OUT synthesised at planned_end + ticket raised."""
     sess = _open_session("2026-08-08", _utc(2026, 8, 8, 13))  # planned_end 20:00 VN
-    stub, mod = cm(sessions=[sess], occurrence=0,
-                   settings={"vn_cm_enabled": 1, "vn_cm_free_first_n": 2,
-                             "vn_cm_penalty_amount": 100000, "vn_cm_window_days": 90,
-                             "vn_cm_buffer_minutes": 30, "vn_cm_grace_hours": 24})
+    stub, mod = cm(
+        sessions=[sess],
+        occurrence=0,
+        settings={
+            "vn_cm_enabled": 1,
+            "vn_cm_free_first_n": 2,
+            "vn_cm_penalty_amount": 100000,
+            "vn_cm_window_days": 90,
+            "vn_cm_buffer_minutes": 30,
+            "vn_cm_grace_hours": 24,
+        },
+    )
     created = mod.auto_close_missed_checkouts("HR-EMP-001")
     assert len(created) == 1
     # OUT checkin doc created at planned_end
@@ -212,9 +219,11 @@ def test_t2_day_in_only_autocloses_at_planned_end(cm):
 def test_t6_overnight_in_only_autocloses(cm):
     """T6: overnight shift IN-only → still auto-closes at planned_end (next day)."""
     sess = _open_session("2026-08-08", _utc(2026, 8, 9, 1), shift_type="Ca Tối")
-    stub, mod = cm(sessions=[sess], occurrence=0,
-                   settings={"vn_cm_enabled": 1, "vn_cm_free_first_n": 2,
-                             "vn_cm_penalty_amount": 100000})
+    stub, mod = cm(
+        sessions=[sess],
+        occurrence=0,
+        settings={"vn_cm_enabled": 1, "vn_cm_free_first_n": 2, "vn_cm_penalty_amount": 100000},
+    )
     created = mod.auto_close_missed_checkouts("HR-EMP-001")
     assert len(created) == 1
     out_docs = [d for d in stub.created_docs if d.get("doctype") == "Employee Checkin"]
@@ -225,9 +234,11 @@ def test_t6_overnight_in_only_autocloses(cm):
 def test_t8_t9_t10_occurrence_escalation(cm, occ, expected_penalty):
     """T8/T9/T10: penalty 0 for first N (2), then penalty_amount."""
     sess = _open_session("2026-08-08", _utc(2026, 8, 8, 13))
-    stub, mod = cm(sessions=[sess], occurrence=occ,
-                   settings={"vn_cm_enabled": 1, "vn_cm_free_first_n": 2,
-                             "vn_cm_penalty_amount": 100000})
+    stub, mod = cm(
+        sessions=[sess],
+        occurrence=occ,
+        settings={"vn_cm_enabled": 1, "vn_cm_free_first_n": 2, "vn_cm_penalty_amount": 100000},
+    )
     created = mod.auto_close_missed_checkouts("HR-EMP-001")
     assert len(created) == 1
     tickets = [d for d in stub.created_docs if d.get("doctype") == "VN Checkout Miss"]

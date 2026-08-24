@@ -131,6 +131,7 @@ class _Frappe:
 
     def _(self, s):
         return s
+
     def log_error(self, *a, **k):
         return None
 

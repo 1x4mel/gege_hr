@@ -27,8 +27,7 @@ from frappe import _
 from frappe.utils import getdate
 
 from gege_hr.gege_hr.api import audit as audit_api
-from gege_hr.gege_hr.utils import employee as emp_utils
-from gege_hr.gege_hr.utils import pagination
+from gege_hr.gege_hr.utils import employee as emp_utils, pagination
 from gege_hr.gege_hr.utils.advance import REPAYMENT_PLAN_NEXT_MONTH
 from gege_hr.gege_hr.utils.request_workflow import send_for_approval
 

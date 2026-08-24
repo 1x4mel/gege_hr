@@ -39,7 +39,7 @@ def _make_frappe_mod(*, counts=None, sa_rows=None, si_future=None, prev_status=N
     """Build a stub frappe module tailored to the lifecycle/materialise flows."""
     frappe_mod = types.ModuleType("frappe")
     frappe_mod._ = lambda s: s
-    frappe_mod.whitelist = lambda *a, **k: (a[0] if a and callable(a[0]) else (lambda f: f))
+    frappe_mod.whitelist = lambda *a, **k: a[0] if a and callable(a[0]) else (lambda f: f)
     frappe_mod.throw = lambda msg, exc=None: (_ for _ in ()).throw(FrappeError(msg))
     frappe_mod.log_error = lambda *a, **k: None
     frappe_mod.get_traceback = lambda: "tb"
@@ -49,9 +49,7 @@ def _make_frappe_mod(*, counts=None, sa_rows=None, si_future=None, prev_status=N
 
     utils = types.ModuleType("frappe.utils")
     utils.add_days = lambda d, n: d + dt.timedelta(days=n)
-    utils.getdate = lambda v=None: (
-        v if isinstance(v, dt.date) else dt.date.fromisoformat(str(v)[:10])
-    )
+    utils.getdate = lambda v=None: v if isinstance(v, dt.date) else dt.date.fromisoformat(str(v)[:10])
     utils.today = lambda: dt.date(2026, 8, 18)
     utils.now = lambda: "2026-08-18 08:00:00"
     utils.get_datetime = lambda v=None: dt.datetime.now()
@@ -119,9 +117,7 @@ def lifecycle(monkeypatch):
     frappe_mod, utils = _make_frappe_mod()
     monkeypatch.setitem(sys.modules, "frappe", frappe_mod)
     monkeypatch.setitem(sys.modules, "frappe.utils", utils)
-    mod = importlib.reload(
-        importlib.import_module("gege_hr.gege_hr.api.employee_lifecycle")
-    )
+    mod = importlib.reload(importlib.import_module("gege_hr.gege_hr.api.employee_lifecycle"))
     return frappe_mod, mod
 
 
@@ -159,9 +155,7 @@ def test_mh4_left_ends_assignments_and_cancels_future_si(lifecycle):
     frappe_mod.db.get_all = lambda doctype, filters=None, **_kw: (
         sa_rows if doctype == "Shift Assignment" else si_future
     )
-    doc = types.SimpleNamespace(
-        name="HR-EMP-001", status="Left", relieving_date="2026-08-15"
-    )
+    doc = types.SimpleNamespace(name="HR-EMP-001", status="Left", relieving_date="2026-08-15")
     mod.handle_employee_status_change(doc)
     sa_sets = [sv for sv in frappe_mod.db.set_values if sv[0] == "Shift Assignment"]
     assert sa_sets and sa_sets[0][2].get("end_date") == "2026-08-15"
@@ -189,27 +183,32 @@ def shift_mod(monkeypatch):
     tz.now_in_portal = lambda *a, **k: dt.datetime(2026, 8, 18, 8)
     monkeypatch.setitem(sys.modules, "gege_hr.gege_hr.utils.tz", tz)
     import gege_hr.gege_hr.utils as utils_pkg
+
     monkeypatch.setattr(utils_pkg, "tz", tz, raising=False)
 
     mod = importlib.reload(importlib.import_module("gege_hr.gege_hr.api.shift"))
 
     assignments = [
-        ADict({  # broken employee A (duplicate/corrupt SA)
-            "name": "SA-A",
-            "employee": "EMP-A",
-            "shift_type": "ST",
-            "start_date": "2026-08-18",
-            "end_date": "2026-08-18",
-            "company": "C",
-        }),
-        ADict({
-            "name": "SA-B",
-            "employee": "EMP-B",
-            "shift_type": "ST",
-            "start_date": "2026-08-18",
-            "end_date": "2026-08-18",
-            "company": "C",
-        }),
+        ADict(
+            {  # broken employee A (duplicate/corrupt SA)
+                "name": "SA-A",
+                "employee": "EMP-A",
+                "shift_type": "ST",
+                "start_date": "2026-08-18",
+                "end_date": "2026-08-18",
+                "company": "C",
+            }
+        ),
+        ADict(
+            {
+                "name": "SA-B",
+                "employee": "EMP-B",
+                "shift_type": "ST",
+                "start_date": "2026-08-18",
+                "end_date": "2026-08-18",
+                "company": "C",
+            }
+        ),
     ]
     frappe_mod.db.get_all = lambda doctype, filters=None, **_kw: assignments
 

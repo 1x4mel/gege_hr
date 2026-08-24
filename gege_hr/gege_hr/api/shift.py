@@ -15,8 +15,7 @@ import frappe
 from frappe import _
 from frappe.utils import add_days, getdate
 
-from gege_hr.gege_hr.utils import employee as emp_utils
-from gege_hr.gege_hr.utils import tz as tz_utils
+from gege_hr.gege_hr.utils import employee as emp_utils, tz as tz_utils
 
 # ---------------------------------------------------------------------------
 # Shift Type validate hook — keep Frappe-native auto-attendance windows in sync
@@ -73,19 +72,19 @@ def my_schedule(
         filters={"employee": emp, "status": "Active", "docstatus": 1, "start_date": ["<=", end]},
         fields=sa_fields,
     )
-    work_location_names = {
-        a.get("vn_work_location")
-        for a in assignments
-        if a.get("vn_work_location")
-    }
-    loc_label_by_name = {
-        r["name"]: r["location_name"]
-        for r in frappe.db.get_all(
-            "VN Work Location",
-            filters={"name": ["in", list(work_location_names)] or [""]},
-            fields=["name", "location_name"],
-        )
-    } if work_location_names else {}
+    work_location_names = {a.get("vn_work_location") for a in assignments if a.get("vn_work_location")}
+    loc_label_by_name = (
+        {
+            r["name"]: r["location_name"]
+            for r in frappe.db.get_all(
+                "VN Work Location",
+                filters={"name": ["in", list(work_location_names)] or [""]},
+                fields=["name", "location_name"],
+            )
+        }
+        if work_location_names
+        else {}
+    )
     day = start
     while day <= end:
         for a in assignments:
@@ -187,9 +186,7 @@ def backfill_shift_instances(
     win_end = getdate(to_date) if to_date else today
     if win_end < win_start:
         win_start, win_end = win_end, win_start
-    res = _materialise_shift_instances(
-        from_date=win_start, to_date=win_end, employee=employee
-    )
+    res = _materialise_shift_instances(from_date=win_start, to_date=win_end, employee=employee)
     return {
         "ok": True,
         "from_date": win_start.isoformat(),

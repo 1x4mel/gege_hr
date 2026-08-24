@@ -417,9 +417,7 @@ def bulk_assign_salary_structure(
         frappe.throw(_("Danh sách nhân viên trống."))
     if not salary_structure or not frappe.db.exists("Salary Structure", salary_structure):
         frappe.throw(_("Bảng lương không tồn tại."))
-    st = frappe.db.get_value(
-        "Salary Structure", salary_structure, ["docstatus", "is_active"], as_dict=True
-    )
+    st = frappe.db.get_value("Salary Structure", salary_structure, ["docstatus", "is_active"], as_dict=True)
     st = st if isinstance(st, dict) else {}
     if st.get("docstatus") != 1 or st.get("is_active") != "Yes":
         frappe.throw(_("Bảng lương {0} chưa submit hoặc đã ngừng hoạt động.").format(salary_structure))
@@ -429,9 +427,7 @@ def bulk_assign_salary_structure(
     try:
         st_doc = frappe.get_doc("Salary Structure", salary_structure)
         fixed_allowance_count = sum(
-            1
-            for r in (st_doc.earnings or [])
-            if r.amount and not r.amount_based_on_formula
+            1 for r in (st_doc.earnings or []) if r.amount and not r.amount_based_on_formula
         )
     except Exception:
         fixed_allowance_count = 0
@@ -442,10 +438,7 @@ def bulk_assign_salary_structure(
     for eid in ids:
         per_emp_from = (from_date or "").strip()
         if not per_emp_from:
-            per_emp_from = str(
-                frappe.db.get_value("Employee", eid, "date_of_joining")
-                or getdate()
-            )
+            per_emp_from = str(frappe.db.get_value("Employee", eid, "date_of_joining") or getdate())
         try:
             assign_salary_structure(
                 employee=eid,
@@ -481,9 +474,7 @@ def bulk_assign_salary_structure(
     frappe.db.commit()
     message = _("Đã gán {0} nhân viên.").format(len(assigned))
     if skipped or failed:
-        message = _("Đã gán {0} — bỏ qua {1}, lỗi {2}.").format(
-            len(assigned), len(skipped), len(failed)
-        )
+        message = _("Đã gán {0} — bỏ qua {1}, lỗi {2}.").format(len(assigned), len(skipped), len(failed))
     return {
         "assigned": assigned,
         "skipped": skipped,
@@ -576,9 +567,7 @@ def bulk_cancel_assignments(employees, reason: str = "") -> dict:
                 pass
     message = _("Đã hủy gán {0} nhân viên.").format(len(cancelled))
     if skipped or failed:
-        message = _("Đã hủy {0} — bỏ qua {1}, lỗi {2}.").format(
-            len(cancelled), len(skipped), len(failed)
-        )
+        message = _("Đã hủy {0} — bỏ qua {1}, lỗi {2}.").format(len(cancelled), len(skipped), len(failed))
     return {
         "cancelled": cancelled,
         "skipped": skipped,
@@ -622,10 +611,7 @@ def ssa_timeline(employee: str) -> dict:
 def _is_overlap_reason(reason: str) -> bool:
     """Engine already-has / overlap messages — retry-safe skips, not errors."""
     r = (reason or "").lower()
-    return any(
-        k in r
-        for k in ("overlap", "đã có", "đã tồn tại", "already", "trùng", "hiệu lực")
-    )
+    return any(k in r for k in ("overlap", "đã có", "đã tồn tại", "already", "trùng", "hiệu lực"))
 
 
 def _ensure_no_overlapping_assignment(employee, start, end):

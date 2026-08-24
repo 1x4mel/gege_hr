@@ -18,7 +18,8 @@ return so internal callers (e.g. ``evaluate_leave_blackout`` reuses
 
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any
 
 # Hard cap for any client-supplied page/limit (DNA §6.6 A). Without it a single
 # ``page_size=1000000`` dumps an entire table (audit logs, work sessions...)

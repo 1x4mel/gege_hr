@@ -110,7 +110,14 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
         # so leave balance deducted with no approval).
         EMPLOYEE: {"read": 1, "write": 1, "create": 1},
         HR_MANAGER: {
-            "read": 1, "write": 1, "create": 1, "delete": 1, "submit": 1, "cancel": 1, "amend": 1, "share": 1,
+            "read": 1,
+            "write": 1,
+            "create": 1,
+            "delete": 1,
+            "submit": 1,
+            "cancel": 1,
+            "amend": 1,
+            "share": 1,
         },
         HR_USER: {"read": 1},
         "Line Manager": {"read": 1},

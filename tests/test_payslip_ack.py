@@ -45,7 +45,7 @@ class StubFrappe:
         frappe_mod.throw = lambda msg, exc=None: (_ for _ in ()).throw(FrappeError(msg))
         frappe_mod.ValidationError = FrappeError
         frappe_mod.PermissionError = FrappeError
-        frappe_mod.whitelist = lambda *a, **k: (a[0] if a and callable(a[0]) else (lambda f: f))
+        frappe_mod.whitelist = lambda *a, **k: a[0] if a and callable(a[0]) else (lambda f: f)
         frappe_mod.session = types.SimpleNamespace(user="tester@example.com")
         frappe_mod.utils = types.ModuleType("frappe.utils")
         frappe_mod.utils.now_datetime = lambda: now or "2026-08-20 12:00:00"
@@ -76,7 +76,9 @@ class StubFrappe:
             def set_value(inner, doctype, name, fields, *a, **kw):
                 outer.set_values.append((doctype, name, fields))
                 if doctype == "Salary Slip":
-                    outer._slip.update(fields if isinstance(fields, dict) else {fields: a[0] if a else kw.get("value")})
+                    outer._slip.update(
+                        fields if isinstance(fields, dict) else {fields: a[0] if a else kw.get("value")}
+                    )
                 return None
 
             def get_all(inner, doctype, filters=None, fields=None, **kw):
@@ -109,7 +111,12 @@ class StubFrappe:
     def get_doc(self, doctype, name=None, **kw):
         if doctype == "VN Employee Bank Account":
             return types.SimpleNamespace(
-                **{**self._bank, "save": lambda **k: None, "delete": lambda **k: None, "employee": self._bank.get("employee")}
+                **{
+                    **self._bank,
+                    "save": lambda **k: None,
+                    "delete": lambda **k: None,
+                    "employee": self._bank.get("employee"),
+                }
             )
         raise FrappeError(f"unexpected get_doc {doctype}")
 
@@ -197,9 +204,7 @@ def test_r6_request_on_confirmed_rejected(api):
 
 def test_r1_request_happy_path(api):
     _, mod = api(roles=["Employee"], slip=_SLIP)
-    res = mod.request_payslip_adjustment(
-        name=_SLIP["name"], reason="Thiếu 2 giờ tăng ca ngày 20/04"
-    )
+    res = mod.request_payslip_adjustment(name=_SLIP["name"], reason="Thiếu 2 giờ tăng ca ngày 20/04")
     assert res["status"] == "Requested"
 
 

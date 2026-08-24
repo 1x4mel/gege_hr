@@ -257,7 +257,7 @@ def _purge(from_date, to_date, emps, dry_run: bool) -> dict[str, int]:
                 pluck="name",
                 limit_page_length=0,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             sa = []
         counts["Shift Assignment"] = len(sa)
         if not dry_run:
@@ -277,11 +277,15 @@ def _purge(from_date, to_date, emps, dry_run: bool) -> dict[str, int]:
         try:
             la = frappe.get_all(
                 "Leave Application",
-                filters={"employee": ["in", emp_names], "to_date": [">=", from_date], "from_date": ["<=", to_date]},
+                filters={
+                    "employee": ["in", emp_names],
+                    "to_date": [">=", from_date],
+                    "from_date": ["<=", to_date],
+                },
                 pluck="name",
                 limit_page_length=0,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             la = []
         counts["Leave Application"] = len(la)
         if not dry_run:
@@ -435,7 +439,9 @@ def _make_leave(emp: str, day: datetime.date) -> bool:
         return False
 
 
-def _make_ot(emp: str, day: datetime.date, from_local: datetime.datetime, to_local: datetime.datetime, pre: bool) -> bool:
+def _make_ot(
+    emp: str, day: datetime.date, from_local: datetime.datetime, to_local: datetime.datetime, pre: bool
+) -> bool:
     """Best-effort Overtime Request (Pending)."""
     if not _ok("VN Overtime Request"):
         return False
@@ -533,9 +539,7 @@ def _recalc(from_date, to_date, emps, dry_run: bool):
     try:
         from gege_hr.gege_hr.api import attendance_sync
 
-        summary["_attendance_backfill"] = str(
-            attendance_sync.backfill_attendance(from_date, to_date)
-        )
+        summary["_attendance_backfill"] = str(attendance_sync.backfill_attendance(from_date, to_date))
     except Exception as exc:  # noqa: BLE001
         _log(f"attendance backfill: {exc}")
         summary["_attendance_backfill"] = f"error: {exc}"
@@ -560,7 +564,11 @@ def run(
     if not from_date:
         from_date = today.replace(day=1).isoformat()
     if not to_date:
-        end = today.replace(day=28) if today.month == 12 else (today.replace(month=today.month + 1, day=1) - datetime.timedelta(days=1))
+        end = (
+            today.replace(day=28)
+            if today.month == 12
+            else (today.replace(month=today.month + 1, day=1) - datetime.timedelta(days=1))
+        )
         to_date = end.isoformat()
 
     emps = _active_employees(employees)

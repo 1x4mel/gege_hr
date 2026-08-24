@@ -65,7 +65,18 @@ class _Frappe:
     def new_doc(self, doctype):
         return _Doc(doctype, self.store)
 
-    def get_all(self, doctype, filters=None, or_filters=None, fields=None, order_by=None, limit_start=0, limit_page_length=0, pluck=None, **k):
+    def get_all(
+        self,
+        doctype,
+        filters=None,
+        or_filters=None,
+        fields=None,
+        order_by=None,
+        limit_start=0,
+        limit_page_length=0,
+        pluck=None,
+        **k,
+    ):
         rows = list(self.list_rows.get(doctype, []))
 
         def keep(r):

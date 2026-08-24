@@ -16,6 +16,7 @@ OT for a genuinely late departure is only credited later, via an approved
 Attendance Correction Request — so auto-close never invents OT (anti-abuse).
 All ops are idempotent (guarded on ``vn_auto_checkout`` / existing ticket).
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -163,9 +164,7 @@ def _find_open_sessions(employee: str, now_utc, buffer_minutes: int) -> list[dic
         return []
     if not isinstance(now_utc, dt.datetime):
         now_utc = get_datetime(now_utc)
-    cutoff = (now_utc - timedelta(minutes=int(buffer_minutes or 30))).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    cutoff = (now_utc - timedelta(minutes=int(buffer_minutes or 30))).strftime("%Y-%m-%d %H:%M:%S")
     try:
         rows = frappe.db.sql(
             """
@@ -265,9 +264,7 @@ def _close_session(session: dict, cfg: dict) -> str | None:
         {
             "doctype": CHECKIN_DOCTYPE,
             "employee": employee,
-            "employee_name": frappe.db.get_value(
-                WORK_SESSION_DOCTYPE, session["name"], "employee_name"
-            ),
+            "employee_name": frappe.db.get_value(WORK_SESSION_DOCTYPE, session["name"], "employee_name"),
             "time": checkout_at,
             "log_type": "OUT",
             "vn_source_type": "Auto",
@@ -405,9 +402,7 @@ def run_hourly() -> dict:
         now_utc = tz_utils.wall(_now_src) if _now_src else tz_utils.now_in_portal().replace(tzinfo=None)
     else:  # bench-free fallback
         now_utc = _now_src or _dt.datetime.utcnow()
-    cutoff = (now_utc - timedelta(minutes=int(cfg.get("buffer_minutes", 30)))).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    cutoff = (now_utc - timedelta(minutes=int(cfg.get("buffer_minutes", 30)))).strftime("%Y-%m-%d %H:%M:%S")
     try:
         rows = frappe.db.sql(
             """

@@ -121,7 +121,7 @@ def run() -> dict:
     rnd.shuffle(plan)
 
     created = []
-    for day, kind in zip(days, plan):
+    for day, kind in zip(days, plan, strict=True):
         # insert as Absent (always validates), submit, then force real values.
         doc = frappe.get_doc(
             {

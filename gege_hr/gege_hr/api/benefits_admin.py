@@ -5,6 +5,7 @@ Reuses Frappe HR's ``Employee Benefit Application``, ``Gratuity``,
 items (Skills, Transfer) are noted in the audit as 🟢 and deferred. Mirrors
 ``api/expense.py``.
 """
+
 from __future__ import annotations
 
 import frappe
@@ -42,10 +43,22 @@ def _assert_own(employee: str) -> None:
         frappe.throw("Bạn chỉ xem được của chính mình.")
 
 
-def _list(doctype, fields, filters, status, search, page, page_size,
-          date_field=None, date_from=None, date_to=None,
-          amount_field=None, amount_min=None, amount_max=None,
-          numeric_fields=None) -> dict:
+def _list(
+    doctype,
+    fields,
+    filters,
+    status,
+    search,
+    page,
+    page_size,
+    date_field=None,
+    date_from=None,
+    date_to=None,
+    amount_field=None,
+    amount_min=None,
+    amount_max=None,
+    numeric_fields=None,
+) -> dict:
     flt = list(filters or [])
     if status:
         flt.append(["status", "=", status])
@@ -74,7 +87,7 @@ def _list(doctype, fields, filters, status, search, page, page_size,
         of = [["employee_name", "like", like], ["name", "like", like]]
         # Numeric columns also join the broad search (DNA §6.6 A — typing a
         # number must match max_benefits / amount columns too).
-        for nf in (numeric_fields or []):
+        for nf in numeric_fields or []:
             of.append([nf, "like", like])
         or_filters = of
     page = max(1, int(page or 1))
@@ -82,12 +95,22 @@ def _list(doctype, fields, filters, status, search, page, page_size,
     try:
         rows = (
             frappe.get_all(
-                doctype, filters=flt or None, or_filters=or_filters, fields=fields,
-                order_by="creation desc", limit_start=(page - 1) * page_size, limit_page_length=page_size,
+                doctype,
+                filters=flt or None,
+                or_filters=or_filters,
+                fields=fields,
+                order_by="creation desc",
+                limit_start=(page - 1) * page_size,
+                limit_page_length=page_size,
             )
             or []
         )
-        total = len(frappe.get_all(doctype, filters=flt or None, or_filters=or_filters, fields=["name"], limit_page_length=0) or [])
+        total = len(
+            frappe.get_all(
+                doctype, filters=flt or None, or_filters=or_filters, fields=["name"], limit_page_length=0
+            )
+            or []
+        )
     except Exception:
         frappe.log_error(title=f"benefits_admin.list {doctype} failed")
         rows, total = [], 0
@@ -107,8 +130,16 @@ def all_benefit_applications(status=None, search=None, date_from=None, date_to=N
     if not _is_manager():
         frappe.throw("Chỉ HR/Manager.")
     return _list(
-        BENEFIT_DOCTYPE, _BENEFIT_FIELDS, None, status, search, page, page_size,
-        date_field="date", date_from=date_from, date_to=date_to,
+        BENEFIT_DOCTYPE,
+        _BENEFIT_FIELDS,
+        None,
+        status,
+        search,
+        page,
+        page_size,
+        date_field="date",
+        date_from=date_from,
+        date_to=date_to,
         numeric_fields=["max_benefits"],
     )
 
@@ -133,14 +164,32 @@ def submit_benefit_application(employee=None, max_benefits=None):
 
 # ── Gratuity (HR read) ───────────────────────────────────────────────────────
 @frappe.whitelist()
-def list_gratuities(status=None, search=None, date_from=None, date_to=None,
-                    amount_min=None, amount_max=None, page=1, page_size=20):
+def list_gratuities(
+    status=None,
+    search=None,
+    date_from=None,
+    date_to=None,
+    amount_min=None,
+    amount_max=None,
+    page=1,
+    page_size=20,
+):
     if not _is_manager():
         frappe.throw("Chỉ HR/Manager.")
     return _list(
-        GRATUITY_DOCTYPE, _GRATUITY_FIELDS, None, status, search, page, page_size,
-        date_field="posting_date", date_from=date_from, date_to=date_to,
-        amount_field="amount", amount_min=amount_min, amount_max=amount_max,
+        GRATUITY_DOCTYPE,
+        _GRATUITY_FIELDS,
+        None,
+        status,
+        search,
+        page,
+        page_size,
+        date_field="posting_date",
+        date_from=date_from,
+        date_to=date_to,
+        amount_field="amount",
+        amount_min=amount_min,
+        amount_max=amount_max,
         numeric_fields=["amount"],
     )
 
@@ -150,7 +199,9 @@ def list_gratuities(status=None, search=None, date_from=None, date_to=None,
 def my_promotions(employee=None, status=None, page=1, page_size=20):
     emp = _resolve(employee)
     _assert_own(emp)
-    return _list(PROMOTION_DOCTYPE, _PROMOTION_FIELDS, [["employee", "=", emp]], status, None, page, page_size)
+    return _list(
+        PROMOTION_DOCTYPE, _PROMOTION_FIELDS, [["employee", "=", emp]], status, None, page, page_size
+    )
 
 
 @frappe.whitelist()
@@ -158,8 +209,16 @@ def all_promotions(status=None, search=None, date_from=None, date_to=None, page=
     if not _is_manager():
         frappe.throw("Chỉ HR/Manager.")
     return _list(
-        PROMOTION_DOCTYPE, _PROMOTION_FIELDS, None, status, search, page, page_size,
-        date_field="promotion_date", date_from=date_from, date_to=date_to,
+        PROMOTION_DOCTYPE,
+        _PROMOTION_FIELDS,
+        None,
+        status,
+        search,
+        page,
+        page_size,
+        date_field="promotion_date",
+        date_from=date_from,
+        date_to=date_to,
     )
 
 

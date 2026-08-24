@@ -21,8 +21,7 @@ from frappe import _
 from frappe.utils import getdate
 
 from gege_hr.gege_hr.api import audit as audit_api
-from gege_hr.gege_hr.utils import employee as emp_utils
-from gege_hr.gege_hr.utils import pagination
+from gege_hr.gege_hr.utils import employee as emp_utils, pagination
 from gege_hr.gege_hr.utils.request_workflow import send_for_approval
 
 DOCTYPE = "VN Overtime Request"
@@ -226,12 +225,8 @@ def my_overtime_requests(
             "approved_hours",
         ),
     )
-    summary = _ot_summary(
-        filtered, ws_approved=_ws_approved_hours(emp, from_date, to_date)
-    )
-    return pagination.paginate_filtered(
-        filtered, page=page, page_size=page_size, summary=summary
-    )
+    summary = _ot_summary(filtered, ws_approved=_ws_approved_hours(emp, from_date, to_date))
+    return pagination.paginate_filtered(filtered, page=page, page_size=page_size, summary=summary)
 
 
 @frappe.whitelist()

@@ -118,9 +118,7 @@ def decide_log_type(logs: list[dict]) -> str:
     return "IN"
 
 
-def is_duplicate_intent(
-    last_log_time, intent_time, gap_minutes: int = 2
-) -> bool:
+def is_duplicate_intent(last_log_time, intent_time, gap_minutes: int = 2) -> bool:
     """True when this tap is a RETRY of the immediately preceding log.
 
     Rule: ``0 <= intent_time - last_log_time < gap_minutes`` (both normalised

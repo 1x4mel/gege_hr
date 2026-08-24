@@ -29,9 +29,7 @@ import frappe
 from frappe import _
 
 from gege_hr.gege_hr.api import audit as audit_api
-from gege_hr.gege_hr.utils import _db, notify, pagination
-from gege_hr.gege_hr.utils import employee as emp_utils
-from gege_hr.gege_hr.utils import payroll as calc
+from gege_hr.gege_hr.utils import _db, employee as emp_utils, notify, pagination, payroll as calc
 
 # Checkout-miss defaults shared with the engine (BUG-6 fix) — the settings UI
 # must fall back to exactly what utils.checkout_miss falls back to.
@@ -179,9 +177,9 @@ def _assert_period_not_confirmed(period) -> None:
     locked = calc.period_has_confirmed_slips(period.name)
     if locked:
         frappe.throw(
-            _(
-                "Kỳ đã có {0} phiếu lương được nhân viên xác nhận — không thể tính lại hay chỉnh sửa."
-            ).format(locked),
+            _("Kỳ đã có {0} phiếu lương được nhân viên xác nhận — không thể tính lại hay chỉnh sửa.").format(
+                locked
+            ),
             frappe.ValidationError,
         )
 
@@ -569,7 +567,9 @@ def calculate_payroll_review(name: str | None = None) -> dict:
     pending = calc.pending_checkout_miss_tickets(period.company, period.from_date, period.to_date)
     if pending:
         frappe.throw(
-            _("Kỳ công còn {0} ticket quên checkout chờ xử lý (Pending) — xử lý xong mới tính lương được.").format(pending),
+            _(
+                "Kỳ công còn {0} ticket quên checkout chờ xử lý (Pending) — xử lý xong mới tính lương được."
+            ).format(pending),
             frappe.ValidationError,
         )
 
@@ -578,9 +578,7 @@ def calculate_payroll_review(name: str | None = None) -> dict:
     # date (disbursed the next month) and the deduction only materialises
     # at Paid — calculating the period early would silently drop it, and the
     # NEXT period's window can never pick it up again.
-    pending_adv = calc.pending_advance_requests(
-        period.company, period.from_date, period.to_date
-    )
+    pending_adv = calc.pending_advance_requests(period.company, period.from_date, period.to_date)
     if pending_adv:
         frappe.throw(
             _(
@@ -606,14 +604,10 @@ def calculate_payroll_review(name: str | None = None) -> dict:
         hourly_rate = calc.resolve_hourly_rate(emp_id, period.to_date)
 
         # Split IN/OUT checkin pairs by time brackets → {coeff: hours}.
-        bracket_hours = _employee_bracket_hours(
-            emp_id, period.from_date, period.to_date, time_brackets
-        )
+        bracket_hours = _employee_bracket_hours(emp_id, period.from_date, period.to_date, time_brackets)
 
         # Late minutes (from Attendance late_entry rows) → penalty.
-        late_minutes_list = _employee_late_minutes(
-            emp_id, period.from_date, period.to_date
-        )
+        late_minutes_list = _employee_late_minutes(emp_id, period.from_date, period.to_date)
         # daily_rate = 8 standard hours × hourly rate (basis for Percentage /
         # Half-Day / Full-Day penalty rules — M4).
         late_penalty = calc.compute_late_penalty(
@@ -621,9 +615,7 @@ def calculate_payroll_review(name: str | None = None) -> dict:
         )
 
         # Checkout-miss penalty: Σ penalty_amount of Penalised (non-waived) tickets this period.
-        checkout_miss_penalty = calc.load_checkout_miss_penalty(
-            emp_id, period.from_date, period.to_date
-        )
+        checkout_miss_penalty = calc.load_checkout_miss_penalty(emp_id, period.from_date, period.to_date)
 
         # Load Salary Structure allowances + extra deductions (fixed amounts).
         allowances, extra_deductions = _employee_salary_components(emp_id)
@@ -715,9 +707,7 @@ def delete_payroll_review(name: str | None = None) -> dict:
     )
     with_slip = [ln for ln in lines if ln.salary_slip]
     if with_slip:
-        frappe.throw(
-            _("Kỳ lương đã sinh {0} payslip, không thể xoá.").format(len(with_slip))
-        )
+        frappe.throw(_("Kỳ lương đã sinh {0} payslip, không thể xoá.").format(len(with_slip)))
 
     for ln in lines:
         try:
@@ -736,7 +726,7 @@ def delete_payroll_review(name: str | None = None) -> dict:
     audit_api.log(
         "Manual Override",
         doc=period_dict,
-        description="Xoá kỳ lương {} ({} dòng) để tính lại".format(name, len(lines)),
+        description=f"Xoá kỳ lương {name} ({len(lines)} dòng) để tính lại",
         old_value="Calculated" if period_dict.get("status") == "Calculated" else "Draft",
         new_value=None,
     )
@@ -757,12 +747,10 @@ def _employee_bracket_hours(employee: str, from_date, to_date, brackets: list[di
     Request exists for that work_date — otherwise the OUT is capped at
     planned_end so unpaid OT is excluded from gross.
     """
-    from datetime import datetime as _dt
-    from datetime import timedelta as _td
+    from datetime import datetime as _dt, timedelta as _td
     from zoneinfo import ZoneInfo
 
     VN = ZoneInfo("Asia/Ho_Chi_Minh")
-    UTC = ZoneInfo("UTC")
     # H4: logs are stored UTC while the period bounds are portal (VN) dates.
     # A VN shift touching either boundary (e.g. 06:00 VN on from_date =
     # 23:00 UTC the day before) fell outside the old [00:00, 23:59] window
@@ -784,9 +772,7 @@ def _employee_bracket_hours(employee: str, from_date, to_date, brackets: list[di
     logs: list[tuple] = []
     for r in rows:
         try:
-            t = _dt.strptime(str(r["time"])[:19], "%Y-%m-%d %H:%M:%S").replace(
-                tzinfo=ZoneInfo("UTC")
-            )
+            t = _dt.strptime(str(r["time"])[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
         except Exception:
             continue
         logs.append((t, (r.get("log_type") or "").strip().upper()))
@@ -940,7 +926,6 @@ def _employee_late_minutes(employee: str, from_date, to_date) -> list[float]:
     return [float(r.late_minutes or 0) for r in rows if float(r.late_minutes or 0) > 0]
 
 
-
 def _employee_salary_components(employee: str) -> tuple[list[float], list[float]]:
     """Fixed-amount earnings (allowances) + deductions from Salary Structure.
 
@@ -968,11 +953,11 @@ def _employee_salary_components(employee: str) -> tuple[list[float], list[float]
         return [], []
 
     allowances: list[float] = []
-    for row in (st.earnings or []):
+    for row in st.earnings or []:
         if not row.amount_based_on_formula and row.amount:
             allowances.append(float(row.amount))
     extra_deductions: list[float] = []
-    for row in (st.deductions or []):
+    for row in st.deductions or []:
         if not row.amount_based_on_formula and row.amount:
             extra_deductions.append(float(row.amount))
     return allowances, extra_deductions
@@ -1044,7 +1029,7 @@ def _apply_manual_adjustments(doc) -> None:
     first; ``net_pay = formula_net + Σ(signed_amount)``."""
     formula_net = float(doc.get("formula_net") or doc.get("net_pay") or 0)
     total = 0.0
-    for row in (doc.manual_adjustments or []):
+    for row in doc.manual_adjustments or []:
         amt = float(row.amount or 0)
         row.signed_amount = amt if row.adjustment_type == "Bonus" else -amt
         total += float(row.signed_amount or 0)
@@ -1654,9 +1639,7 @@ def _stamp_slip_totals(slip, period, line: dict, component_map: dict) -> None:
     # Audit row "Lương kỳ VN" — insert directly into the child table so the
     # parent's validate() (which would recompute from SSA) is not re-run.
     try:
-        audit_component = component_map.get("PERIOD") or _first_earning_component(
-            slip.salary_structure
-        )
+        audit_component = component_map.get("PERIOD") or _first_earning_component(slip.salary_structure)
         if audit_component:
             row = frappe.get_doc(
                 {
@@ -1781,8 +1764,7 @@ def _resolve_ssa(employee: str, period) -> dict:
     if structure.get("docstatus") != 1 or structure.get("is_active") != "Yes":
         raise SlipGenerationError(
             _(
-                "Cấu trúc lương {0} của nhân viên {1} chưa submit hoặc đã ngừng hoạt động"
-                " (is_active=No)."
+                "Cấu trúc lương {0} của nhân viên {1} chưa submit hoặc đã ngừng hoạt động (is_active=No)."
             ).format(ssa.get("salary_structure"), employee),
             code=SLIP_CODE_SSA_STRUCTURE_INACTIVE,
         )
@@ -1868,7 +1850,7 @@ def _generate_for_line(period, line: dict, component_map: dict) -> str:
         from frappe.utils import now_datetime
 
         frappe.db.set_value(
-            SLIP_DOCTYPE,
+            "Salary Slip",
             slip.name,
             {"vn_employee_visible": 1, "vn_visible_at": now_datetime()},
         )
@@ -2062,9 +2044,7 @@ def export_bank_file(name: str, fmt: str = "napas", value_date: str | None = Non
             )
         except Exception:
             bank = (
-                frappe.db.get_value(
-                    "Employee", r["employee"], ["bank_ac_no", "bank_name"], as_dict=True
-                )
+                frappe.db.get_value("Employee", r["employee"], ["bank_ac_no", "bank_name"], as_dict=True)
                 or {}
             )
         rows.append(
@@ -2278,6 +2258,7 @@ def get_payroll_settings() -> dict:
     default_rate = float(
         frappe.db.get_single_value("VN HR Portal Setting", "vn_default_hourly_rate") or 20000
     )
+
     # Checkout-miss penalty config (vn_cm_* on VN HR Portal Setting). The "Phạt
     # quên checkout" tab edits these. ``0`` is a valid value (e.g. free_first_n=0
     # => no freebies), so we treat ``None`` (unset) as "default" — never ``or``
@@ -2301,9 +2282,7 @@ def get_payroll_settings() -> dict:
     presets = _load_adjustment_presets()
     # Penalty rules (from active VN Attendance Policy).
     penalty_rules = []
-    for p in frappe.db.get_all(
-        "VN Attendance Policy", filters={"is_active": 1}, fields=["name"]
-    ):
+    for p in frappe.db.get_all("VN Attendance Policy", filters={"is_active": 1}, fields=["name"]):
         for r in frappe.db.get_all(
             "VN Attendance Penalty Rule",
             filters={"parent": p["name"], "parenttype": "VN Attendance Policy"},
@@ -2545,7 +2524,9 @@ def auto_close_payroll(today=None) -> dict:
         if existing:
             # AC5: a manual (or previous) period exists — never touch it.
             status = existing[0].get("status")
-            results.append({"company": company, "period": existing[0]["name"], "action": "exists", "status": status})
+            results.append(
+                {"company": company, "period": existing[0]["name"], "action": "exists", "status": status}
+            )
             continue
 
         blockers = _auto_close_blockers(company, from_d, to_d)

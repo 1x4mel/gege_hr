@@ -53,7 +53,7 @@ def _detail_total_int(rows) -> int:
 def missing_fields(rows) -> list:
     """Rows that cannot be paid: no ``account_no``/bank or amount ≤ 0."""
     out = []
-    for r in (rows or []):
+    for r in rows or []:
         account = str(r.get("account_no") or "").strip()
         bank = str(r.get("bank_code") or r.get("bank_name") or "").strip()
         amt = _to_float(r.get("amount"))
@@ -146,9 +146,7 @@ def build_napas(
 
 
 def build_acct(rows, *, company: str = "", value_date: str = "", filename: str | None = None) -> dict:
-    lines = [
-        f"{r.get('account_no')}|{amount_int(r.get('amount'))}|{r.get('employee_name')}" for r in rows
-    ]
+    lines = [f"{r.get('account_no')}|{amount_int(r.get('amount'))}|{r.get('employee_name')}" for r in rows]
     content = "\n".join(lines) + ("\n" if lines else "")
     return {
         "filename": filename or f"payroll_{value_date or 'export'}.acct.txt",

@@ -39,6 +39,7 @@ def _now():
 
     return _dt.now()
 
+
 # job_key → monitoring contract. max_minutes is the alert threshold (job older
 # than this = 🔴); warn_minutes (default 75% of max) = 🟡.
 HEARTBEATS: dict[str, dict] = {
@@ -215,7 +216,9 @@ def _hr_manager_users() -> list[str]:
     users: set[str] = set()
     for role in ("HR Manager", "System Manager"):
         try:
-            for parent in frappe.get_all("Has Role", filters={"role": role, "parenttype": "User"}, pluck="parent"):
+            for parent in frappe.get_all(
+                "Has Role", filters={"role": role, "parenttype": "User"}, pluck="parent"
+            ):
                 if parent and parent not in ("Administrator", "Guest"):
                     users.add(parent)
         except Exception:
@@ -271,12 +274,12 @@ def alert_if_unhealthy() -> dict:
     if not overdue:
         return {"alerted": 0, "jobs": len(snapshot["jobs"])}
     lines = [
-        f"• {j['label']} ({j['job_key']}): lần chạy cuối {j['last_run'] or 'KHÔNG BAO GIỜ'}"
-        for j in overdue
+        f"• {j['label']} ({j['job_key']}): lần chạy cuối {j['last_run'] or 'KHÔNG BAO GIỜ'}" for j in overdue
     ]
     message = (
-        "Các job định kỳ sau ĐÃ QUÁ HẠN — engine có thể đã chết:\n" + "\n".join(lines) +
-        "\nKiểm tra /hr/admin/health và Scheduled Job Type."
+        "Các job định kỳ sau ĐÃ QUÁ HẠN — engine có thể đã chết:\n"
+        + "\n".join(lines)
+        + "\nKiểm tra /hr/admin/health và Scheduled Job Type."
     )
     _notify_users(_hr_manager_users(), "[GeGe HR] Scheduler quá hạn", message)
     try:

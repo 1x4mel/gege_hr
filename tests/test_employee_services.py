@@ -77,7 +77,18 @@ class _Frappe:
     def get_doc(self, doctype, name):
         return self.store.get((doctype, name))
 
-    def get_all(self, doctype, filters=None, or_filters=None, fields=None, order_by=None, limit_start=0, limit_page_length=0, pluck=None, **k):
+    def get_all(
+        self,
+        doctype,
+        filters=None,
+        or_filters=None,
+        fields=None,
+        order_by=None,
+        limit_start=0,
+        limit_page_length=0,
+        pluck=None,
+        **k,
+    ):
         rows = list(self.list_rows.get(doctype, []))
 
         def _match(r, cond):
@@ -93,7 +104,7 @@ class _Frappe:
 
         def keep(r):
             if filters:
-                conds = [ [k2, "=", v] for k2, v in filters.items() ] if isinstance(filters, dict) else filters
+                conds = [[k2, "=", v] for k2, v in filters.items()] if isinstance(filters, dict) else filters
                 for cond in conds:
                     if not _match(r, cond):
                         return False
@@ -227,7 +238,9 @@ def test_submit_travel_validates(mod):  # SV-B04 + missing fields
     with pytest.raises(Exception):
         m.submit_travel_request(employee="HR-EMP-1", purpose_of_travel="KH", from_date=None, to_date=None)
     with pytest.raises(Exception):
-        m.submit_travel_request(employee="HR-EMP-1", purpose_of_travel="  ", from_date="2026-08-10", to_date="2026-08-12")
+        m.submit_travel_request(
+            employee="HR-EMP-1", purpose_of_travel="  ", from_date="2026-08-10", to_date="2026-08-12"
+        )
 
 
 def test_submit_travel_rejects_inverted_dates(mod):  # SV-B04 (G2)
@@ -242,7 +255,10 @@ def test_submit_travel_rejects_inverted_dates(mod):  # SV-B04 (G2)
 def test_submit_travel_bad_cost_is_ignored(mod):  # SV-B05
     m, stub = mod
     res = m.submit_travel_request(
-        employee="HR-EMP-1", purpose_of_travel="Đi khách", from_date="2026-08-10", to_date="2026-08-12",
+        employee="HR-EMP-1",
+        purpose_of_travel="Đi khách",
+        from_date="2026-08-10",
+        to_date="2026-08-12",
         estimated_cost="không-phải-số",
     )
     doc = stub.store[("Travel Request", res["name"])]

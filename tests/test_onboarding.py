@@ -74,9 +74,7 @@ class _Frappe:
         utils = types.SimpleNamespace(now_datetime=lambda: "2026-08-08 10:00:00")
         self.utils = utils
         self.session = types.SimpleNamespace(user="hr@gege.local")
-        self.db = types.SimpleNamespace(
-            count=lambda doctype, filters=None: len(self.rows.get(doctype, []))
-        )
+        self.db = types.SimpleNamespace(count=lambda doctype, filters=None: len(self.rows.get(doctype, [])))
 
     def whitelist(self, fn=None, **kw):
         return fn if fn is not None else (lambda f: f)
@@ -110,7 +108,9 @@ class _Frappe:
                     break
         return doc
 
-    def get_all(self, doctype, filters=None, fields=None, order_by=None, limit_start=0, limit_page_length=0, **k):
+    def get_all(
+        self, doctype, filters=None, fields=None, order_by=None, limit_start=0, limit_page_length=0, **k
+    ):
         rows = list(self.rows.get(doctype, []))
 
         def keep(r):
@@ -181,7 +181,11 @@ def test_instantiate_task_no_due_in_days(mod):
 def _seed_template(stub, name="Default", tasks=None):
     stub.store[(stub and "VN Onboarding Template", name)] = _Doc(
         "VN Onboarding Template",
-        {"name": name, "template_name": name, "tasks": tasks or [{"task_name": "Cấp email", "due_in_days": 1}]},
+        {
+            "name": name,
+            "template_name": name,
+            "tasks": tasks or [{"task_name": "Cấp email", "due_in_days": 1}],
+        },
         store=stub.store,
     )
 
@@ -201,7 +205,9 @@ def test_start_onboarding_copies_template_tasks(mod):
 def test_complete_task_updates_progress_and_status(mod):
     m, stub = mod
     res = m.start_onboarding(
-        "HR-EMP-1", "2026-08-08", tasks=[{"task_name": "A", "due_in_days": 1}, {"task_name": "B", "due_in_days": 2}]
+        "HR-EMP-1",
+        "2026-08-08",
+        tasks=[{"task_name": "A", "due_in_days": 1}, {"task_name": "B", "due_in_days": 2}],
     )
     r1 = m.complete_task(res["name"], "A")
     assert r1["progress"] == 50.0

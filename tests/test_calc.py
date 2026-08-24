@@ -10,8 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from gege_hr.gege_hr.utils import calc
-from gege_hr.gege_hr.utils import tz as tz_utils
+from gege_hr.gege_hr.utils import calc, tz as tz_utils
 
 VN = ZoneInfo("Asia/Ho_Chi_Minh")
 
@@ -445,7 +444,8 @@ class TestMatchOvertimeRequestDetailed:
     def test_breakdown_stamped_on_work_session_result(self):
         # The calc result now carries the per-request breakdown for write-back.
         si = base_shift(
-            _vn(2026, 6, 20, 8, 0), _vn(2026, 6, 20, 20, 0),
+            _vn(2026, 6, 20, 8, 0),
+            _vn(2026, 6, 20, 20, 0),
             vn_allow_overtime_after_shift=True,
         )
         logs = [log(_vn(2026, 6, 20, 8, 0), "IN"), log(_vn(2026, 6, 20, 22, 0), "OUT")]

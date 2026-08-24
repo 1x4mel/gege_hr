@@ -285,9 +285,7 @@ def _ensure_holiday_list() -> str | None:
                 "holiday_list_name": HOLIDAY_LIST_NAME,
                 "from_date": "2026-01-01",
                 "to_date": "2026-12-31",
-                "holidays": [
-                    {"holiday_date": d, "description": n} for n, d in HOLIDAYS_2026
-                ],
+                "holidays": [{"holiday_date": d, "description": n} for n, d in HOLIDAYS_2026],
             }
         )
         doc.flags.ignore_permissions = True
@@ -519,7 +517,7 @@ def seed_attendance() -> dict[str, Any]:
         while len(plan) < len(days):
             plan.append("present_normal")
 
-        for day, kind in zip(days, plan):
+        for day, kind in zip(days, plan, strict=True):
             row = _attendance_row(day, kind)
             try:
                 doc = frappe.get_doc(
@@ -700,7 +698,12 @@ def seed_requests() -> dict[str, Any]:
         return {"error": f"no employee for {ATT_EMP_EMAIL}"}
     emp, emp_name = emp_row
     ws = _latest_work_session(emp)
-    out: dict[str, Any] = {"employee": emp, "work_session": ws["name"] if ws else None, "overtime": None, "correction": None}
+    out: dict[str, Any] = {
+        "employee": emp,
+        "work_session": ws["name"] if ws else None,
+        "overtime": None,
+        "correction": None,
+    }
     if not ws:
         out["error"] = "no work session — run generate_shift_instances + check-in first"
         return out
@@ -839,8 +842,12 @@ def seed_advance_and_handover() -> dict[str, Any]:
             order_by="creation desc",
         )
         to_emp = frappe.db.get_value("Employee", {"user_id": "hr.manager@gege.test"}, "name")
-        if approved_la and to_emp and not frappe.db.exists(
-            "VN Leave Handover Task", {"leave_application": approved_la, "from_employee": emp}
+        if (
+            approved_la
+            and to_emp
+            and not frappe.db.exists(
+                "VN Leave Handover Task", {"leave_application": approved_la, "from_employee": emp}
+            )
         ):
             doc = frappe.get_doc(
                 {
@@ -875,8 +882,7 @@ def seed_payroll() -> dict[str, Any]:
         return {}
     out: dict[str, Any] = {}
     try:
-        from gege_hr.gege_hr.api import attendance_period as ap
-        from gege_hr.gege_hr.api import payroll as py
+        from gege_hr.gege_hr.api import attendance_period as ap, payroll as py
     except Exception as exc:  # noqa: BLE001
         return {"error": f"import failed: {exc}"}
 
@@ -1170,8 +1176,7 @@ def seed_checkins() -> dict[str, Any]:
         return {}
     out: dict[str, Any] = {"checkins": 0, "recalculate": None, "payroll": None}
     try:
-        from gege_hr.gege_hr.api import attendance as att
-        from gege_hr.gege_hr.api import payroll as py
+        from gege_hr.gege_hr.api import attendance as att, payroll as py
     except Exception as exc:  # noqa: BLE001
         return {"error": f"import: {exc}"}
 

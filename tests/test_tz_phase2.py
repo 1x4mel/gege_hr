@@ -53,7 +53,9 @@ def test_tz3_update_sql_direction_and_guard():
     assert "`time` <= %s" in sql
     assert params[0] == -7.0  # wall→UTC
 
-    sql2, params2 = build_update_sql("tabVN Attendance Work Session", "actual_checkin", 7.0, 1, "actual_checkin")
+    sql2, params2 = build_update_sql(
+        "tabVN Attendance Work Session", "actual_checkin", 7.0, 1, "actual_checkin"
+    )
     assert params2[0] == 7.0  # rollback direction
 
 

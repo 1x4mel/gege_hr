@@ -32,8 +32,7 @@ from frappe import _
 from frappe.utils import now_datetime
 
 from gege_hr.gege_hr.api import audit as audit_api
-from gege_hr.gege_hr.utils import employee as emp_utils
-from gege_hr.gege_hr.utils import vietqr
+from gege_hr.gege_hr.utils import employee as emp_utils, vietqr
 
 BANK_DOCTYPE = "VN Employee Bank Account"
 SLIP_DOCTYPE = "Salary Slip"
@@ -136,7 +135,9 @@ def _payment_ref(slip) -> str:
     return f"LUONG-{month}{year}-{getattr(slip, 'employee', '')}"
 
 
-def _notify_hr_managers(company: str | None, title: str, message: str, ref_doctype: str, ref_name: str) -> None:
+def _notify_hr_managers(
+    company: str | None, title: str, message: str, ref_doctype: str, ref_name: str
+) -> None:
     """Push a bell notification to every HR manager employee of the company."""
     try:
         managers = frappe.db.sql(
@@ -249,9 +250,7 @@ def delete_bank_account(name: str | None = None) -> dict:
         "name",
     )
     if in_use:
-        frappe.throw(
-            _("Tài khoản đang được dùng trong phiếu lương {0} — không thể xóa.").format(in_use)
-        )
+        frappe.throw(_("Tài khoản đang được dùng trong phiếu lương {0} — không thể xóa.").format(in_use))
     frappe.delete_doc(BANK_DOCTYPE, name, ignore_permissions=True)
     return {"name": name, "message": _("Đã xóa tài khoản.")}
 
@@ -284,9 +283,7 @@ def request_payslip_adjustment(name: str | None = None, reason: str | None = Non
     if slip.vn_ack_status == ACK_REQUESTED:
         frappe.throw(_("Yêu cầu điều chỉnh đã được gửi — vui lòng chờ HR xử lý."))
     if slip.vn_ack_status in (ACK_AWAITING, ACK_PAID):
-        frappe.throw(
-            _("Phiếu đã được xác nhận — không thể yêu cầu điều chỉnh. Liên hệ HR để hỗ trợ.")
-        )
+        frappe.throw(_("Phiếu đã được xác nhận — không thể yêu cầu điều chỉnh. Liên hệ HR để hỗ trợ."))
 
     reason = (reason or "").strip()
     if len(reason) < 10:
@@ -341,9 +338,7 @@ def confirm_payslip(name: str | None = None, bank_account: str | None = None, **
     if not slip.vn_employee_visible:
         frappe.throw(_("Phiếu lương này chưa được phát hành cho nhân viên."))
     if slip.vn_ack_status == ACK_REQUESTED:
-        frappe.throw(
-            _("Phiếu đang chờ điều chỉnh — HR sẽ phát hành lại trước khi bạn xác nhận.")
-        )
+        frappe.throw(_("Phiếu đang chờ điều chỉnh — HR sẽ phát hành lại trước khi bạn xác nhận."))
     if slip.vn_ack_status in (ACK_AWAITING, ACK_PAID):
         frappe.throw(_("Phiếu lương này đã được xác nhận."))
 
@@ -665,9 +660,7 @@ def reopen_confirmed_period(name: str | None = None, reason: str | None = None) 
             except Exception:
                 pass
         except Exception:
-            frappe.log_error(
-                title="VN Payslip reopen: reset failed", message=f"{name} -> {s['name']}"
-            )
+            frappe.log_error(title="VN Payslip reopen: reset failed", message=f"{name} -> {s['name']}")
     frappe.db.set_value("VN Payroll Review Period", name, "status", "Calculated")
     frappe.db.commit()
     audit_api.log(
@@ -724,17 +717,20 @@ def run_payslip_autoconfirm() -> dict:
         from frappe.utils import add_days as _add_days
 
         remind_until = _add_days(cutoff, 1)
-        for r in frappe.get_all(
-            SLIP_DOCTYPE,
-            filters={
-                "vn_employee_visible": 1,
-                "docstatus": ["<", 2],
-                "vn_ack_status": "",
-                "vn_visible_at": ["between", [cutoff, remind_until]],
-            },
-            fields=["name", "employee"],
-            limit_page_length=1000,
-        ) or []:
+        for r in (
+            frappe.get_all(
+                SLIP_DOCTYPE,
+                filters={
+                    "vn_employee_visible": 1,
+                    "docstatus": ["<", 2],
+                    "vn_ack_status": "",
+                    "vn_visible_at": ["between", [cutoff, remind_until]],
+                },
+                fields=["name", "employee"],
+                limit_page_length=1000,
+            )
+            or []
+        ):
             try:
                 from gege_hr.gege_hr.utils import notify
 
@@ -768,9 +764,7 @@ def run_payslip_autoconfirm() -> dict:
     auto = missing = 0
     missing_names: list[str] = []
     for r in rows or []:
-        default_bank = frappe.db.get_value(
-            BANK_DOCTYPE, {"employee": r["employee"], "is_default": 1}, "name"
-        )
+        default_bank = frappe.db.get_value(BANK_DOCTYPE, {"employee": r["employee"], "is_default": 1}, "name")
         if not default_bank:
             missing += 1
             missing_names.append(r["name"])
@@ -779,9 +773,7 @@ def run_payslip_autoconfirm() -> dict:
             confirm_payslip(name=r["name"], bank_account=default_bank, source="Auto")
             auto += 1
         except Exception:
-            frappe.log_error(
-                title="VN Payslip auto-confirm failed", message=f"{r['name']}"
-            )
+            frappe.log_error(title="VN Payslip auto-confirm failed", message=f"{r['name']}")
     if missing_names:
         _notify_hr_managers(
             None,
@@ -845,9 +837,7 @@ def mark_payslip_paid(name: str | None = None, proof_file: str | None = None) ->
             employee=slip.employee,
             notification_type="Payroll",
             title=_("Lương đã được chuyển"),
-            message=_("Lương kỳ {0} đã được chuyển tới tài khoản của bạn.").format(
-                str(slip.start_date)[:7]
-            ),
+            message=_("Lương kỳ {0} đã được chuyển tới tài khoản của bạn.").format(str(slip.start_date)[:7]),
             reference_doctype=SLIP_DOCTYPE,
             reference_name=slip.name,
             action_url="/payslips",

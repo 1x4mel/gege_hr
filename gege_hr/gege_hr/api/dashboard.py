@@ -33,9 +33,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from gege_hr.gege_hr.utils import employee as emp_utils
-from gege_hr.gege_hr.utils import report as report_utils
-from gege_hr.gege_hr.utils import tz as tz_utils
+from gege_hr.gege_hr.utils import employee as emp_utils, report as report_utils, tz as tz_utils
 
 
 # --------------------------------------------------------------------------- #

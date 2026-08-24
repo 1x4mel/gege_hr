@@ -19,8 +19,7 @@ import frappe
 from frappe import _
 from frappe.utils import getdate
 
-from gege_hr.gege_hr.utils import audit as audit_utils
-from gege_hr.gege_hr.utils import pagination
+from gege_hr.gege_hr.utils import audit as audit_utils, pagination
 
 DOCTYPE = "VN Audit Event"
 _LIST_FIELDS = [

@@ -77,7 +77,7 @@ def audit_mod(monkeypatch):
         stub = StubFrappe(roles=roles, rows=rows)
         frappe_mod = types.ModuleType("frappe")
         frappe_mod._ = lambda s: s
-        frappe_mod.whitelist = lambda *a, **k: (a[0] if a and callable(a[0]) else (lambda f: f))
+        frappe_mod.whitelist = lambda *a, **k: a[0] if a and callable(a[0]) else (lambda f: f)
         frappe_mod.throw = stub.throw
         frappe_mod.get_roles = stub.get_roles
         frappe_mod.get_all = stub.get_all

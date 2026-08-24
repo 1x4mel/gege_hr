@@ -91,7 +91,7 @@ class StubFrappe:
         self._counter = iter(range(200000, 999999))
         self.tickets = {t["name"]: dict(t) for t in (tickets or [])}
         self.settings = settings or {}
-        self.period = period          # dict or None (VN Payroll Review Period)
+        self.period = period  # dict or None (VN Payroll Review Period)
         self.has_slip = has_slip
         self.roles = list(roles)
         self.employee_for_user = employee_for_user
@@ -99,12 +99,12 @@ class StubFrappe:
         self.save_fail = set(save_fail)
         self.occurrence = occurrence
         # capture
-        self.created_docs = []        # get_doc(payload)
-        self.loaded_docs = []         # get_doc(DOCTYPE, name) → doc
-        self.saved_docs = []          # (doctype, name, final status fields)
-        self.set_values = []          # (doctype, name, updates)
-        self.count_calls = []         # (doctype, filters)
-        self.deleted = []             # doctype/name deleted
+        self.created_docs = []  # get_doc(payload)
+        self.loaded_docs = []  # get_doc(DOCTYPE, name) → doc
+        self.saved_docs = []  # (doctype, name, final status fields)
+        self.set_values = []  # (doctype, name, updates)
+        self.count_calls = []  # (doctype, filters)
+        self.deleted = []  # doctype/name deleted
 
     def _build_db(self):
         outer = self
@@ -132,9 +132,7 @@ class StubFrappe:
                     return t.get(fieldname)
                 if doctype == "VN Payroll Review Period":
                     if isinstance(fieldname, (list, tuple)):
-                        return NSDict(
-                            {f: (outer.period or {}).get(f) for f in fieldname}
-                        )
+                        return NSDict({f: (outer.period or {}).get(f) for f in fieldname})
                     return (outer.period or {}).get(fieldname)
                 if doctype == "Employee":
                     return "Test NV"
@@ -236,9 +234,7 @@ def api(monkeypatch):
         frappe_mod._ = lambda s: s
         # @frappe.whitelist() decorator — no-op passthrough for the stub
         # (the api module applies it at import time).
-        frappe_mod.whitelist = lambda *a, **kw: (
-            a[0] if a and callable(a[0]) else (lambda f: f)
-        )
+        frappe_mod.whitelist = lambda *a, **kw: a[0] if a and callable(a[0]) else (lambda f: f)
         frappe_mod.utils = utils
         frappe_mod.FrappeError = FrappeError
         frappe_mod.session = types.SimpleNamespace(user="hr@example.com")
@@ -268,9 +264,7 @@ def api(monkeypatch):
 
         # Reload engine first (it must bind to the stub frappe), then the api.
         importlib.reload(importlib.import_module("gege_hr.gege_hr.utils.checkout_miss"))
-        mod = importlib.reload(
-            importlib.import_module("gege_hr.gege_hr.api.checkout_miss")
-        )
+        mod = importlib.reload(importlib.import_module("gege_hr.gege_hr.api.checkout_miss"))
         # Track saves on loaded tickets.
         orig_get_doc = stub.get_doc
 
@@ -281,14 +275,18 @@ def api(monkeypatch):
 
                 def save(**save_kw):
                     r = orig_save(**save_kw)
-                    stub.saved_docs.append((arg, name, {
-                        k: getattr(doc, k, None)
-                        for k in ("status", "penalty_waived", "penalty_amount", "note")
-                    }))
-                    if name in stub.tickets:
-                        stub.tickets[name].update(
-                            {k: getattr(doc, k, None) for k in stub.tickets[name]}
+                    stub.saved_docs.append(
+                        (
+                            arg,
+                            name,
+                            {
+                                k: getattr(doc, k, None)
+                                for k in ("status", "penalty_waived", "penalty_amount", "note")
+                            },
                         )
+                    )
+                    if name in stub.tickets:
+                        stub.tickets[name].update({k: getattr(doc, k, None) for k in stub.tickets[name]})
                     return r
 
                 doc.save = save
@@ -355,9 +353,7 @@ def test_a8_re_explain_while_explained_allowed(api):
 def test_a9_correction_request_linked(api):
     """BUG-5: the CR created from an explanation links back to the ticket."""
     stub, mod = api(tickets=[_ticket()])
-    mod.explain_checkout_miss(
-        "CM-0001", "Ra cửa lúc 22h", correction_checkout_time="2026-08-08 22:00:00"
-    )
+    mod.explain_checkout_miss("CM-0001", "Ra cửa lúc 22h", correction_checkout_time="2026-08-08 22:00:00")
     crs = [d for d in stub.created_docs if d.get("doctype") == "VN Attendance Correction Request"]
     assert len(crs) == 1
     assert crs[0]["vn_checkout_miss"] == "CM-0001"
@@ -561,7 +557,7 @@ def _approval(stub_kw, monkeypatch):
     frappe_mod.log_error = stub.log_error
     frappe_mod.throw = stub.throw
     frappe_mod._ = lambda s: s
-    frappe_mod.whitelist = lambda *a, **kw: (a[0] if a and callable(a[0]) else (lambda f: f))
+    frappe_mod.whitelist = lambda *a, **kw: a[0] if a and callable(a[0]) else (lambda f: f)
     frappe_mod.utils = utils
     frappe_mod.session = types.SimpleNamespace(user="hr@example.com")
     monkeypatch.setitem(sys.modules, "frappe", frappe_mod)
@@ -602,7 +598,9 @@ def _cr_doc(**kw):
 
 def test_c1_cr_without_link_is_noop(monkeypatch):
     stub, mod = _approval({"tickets": [_ticket()]}, monkeypatch)
-    mod._after_correction_state_change(_cr_doc(vn_checkout_miss=None), from_state="Pending HR", to_state="Approved")
+    mod._after_correction_state_change(
+        _cr_doc(vn_checkout_miss=None), from_state="Pending HR", to_state="Approved"
+    )
     assert stub.created_docs == []
     assert stub.deleted == []
 

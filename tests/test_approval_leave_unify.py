@@ -35,9 +35,7 @@ def _build_stub_frappe(status="Open"):
     mod._ = lambda s: s
     mod.whitelist = lambda fn=None, **kw: fn if fn is not None else (lambda f: f)
     mod.PermissionError = type("PermissionError", (Exception,), {})
-    mod.throw = lambda *a, **k: (_ for _ in ()).throw(
-        Exception(a[0] if a else "frappe.throw")
-    )
+    mod.throw = lambda *a, **k: (_ for _ in ()).throw(Exception(a[0] if a else "frappe.throw"))
     mod.log_error = lambda *a, **k: None
     mod.session = types.SimpleNamespace(user="hr.demo@gege.demo")
 
@@ -225,9 +223,7 @@ def test_validation_failure_propagates(env, monkeypatch):
 # leave-cancellation delegation (Phase 2A — inbox now owns cancellation approvals)
 # --------------------------------------------------------------------------- #
 def test_cancel_approve_delegates_to_leave_handler(env):
-    out = env.approval._delegate_leave_cancellation(
-        "CR-1", "Leave Cancellation Request", None, approved=True
-    )
+    out = env.approval._delegate_leave_cancellation("CR-1", "Leave Cancellation Request", None, approved=True)
     assert env.calls["approve_cancel_one"] == ["CR-1"]
     assert env.calls["reject_cancel_one"] == []
     assert env.calls["approve_one"] == []  # must not touch the application path
@@ -237,9 +233,7 @@ def test_cancel_approve_delegates_to_leave_handler(env):
 
 
 def test_cancel_approve_records_approval_log(env):
-    env.approval._delegate_leave_cancellation(
-        "CR-1", "Leave Cancellation Request", None, approved=True
-    )
+    env.approval._delegate_leave_cancellation("CR-1", "Leave Cancellation Request", None, approved=True)
     log = env.calls["write_log"][0]
     assert log["action"] == "Approve"
     assert log["from_state"] == "Pending Manager"
@@ -261,9 +255,7 @@ def test_cancel_reject_delegates_with_reason(env):
 
 def test_cancel_idempotent_when_already_approved(env):
     env.stub.db.cancel_state = "Approved"
-    out = env.approval._delegate_leave_cancellation(
-        "CR-3", "Leave Cancellation Request", None, approved=True
-    )
+    out = env.approval._delegate_leave_cancellation("CR-3", "Leave Cancellation Request", None, approved=True)
     assert env.calls["approve_cancel_one"] == []
     assert env.calls["write_log"] == []
     assert out["status"] == "Approved"
@@ -275,6 +267,4 @@ def test_cancel_validation_failure_propagates(env, monkeypatch):
 
     monkeypatch.setattr(env.leave, "_approve_cancellation_one", boom)
     with pytest.raises(Exception, match="linked leave already cancelled"):
-        env.approval._delegate_leave_cancellation(
-            "CR-4", "Leave Cancellation Request", None, approved=True
-        )
+        env.approval._delegate_leave_cancellation("CR-4", "Leave Cancellation Request", None, approved=True)

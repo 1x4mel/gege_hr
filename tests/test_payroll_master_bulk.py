@@ -75,8 +75,7 @@ class FakeStructureDoc:
     def __init__(self, name, earnings):
         self.name = name
         self.earnings = [
-            NSDict({"amount": amt, "amount_based_on_formula": formula})
-            for amt, formula in (earnings or [])
+            NSDict({"amount": amt, "amount_based_on_formula": formula}) for amt, formula in (earnings or [])
         ]
 
 
@@ -222,7 +221,11 @@ def api(monkeypatch):
         stub.db = stub._build_db()
 
         utils = types.ModuleType("frappe.utils")
-        utils.getdate = lambda v=None: __import__("datetime").date.fromisoformat(str(v)) if v else __import__("datetime").date(2026, 8, 19)
+        utils.getdate = lambda v=None: (
+            __import__("datetime").date.fromisoformat(str(v))
+            if v
+            else __import__("datetime").date(2026, 8, 19)
+        )
         utils.flt = lambda v, p=None: round(float(v or 0), p if p is not None else 2)
 
         frappe_mod = types.ModuleType("frappe")
@@ -232,7 +235,7 @@ def api(monkeypatch):
         frappe_mod.log_error = stub.log_error
         frappe_mod.throw = stub.throw
         frappe_mod._ = lambda s: s
-        frappe_mod.whitelist = lambda *a, **k: (a[0] if a and callable(a[0]) else (lambda f: f))
+        frappe_mod.whitelist = lambda *a, **k: a[0] if a and callable(a[0]) else (lambda f: f)
         frappe_mod.utils = utils
         frappe_mod.get_traceback = lambda: "tb"
 

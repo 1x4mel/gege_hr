@@ -35,9 +35,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from gege_hr.gege_hr.utils import employee as emp_utils
-from gege_hr.gege_hr.utils import pagination
-from gege_hr.gege_hr.utils import tz as tz_utils
+from gege_hr.gege_hr.utils import employee as emp_utils, pagination, tz as tz_utils
 
 
 # --------------------------------------------------------------------------- #
@@ -196,9 +194,7 @@ def normalize_upload_log(
     if not isinstance(raw, dict) or not raw:
         return None, "Dòng log trống."
 
-    log_time = parse_log_time(
-        raw.get("log_time") or raw.get("time") or raw.get("timestamp"), tz=default_tz
-    )
+    log_time = parse_log_time(raw.get("log_time") or raw.get("time") or raw.get("timestamp"), tz=default_tz)
     if log_time is None:
         return None, "Thiếu/th sai định dạng thời gian chấm công (log_time)."
 
@@ -741,9 +737,7 @@ def _process_raw_log(raw_log_name: str) -> str | None:
                 raw_log_name,
                 {
                     "processing_status": "Skipped",
-                    "validation_message": "Ngày {} thuộc kỳ công đã khoá.".format(
-                        _portal_date.isoformat()
-                    ),
+                    "validation_message": f"Ngày {_portal_date.isoformat()} thuộc kỳ công đã khoá.",
                 },
             )
             return None
@@ -813,6 +807,7 @@ except Exception:  # pragma: no cover - bench-free import
         fn.whitelisted = True  # same marker as frappe_whitelist()'s shim
         return fn
 
+
 # WP10 knobs: a push batch is capped and rate-limited so a chatty device can
 # never flood the ingest pipeline (plan WP10 "giới hạn rate").
 DEVICE_IMPORT_MAX_BATCH = 500
@@ -833,10 +828,7 @@ def device_import(payload: dict | None = None, device_secret: str | None = None)
 
     Payload::
 
-        {"device_id": "CAM-01", "logs": [
-            {"badge": "0123", "time": "2026-08-18 08:00:30", "type": "IN"},
-            ...
-        ]}
+        {"device_id": "CAM-01", "logs": [{"badge": "0123", "time": "2026-08-18 08:00:30", "type": "IN"}, ...]}
 
     Returns ``{device, received, imported, duplicates, invalid:[{badge,reason}]}``.
     """
@@ -884,9 +876,7 @@ def device_import(payload: dict | None = None, device_secret: str | None = None)
         raw = dict(raw or {})
         if not (raw.get("raw_employee_code") or raw.get("code")) and raw.get("badge") is not None:
             raw["code"] = raw["badge"]
-        normalized, reason = normalize_upload_log(
-            raw, default_device_code=device_code, default_tz=device_tz
-        )
+        normalized, reason = normalize_upload_log(raw, default_device_code=device_code, default_tz=device_tz)
         if normalized is None:
             invalid.append({"badge": raw.get("badge") or raw.get("code"), "reason": reason})
             continue

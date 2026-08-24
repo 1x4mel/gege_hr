@@ -118,6 +118,7 @@ def _night_band(policy: dict) -> tuple[time, time]:
         parts = str(s).split(":")
         if len(parts) < 2:
             return time(0, 0)
+
         # Frappe/pymysql can hand back Time values with fractional seconds
         # ("22:00:04.271516") or as timedelta strings — int() on "04.271516"
         # raised ValueError and aborted the whole Work-Session calculation.
@@ -395,9 +396,7 @@ def calculate_work_session(
     # first IN — the orphan-OUT self-heal shape) used to pass silently with
     # 0h / huge early-leave and need_review=0. Flag it so HR sees the anomaly.
     inverted_pair = bool(
-        actual_checkin is not None
-        and actual_checkout is not None
-        and actual_checkout < actual_checkin
+        actual_checkin is not None and actual_checkout is not None and actual_checkout < actual_checkin
     )
     need_review = missing_checkin or missing_checkout or inverted_pair
 
@@ -409,9 +408,7 @@ def calculate_work_session(
     # --- 3. late_minutes (only when the employee checked in) ----------------
     grace_late = int(_num(policy.get("grace_late_minutes"), 5))
     late_minutes = (
-        max(0.0, tz_utils.minutes_between(planned_start, safe_in) - grace_late)
-        if actual_checkin
-        else 0.0
+        max(0.0, tz_utils.minutes_between(planned_start, safe_in) - grace_late) if actual_checkin else 0.0
     )
 
     # --- 4. early_leave_minutes (only when the employee checked out) --------
@@ -420,9 +417,7 @@ def calculate_work_session(
     # planned_end) = full shift = 720' for a 12h shift → wrongly "Về sớm".
     grace_early = int(_num(policy.get("grace_early_leave_minutes"), 0))
     early_leave_minutes = (
-        max(0.0, tz_utils.minutes_between(safe_out, planned_end) - grace_early)
-        if actual_checkout
-        else 0.0
+        max(0.0, tz_utils.minutes_between(safe_out, planned_end) - grace_early) if actual_checkout else 0.0
     )
 
     # --- 5. Total actual hours ---------------------------------------------
@@ -1031,11 +1026,14 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
     logs = (
         frappe.db.get_all(
             "Employee Checkin",
-            filters={
-                "employee": si["employee"],
-                "time": [">=", _wlo.strftime("%Y-%m-%d %H:%M:%S")],
-                "time": ["<=", _whi.strftime("%Y-%m-%d %H:%M:%S")],
-            },
+            # F601 fix: the dict literal repeated the "time" key so the
+            # lower bound silently overwrote the upper one (range collapsed
+            # to `<= whi`). List filters keep BOTH bounds as intended.
+            filters=[
+                ["employee", "=", si["employee"]],
+                ["time", ">=", _wlo.strftime("%Y-%m-%d %H:%M:%S")],
+                ["time", "<=", _whi.strftime("%Y-%m-%d %H:%M:%S")],
+            ],
             fields=["name", "time", "log_type", "vn_auto_generated"],
             order_by="time asc",
         )
@@ -1047,9 +1045,7 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
     # admin period recalc, monthly close — SELF-HEALS vn_auto_checkout instead
     # of losing it (a lost flag flipped "Quên chấm ra" back to a green day and
     # hid the ticket state from payroll/UI).
-    auto_checkout_flag = any(
-        lg.get("vn_auto_generated") and lg.get("log_type") == "OUT" for lg in logs
-    )
+    auto_checkout_flag = any(lg.get("vn_auto_generated") and lg.get("log_type") == "OUT" for lg in logs)
 
     policy = load_policy(si.get("attendance_policy"), si["employee"])
 

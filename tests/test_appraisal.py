@@ -112,7 +112,18 @@ class _Frappe:
     def get_doc(self, doctype, name):
         return self.store.get((doctype, name))
 
-    def get_all(self, doctype, filters=None, or_filters=None, fields=None, order_by=None, limit_start=0, limit_page_length=0, pluck=None, **k):
+    def get_all(
+        self,
+        doctype,
+        filters=None,
+        or_filters=None,
+        fields=None,
+        order_by=None,
+        limit_start=0,
+        limit_page_length=0,
+        pluck=None,
+        **k,
+    ):
         rows = list(self.list_rows.get(doctype, []))
 
         def keep(r):
@@ -170,7 +181,13 @@ def test_goal_completion_average(mod):
 def test_my_goals_filters_own(mod):
     m, stub = mod
     stub.list_rows["Goal"] = [
-        {"name": "G-1", "employee": "HR-EMP-1", "employee_name": "An", "goal_name": "Doanh so", "progress": 40},
+        {
+            "name": "G-1",
+            "employee": "HR-EMP-1",
+            "employee_name": "An",
+            "goal_name": "Doanh so",
+            "progress": 40,
+        },
         {"name": "G-2", "employee": "HR-EMP-2", "employee_name": "Binh", "goal_name": "Khac", "progress": 10},
     ]
     res = m.my_goals()

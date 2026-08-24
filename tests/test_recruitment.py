@@ -65,7 +65,18 @@ class _Frappe:
     def new_doc(self, doctype):
         return _Doc(doctype, self.store)
 
-    def get_all(self, doctype, filters=None, or_filters=None, fields=None, order_by=None, limit_start=0, limit_page_length=0, pluck=None, **k):
+    def get_all(
+        self,
+        doctype,
+        filters=None,
+        or_filters=None,
+        fields=None,
+        order_by=None,
+        limit_start=0,
+        limit_page_length=0,
+        pluck=None,
+        **k,
+    ):
         rows = list(self.list_rows.get(doctype, []))
 
         def keep(r):
@@ -109,7 +120,9 @@ def test_submit_job_application_validates(mod):
     m, _ = mod
     with pytest.raises(Exception):
         m.submit_job_application(applicant_name="", email_id="x@y.z")
-    res = m.submit_job_application(job_opening="JO-1", applicant_name="Nguyen A", email_id="a@b.c", phone_number="090")
+    res = m.submit_job_application(
+        job_opening="JO-1", applicant_name="Nguyen A", email_id="a@b.c", phone_number="090"
+    )
     assert res["applicant_name"] == "Nguyen A"
     doc = m.frappe_new_doc if hasattr(m, "frappe_new_doc") else None
     # the applicant doc is stored by the stub

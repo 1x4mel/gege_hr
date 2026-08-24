@@ -50,12 +50,12 @@ class _Doc:
 
 class Stub:
     def __init__(self):
-        self.employees = {}       # name → row
-        self.ssa = []             # list of SSA _Doc
-        self.inserted = []        # all inserted docs
+        self.employees = {}  # name → row
+        self.ssa = []  # list of SSA _Doc
+        self.inserted = []  # all inserted docs
         self.notifications = []
-        self.periods = []         # existing periods
-        self.ws_companies = []    # distinct companies with WS last month
+        self.periods = []  # existing periods
+        self.ws_companies = []  # distinct companies with WS last month
         self.pending_tickets = 0
         self.not_calc_ws = 0
         self.exists_subjects = set()
@@ -133,7 +133,7 @@ class Stub:
 def _frappe_mod(stub):
     frappe_mod = types.ModuleType("frappe")
     frappe_mod._ = lambda s: s
-    frappe_mod.whitelist = lambda *a, **k: (a[0] if a and callable(a[0]) else (lambda f: f))
+    frappe_mod.whitelist = lambda *a, **k: a[0] if a and callable(a[0]) else (lambda f: f)
     frappe_mod.throw = lambda msg, exc=None: (_ for _ in ()).throw(FrappeError(msg))
     frappe_mod.log_error = lambda *a, **k: None
     frappe_mod.get_traceback = lambda: "tb"
@@ -148,9 +148,7 @@ def _frappe_mod(stub):
     utils.today = lambda: stub.today.isoformat()
     utils.now = lambda: "2026-09-03 07:30:00"
     utils.now_datetime = lambda: dt.datetime(2026, 9, 3, 7, 30)
-    utils.getdate = lambda v=None: (
-        v if isinstance(v, dt.date) else dt.date.fromisoformat(str(v)[:10])
-    )
+    utils.getdate = lambda v=None: v if isinstance(v, dt.date) else dt.date.fromisoformat(str(v)[:10])
     frappe_mod.utils = utils
 
     def get_all(doctype, filters=None, pluck=None, **_kw):
@@ -210,6 +208,7 @@ def onboard(monkeypatch):
     # notify_missing_payroll_profile lazily imports utils.health — the cached
     # module may still hold a PREVIOUS test's frappe stub. Rebind it.
     import gege_hr.gege_hr.utils.health as health_mod
+
     monkeypatch.setattr(health_mod, "frappe", frappe_mod, raising=False)
     mod = importlib.reload(importlib.import_module("gege_hr.gege_hr.api.onboarding"))
     return stub, mod
@@ -281,9 +280,11 @@ def payroll(monkeypatch, onboard):
     frappe_mod = sys.modules["frappe"]
     # utils.payroll (calc) with stub frappe
     import gege_hr.gege_hr.utils.payroll as calc_mod
+
     monkeypatch.setattr(calc_mod, "frappe", frappe_mod, raising=False)
     # utils.health bound to same stub
     import gege_hr.gege_hr.utils.health as health_mod
+
     monkeypatch.setattr(health_mod, "frappe", frappe_mod, raising=False)
     mod = importlib.reload(importlib.import_module("gege_hr.gege_hr.api.payroll"))
     return stub, mod, mod_onboard
@@ -352,10 +353,19 @@ def test_ac5_existing_period_untouched(payroll, monkeypatch):
     stub, mod, _ = payroll
     _clean_month(stub)
     stub.periods = [
-        {"name": "PRP-MANUAL", "company": "GeGe Esport", "payroll_month": "08", "payroll_year": 2026, "status": "Calculated", "docstatus": 0}
+        {
+            "name": "PRP-MANUAL",
+            "company": "GeGe Esport",
+            "payroll_month": "08",
+            "payroll_year": 2026,
+            "status": "Calculated",
+            "docstatus": 0,
+        }
     ]
     monkeypatch.setattr(
-        mod, "calculate_payroll_review", lambda name=None: (_ for _ in ()).throw(AssertionError("must not recalc"))
+        mod,
+        "calculate_payroll_review",
+        lambda name=None: (_ for _ in ()).throw(AssertionError("must not recalc")),
     )
     res = mod.auto_close_payroll(today=stub.today)
     assert res["results"][0]["action"] == "exists"

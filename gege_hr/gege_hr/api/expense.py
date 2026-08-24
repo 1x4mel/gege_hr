@@ -6,6 +6,7 @@ claims; an HR/Manager lists all + approves/rejects. Mirrors the request pattern 
 ``api/overtime.py`` / ``api/leave.py`` (resolve → assert-own → server-side list →
 submit/approve/reject). Pure helpers are split out for unit testing.
 """
+
 from __future__ import annotations
 
 import frappe
@@ -61,7 +62,7 @@ def _assert_own(employee: str) -> None:
 def normalize_expenses(expenses) -> list:
     """Coerce the FE ``expenses`` child payload into Expense Claim Detail rows."""
     out = []
-    for e in (expenses or []):
+    for e in expenses or []:
         amount = _num(e.get("amount") if isinstance(e, dict) else getattr(e, "amount", None))
         if amount <= 0:
             continue
@@ -71,7 +72,10 @@ def normalize_expenses(expenses) -> list:
                 "expense_type": etype,
                 "amount": amount,
                 "sanction_amount": amount,
-                "description": (e.get("description") if isinstance(e, dict) else getattr(e, "description", "")) or "",
+                "description": (
+                    e.get("description") if isinstance(e, dict) else getattr(e, "description", "")
+                )
+                or "",
             }
         )
     return out

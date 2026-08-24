@@ -380,9 +380,7 @@ def test_update_existing_in_updates_time_and_recalcs(admin_module):
 
     stub.db.exists = exists_with_checkin
 
-    res = admin.admin_custom_checkin(
-        "HR-EMP-1", in_id="CHK-IN-1", time_in="2026-08-12 09:00"
-    )
+    res = admin.admin_custom_checkin("HR-EMP-1", in_id="CHK-IN-1", time_in="2026-08-12 09:00")
     assert res["status"] == "ok"
     assert stub._set_values[0][:3] == ("Employee Checkin", "CHK-IN-1", "time")
     assert stub._set_values[0][3] == "2026-08-12 09:00:00"  # PHASE-1: wall

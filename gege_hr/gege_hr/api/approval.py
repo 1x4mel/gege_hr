@@ -24,9 +24,7 @@ import frappe
 from frappe import _
 
 from gege_hr.gege_hr.api import audit as audit_api
-from gege_hr.gege_hr.utils import approval as rules
-from gege_hr.gege_hr.utils import employee as emp_utils
-from gege_hr.gege_hr.utils import notify
+from gege_hr.gege_hr.utils import approval as rules, employee as emp_utils, notify
 
 
 # --------------------------------------------------------------------------- #
@@ -519,9 +517,7 @@ def _after_correction_state_change(doc, *, from_state, to_state) -> None:
                     new_log_name,
                     update_modified=False,
                 )
-                frappe.delete_doc(
-                    "Employee Checkin", miss.auto_checkout, ignore_permissions=True
-                )
+                frappe.delete_doc("Employee Checkin", miss.auto_checkout, ignore_permissions=True)
             if miss.shift_instance:
                 frappe.db.set_value(
                     "VN Attendance Work Session",
@@ -567,8 +563,7 @@ def _after_correction_state_change(doc, *, from_state, to_state) -> None:
         try:
             frappe.log_error(
                 title="checkout_miss correction sync failed",
-                message=f"{doc.get('name')} {from_state}->{to_state}\n"
-                + frappe.get_traceback(),
+                message=f"{doc.get('name')} {from_state}->{to_state}\n" + frappe.get_traceback(),
             )
         except Exception:
             pass
@@ -666,9 +661,7 @@ def _delegate_leave_cancellation(
     target_state = "Approved" if approved else "Rejected"
 
     try:
-        current = (
-            frappe.db.get_value("VN Leave Cancellation Request", name, "workflow_state") or ""
-        )
+        current = frappe.db.get_value("VN Leave Cancellation Request", name, "workflow_state") or ""
     except Exception:
         current = ""
     if current == target_state:

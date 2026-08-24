@@ -39,6 +39,7 @@ def log(day: str, hhmm: str, lt: str) -> dict:
 
 # ── parse_log_dt ────────────────────────────────────────────────────────────
 
+
 def test_parse_naive_sql_string():
     assert parse_log_dt("2026-09-01 00:30:00") == datetime(2026, 9, 1, 0, 30)
 
@@ -56,6 +57,7 @@ def test_parse_none_and_garbage():
 
 
 # ── R1: overnight-aware parity (decide_log_type) ────────────────────────────
+
 
 def test_p01_empty_today_and_yesterday_in():
     assert decide_log_type([]) == "IN"
@@ -124,6 +126,7 @@ def test_p13_localized_clock_in_token():
 
 # ── R2: duplicate-intent guard (is_duplicate_intent) ─────────────────────────
 
+
 def test_d01_retab_seconds_after_persisted_log_is_duplicate():
     last = "2026-09-01 08:00:00"
     assert is_duplicate_intent(last, datetime(2026, 9, 1, 8, 0, 10)) is True
@@ -153,6 +156,7 @@ def test_d05_missing_values_never_duplicate():
 
 
 # ── orphan-OUT detectors (self-heal warning path) ────────────────────────────
+
 
 def test_s01_has_out_only_flags_orphan_out_day():
     assert has_out_only([log(T, "20:00", "OUT")]) is True

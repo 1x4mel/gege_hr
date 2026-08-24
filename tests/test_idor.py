@@ -400,9 +400,7 @@ def test_my_handovers_always_self_scoped(idor):
     # DNA §6.6 B: list-filter form (a dict can't hold a date range on one
     # field) — the scoping clause must still pin to_employee to the caller.
     assert ["to_employee", "=", "SELF"] in filters
-    assert not any(
-        c[0] == "to_employee" and c[2] != "SELF" for c in filters if len(c) == 3
-    )
+    assert not any(c[0] == "to_employee" and c[2] != "SELF" for c in filters if len(c) == 3)
     assert len(out) == len(idor.harness.list_rows)  # passthrough — DB applies filter
 
 

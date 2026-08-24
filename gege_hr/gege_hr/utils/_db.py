@@ -23,8 +23,7 @@ def guarded_update(sql: str, params: dict | None = None) -> int:
     Use for claim/CAS transitions::
 
         if guarded_update(
-            "UPDATE `tabX` SET status = 'Claimed'"
-            " WHERE name = %(name)s AND status = 'Draft'",
+            "UPDATE `tabX` SET status = 'Claimed' WHERE name = %(name)s AND status = 'Draft'",
             {"name": name},
         ):
             ...  # we won the claim

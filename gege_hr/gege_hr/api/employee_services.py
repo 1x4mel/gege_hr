@@ -13,6 +13,7 @@ portal contract maps onto the ``vn_status`` / ``vn_note`` / ``vn_from_date`` /
 ``vn_to_date`` / ``vn_purpose`` / ``vn_total_cost`` custom fields declared in
 ``custom_fields.py``; lists project them back to the legacy SPA keys.
 """
+
 from __future__ import annotations
 
 import frappe
@@ -147,9 +148,20 @@ def _field_options(doctype, fieldname):
     return []
 
 
-def _list(doctype, fields, filters, status, search, page, page_size,
-          extra_filters=None, search_fields=None, status_field="status",
-          projector=None, summary_field=None) -> dict:
+def _list(
+    doctype,
+    fields,
+    filters,
+    status,
+    search,
+    page,
+    page_size,
+    extra_filters=None,
+    search_fields=None,
+    status_field="status",
+    projector=None,
+    summary_field=None,
+) -> dict:
     """DNA §6.6 — server-side list + filter + broad search + pagination.
 
     ``status`` / ``extra_filters`` are AND conditions (list form, keeps multiple
@@ -211,8 +223,16 @@ def _list(doctype, fields, filters, status, search, page, page_size,
 # Grievance
 # --------------------------------------------------------------------------- #
 @frappe.whitelist()
-def my_grievances(employee=None, status=None, grievance_type=None, search=None,
-                 date_from=None, date_to=None, page=1, page_size=20):
+def my_grievances(
+    employee=None,
+    status=None,
+    grievance_type=None,
+    search=None,
+    date_from=None,
+    date_to=None,
+    page=1,
+    page_size=20,
+):
     emp = _resolve(employee)
     _assert_own(emp)
     extra = []
@@ -237,8 +257,9 @@ def my_grievances(employee=None, status=None, grievance_type=None, search=None,
 
 
 @frappe.whitelist()
-def all_grievances(status=None, grievance_type=None, search=None,
-                   date_from=None, date_to=None, page=1, page_size=20):
+def all_grievances(
+    status=None, grievance_type=None, search=None, date_from=None, date_to=None, page=1, page_size=20
+):
     if not _is_manager():
         frappe.throw("Chỉ HR/Manager xem tất cả.")
     extra = []
@@ -363,8 +384,9 @@ def grievance_options() -> dict:
 # Travel Request
 # --------------------------------------------------------------------------- #
 @frappe.whitelist()
-def my_travel_requests(employee=None, status=None, search=None,
-                       date_from=None, date_to=None, page=1, page_size=20):
+def my_travel_requests(
+    employee=None, status=None, search=None, date_from=None, date_to=None, page=1, page_size=20
+):
     emp = _resolve(employee)
     _assert_own(emp)
     extra = []
@@ -388,8 +410,7 @@ def my_travel_requests(employee=None, status=None, search=None,
 
 
 @frappe.whitelist()
-def all_travel_requests(status=None, search=None, date_from=None, date_to=None,
-                        page=1, page_size=20):
+def all_travel_requests(status=None, search=None, date_from=None, date_to=None, page=1, page_size=20):
     if not _is_manager():
         frappe.throw("Chỉ HR/Manager xem tất cả.")
     extra = []

@@ -23,6 +23,7 @@ Design notes (why only ``Attendance`` is created, not ``Employee Checkin``):
     so the SPA's ``formatTime()`` and ``my_logs``' planned-window math render the
     same wall-clock the employee actually worked (no UTC skew).
 """
+
 from __future__ import annotations
 
 import json
@@ -30,7 +31,7 @@ import random
 from datetime import date, datetime, timedelta
 
 import frappe
-from frappe.utils import add_days, getdate
+from frappe.utils import add_days
 
 EMAIL = "nhanvien@gegeteam.xyz"
 COMPANY = "Gege Demo"
@@ -45,8 +46,8 @@ WORK_LON = 106.65
 LAT_JITTER = 0.00018
 LON_JITTER = 0.00018
 
-SHIFT_START_MIN = 8 * 60      # 08:00
-SHIFT_END_MIN = 17 * 60       # 17:00
+SHIFT_START_MIN = 8 * 60  # 08:00
+SHIFT_END_MIN = 17 * 60  # 17:00
 LUNCH_HOURS = 1.0
 
 
@@ -84,10 +85,17 @@ def chk() -> dict:
     emp = frappe.db.get_value("Employee", {"user_id": EMAIL, "status": "Active"})
     out = {
         "employee": emp,
-        "may_attendance": frappe.db.count("Attendance", {"employee": emp, "attendance_date": ["between", [date(2026, 5, 1), date(2026, 5, 31)]]}),
-        "june_attendance": frappe.db.count("Attendance", {"employee": emp, "attendance_date": ["between", [date(2026, 6, 1), date(2026, 6, 30)]]}),
+        "may_attendance": frappe.db.count(
+            "Attendance",
+            {"employee": emp, "attendance_date": ["between", [date(2026, 5, 1), date(2026, 5, 31)]]},
+        ),
+        "june_attendance": frappe.db.count(
+            "Attendance",
+            {"employee": emp, "attendance_date": ["between", [date(2026, 6, 1), date(2026, 6, 30)]]},
+        ),
         "shift_assignments": frappe.db.get_all(
-            "Shift Assignment", {"employee": emp},
+            "Shift Assignment",
+            {"employee": emp},
             ["name", "shift_type", "status", "docstatus", "start_date", "end_date"],
         ),
         "default_work_location": frappe.db.get_value("Employee", emp, "default_work_location"),
@@ -174,9 +182,7 @@ def _purge_period(emp: str, start: date, end: date, stats: dict | None = None) -
     ]:
         if not frappe.db.table_exists(dt) or not frappe.get_meta(dt).has_field(date_field):
             continue
-        rows = frappe.db.get_all(
-            dt, {"employee": emp, date_field: ["between", [start, end]]}, ["name"]
-        )
+        rows = frappe.db.get_all(dt, {"employee": emp, date_field: ["between", [start, end]]}, ["name"])
         for r in rows:
             try:
                 frappe.delete_doc(dt, r.name, ignore_permissions=True)
@@ -389,7 +395,11 @@ def _generate(emp: str) -> dict:
         "by_status": {
             st: frappe.db.count(
                 "Attendance",
-                {"employee": emp, "status": st, "attendance_date": ["between", [date(2026, 5, 1), date(2026, 5, 31)]]},
+                {
+                    "employee": emp,
+                    "status": st,
+                    "attendance_date": ["between", [date(2026, 5, 1), date(2026, 5, 31)]],
+                },
             )
             for st in ["Present", "Absent", "On Leave", "Half Day"]
         },
@@ -457,7 +467,7 @@ def verify() -> dict:
                 }
                 for dd in mine.get("days", [])
             ],
-            key=lambda x: (x["date"] or ""),
+            key=lambda x: x["date"] or "",
         )
     print(json.dumps(out, default=str, ensure_ascii=False, indent=2))
     return out

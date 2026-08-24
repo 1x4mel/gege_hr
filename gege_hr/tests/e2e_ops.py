@@ -12,6 +12,7 @@ Functions:
   cleanup()          — wipe every E2E trace
   run_engine()       — invoke checkout_miss.run_hourly() manually (Group C)
 """
+
 from __future__ import annotations
 
 import json
@@ -101,7 +102,9 @@ def _clean_e2e():
                 d = frappe.get_doc("VN Attendance Correction Request", cr.name)
                 d.flags.ignore_permissions = True
                 d.cancel()
-            frappe.delete_doc("VN Attendance Correction Request", cr.name, force=True, ignore_permissions=True)
+            frappe.delete_doc(
+                "VN Attendance Correction Request", cr.name, force=True, ignore_permissions=True
+            )
         except Exception:
             pass
     frappe.db.commit()
@@ -112,14 +115,12 @@ def _ensure_shift_type(name, start, end):
         # UPDATE on exist — the H2 open-shift window is recomputed around the
         # current wall clock each run, so a stale window from a previous run
         # must not survive (its end + grace would already be in the past).
-        frappe.db.set_value(
-            "Shift Type", name, {"start_time": start, "end_time": end}, update_modified=False
-        )
+        frappe.db.set_value("Shift Type", name, {"start_time": start, "end_time": end}, update_modified=False)
         frappe.db.commit()
         return
-    frappe.get_doc(
-        {"doctype": "Shift Type", "__newname": name, "start_time": start, "end_time": end}
-    ).insert(ignore_permissions=True)
+    frappe.get_doc({"doctype": "Shift Type", "__newname": name, "start_time": start, "end_time": end}).insert(
+        ignore_permissions=True
+    )
     frappe.db.commit()
 
 
@@ -210,8 +211,7 @@ def assert_state(day_offset=0):
         order_by="time asc",
     )
     print(
-        "ASSERT: LOGS_%+d %s"
-        % (day_offset, json.dumps([{"t": str(l.time), "lt": l.log_type} for l in logs]))
+        f"ASSERT: LOGS_{day_offset:+d} {json.dumps([{'t': str(lg.time), 'lt': lg.log_type} for lg in logs])}"
     )
     ws = frappe.db.get_value(
         "VN Attendance Work Session",
@@ -230,13 +230,13 @@ def assert_state(day_offset=0):
         ],
         as_dict=True,
     )
-    print("ASSERT: WS_%+d %s" % (day_offset, json.dumps(ws, default=str) if ws else "null"))
+    print(f"ASSERT: WS_{day_offset:+d} {json.dumps(ws, default=str) if ws else 'null'}")
     tk = frappe.get_all(
         "VN Checkout Miss",
         filters={"employee": EMP, "work_date": d},
         fields=["name", "status", "penalty_amount"],
     )
-    print("ASSERT: TICKETS_%+d %s" % (day_offset, json.dumps(tk, default=str)))
+    print(f"ASSERT: TICKETS_{day_offset:+d} {json.dumps(tk, default=str)}")
 
 
 def run_engine():
@@ -391,9 +391,7 @@ def recalc(from_date=None, to_date=None):
     from gege_hr.gege_hr.api import attendance as att
 
     frappe.set_user("Administrator")
-    res = att.recalculate_period(
-        from_date=from_date or _day_str(-1), to_date=to_date or _day_str(0)
-    )
+    res = att.recalculate_period(from_date=from_date or _day_str(-1), to_date=to_date or _day_str(0))
     print(f"ASSERT: RECALC {json.dumps(res, default=str)[:400]}")
 
 
@@ -475,7 +473,9 @@ def lc_purge_ghosts():
         "Shift Assignment",
         "Employee Checkin",
     ):
-        stats[dt] = _lc_drop(dt, frappe.get_all(dt, filters={"employee": ["in", ghosts or ["-"]]}, pluck="name"))
+        stats[dt] = _lc_drop(
+            dt, frappe.get_all(dt, filters={"employee": ["in", ghosts or ["-"]]}, pluck="name")
+        )
     stats["Employee"] = _lc_drop("Employee", ghosts)
     for dt in ("VN Employee Shift Instance", "Shift Assignment"):
         dangling = [
@@ -545,7 +545,9 @@ def lc_wipe(email=None, emp=None):
                     frappe.delete_doc(doctype, r.name, force=True, ignore_permissions=True)
                 except Exception:
                     pass
-        for r in frappe.get_all("VN Payroll Review Line", filters={"employee": emp}, fields=["name", "parent"]):
+        for r in frappe.get_all(
+            "VN Payroll Review Line", filters={"employee": emp}, fields=["name", "parent"]
+        ):
             try:
                 frappe.delete_doc("VN Payroll Review Line", r.name, force=True, ignore_permissions=True)
             except Exception:
@@ -651,8 +653,10 @@ def lc_wipe_payroll_period(month, year, from_date=None, to_date=None):
         or_filters=slip_filters,
         fields=["name", "docstatus", "start_date", "end_date"],
     ):
-        if from_date and to_date and not (
-            str(s.start_date) == str(from_date) and str(s.end_date) == str(to_date)
+        if (
+            from_date
+            and to_date
+            and not (str(s.start_date) == str(from_date) and str(s.end_date) == str(to_date))
         ):
             continue  # period-linked but a different window — leave it
         try:
@@ -890,7 +894,9 @@ def lc_payroll_finalize(period, emp=None):
         fields=["name", "status"],
     ):
         if (ln.status or "") not in ("Confirmed", "Approved"):
-            frappe.db.set_value("VN Payroll Review Line", ln.name, "status", "Confirmed", update_modified=False)
+            frappe.db.set_value(
+                "VN Payroll Review Line", ln.name, "status", "Confirmed", update_modified=False
+            )
     frappe.db.commit()
     out["approve"] = pay_api.approve_review(name=period)
     frappe.db.commit()

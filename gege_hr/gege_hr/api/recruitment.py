@@ -5,6 +5,7 @@ Reuses Frappe HR's ``Job Opening`` / ``Job Applicant`` / ``Training Event`` /
 openings, apply as an applicant; list training events + enroll. HR lists all
 applicants + trainings. Mirrors ``api/expense.py``.
 """
+
 from __future__ import annotations
 
 import frappe
@@ -50,12 +51,22 @@ def _list(doctype, fields, filters, status, search, page, page_size, search_fiel
     try:
         rows = (
             frappe.get_all(
-                doctype, filters=flt or None, or_filters=or_filters, fields=fields,
-                order_by="creation desc", limit_start=(page - 1) * page_size, limit_page_length=page_size,
+                doctype,
+                filters=flt or None,
+                or_filters=or_filters,
+                fields=fields,
+                order_by="creation desc",
+                limit_start=(page - 1) * page_size,
+                limit_page_length=page_size,
             )
             or []
         )
-        total = len(frappe.get_all(doctype, filters=flt or None, or_filters=or_filters, fields=["name"], limit_page_length=0) or [])
+        total = len(
+            frappe.get_all(
+                doctype, filters=flt or None, or_filters=or_filters, fields=["name"], limit_page_length=0
+            )
+            or []
+        )
     except Exception:
         frappe.log_error(title=f"recruitment.list {doctype} failed")
         rows, total = [], 0
@@ -71,7 +82,9 @@ def list_job_openings(status=None, search=None, page=1, page_size=20):
 
 
 @frappe.whitelist()
-def submit_job_application(job_opening=None, applicant_name=None, email_id=None, phone_number=None, cover_letter=None):
+def submit_job_application(
+    job_opening=None, applicant_name=None, email_id=None, phone_number=None, cover_letter=None
+):
     if not (applicant_name or "").strip() or not (email_id or "").strip():
         frappe.throw("Cần tên + email ứng viên.")
     opening_designation = None
@@ -92,7 +105,9 @@ def submit_job_application(job_opening=None, applicant_name=None, email_id=None,
 def all_applicants(status=None, search=None, page=1, page_size=20):
     if not _is_manager():
         frappe.throw("Chỉ HR/Manager xem ứng viên.")
-    return _list(APPLICANT_DOCTYPE, _APPLICANT_FIELDS, None, status, search, page, page_size, _APPLICANT_SEARCH)
+    return _list(
+        APPLICANT_DOCTYPE, _APPLICANT_FIELDS, None, status, search, page, page_size, _APPLICANT_SEARCH
+    )
 
 
 # ── Training ─────────────────────────────────────────────────────────────────
@@ -130,14 +145,31 @@ def my_training(employee=None, status=None, page=1, page_size=20):
         own = frappe.db.get_value("Employee", {"user_id": frappe.session.user})
         if employee != own:
             frappe.throw("Chỉ xem được đào tạo của chính mình.")
-    return _list(EMP_TRAINING_DOCTYPE, _EMP_TRAINING_FIELDS, [["employee", "=", employee]], status, None, page, page_size)
+    return _list(
+        EMP_TRAINING_DOCTYPE,
+        _EMP_TRAINING_FIELDS,
+        [["employee", "=", employee]],
+        status,
+        None,
+        page,
+        page_size,
+    )
 
 
 @frappe.whitelist()
 def all_training(status=None, search=None, page=1, page_size=20):
     if not _is_manager():
         frappe.throw("Chỉ HR/Manager xem tất cả đào tạo.")
-    return _list(EMP_TRAINING_DOCTYPE, _EMP_TRAINING_FIELDS, None, status, search, page, page_size, _EMP_TRAINING_SEARCH)
+    return _list(
+        EMP_TRAINING_DOCTYPE,
+        _EMP_TRAINING_FIELDS,
+        None,
+        status,
+        search,
+        page,
+        page_size,
+        _EMP_TRAINING_SEARCH,
+    )
 
 
 @frappe.whitelist()
@@ -145,6 +177,7 @@ def recruitment_filter_options() -> dict:
     """Distinct status values per recruitment DocType — feeds the gear popover
     SearchableSelect (DNA §6.3) so no dropdown is ever empty.
     """
+
     def _distinct(doctype, field):
         try:
             rows = frappe.get_all(doctype, fields=[field])

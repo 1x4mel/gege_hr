@@ -115,7 +115,7 @@ def api(monkeypatch):
         frappe_mod.log_error = lambda *a, **k: None
         frappe_mod.throw = lambda msg, exc=None: (_ for _ in ()).throw(FrappeError(msg))
         frappe_mod._ = lambda s: s
-        frappe_mod.whitelist = lambda *a, **k: (a[0] if a and callable(a[0]) else (lambda f: f))
+        frappe_mod.whitelist = lambda *a, **k: a[0] if a and callable(a[0]) else (lambda f: f)
         frappe_mod.get_traceback = lambda: "tb"
         frappe_mod.utils = types.SimpleNamespace(getdate=lambda v=None: v)
         monkeypatch.setitem(sys.modules, "frappe", frappe_mod)

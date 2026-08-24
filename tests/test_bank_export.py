@@ -22,7 +22,13 @@ def bank_export():
 def _rows():
     return [
         {"employee": "E1", "employee_name": "An", "account_no": "0123", "bank_name": "VCB", "amount": 1000},
-        {"employee": "E2", "employee_name": "Binh", "account_no": "0456", "bank_name": "TCB", "amount": 2500.5},
+        {
+            "employee": "E2",
+            "employee_name": "Binh",
+            "account_no": "0456",
+            "bank_name": "TCB",
+            "amount": 2500.5,
+        },
     ]
 
 
