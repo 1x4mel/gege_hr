@@ -24,6 +24,16 @@ ruff format --check <file1> <file2> ...
 - **KHÔNG** chạy `ruff format .` toàn repo trong PR tính năng — chỉ format file trong scope (tránh diff hàng chục file làm loãng review).
 - Sửa `setup.py` / seed / hooks → chạy thêm smoke: `bench --site <site> execute gege_hr.hooks.create_seed_data` (phải idempotent, không raise).
 
+## Branch model & PR (bắt buộc)
+
+`feat/*|fix/*|chore/* → PR vào develop → CI XANH → merge`. Hotfix prod: `hotfix/*` cắt từ `main`, PR vào `main` rồi back-merge develop.
+
+- **KHÔNG push thẳng vào develop/main** — mọi thay đổi (kể cả của AI agent) phải qua nhánh riêng + PR. (Bài học 2026-08-24: 4 commit push thẳng develop dù AGENTS.md đã có quy tắc.)
+- CI (`.github/workflows/ci.yml`) chạy đủ 3 gate: `ruff check .` → `ruff format --check .` → `pytest -q`. **Chỉ merge khi CI xanh.**
+- Không có `gh` CLI trên máy: push nhánh rồi mở link compare để tạo PR:
+  `https://github.com/1x4mel/gege_hr/compare/develop...<tên-nhánh>?expand=1`
+- 1 PR = 1 cụm task liên quan; commit nhỏ, conventional.
+
 ## Trạng thái baseline (2026-08-24: ĐÃ DỌN XONG)
 
 `ruff check .` = **0 lỗi** • `ruff format --check .` = **227/227 file đạt chuẩn** • `pytest` = **992 passed**. Gate giờ áp dụng được cho TOÀN repo (không chỉ file sửa): chạy `ruff check . && ruff format --check .` trước mọi push. Đợt dọn đã sửa 2 bug thật: `SLIP_DOCTYPE` NameError trong `api/payroll.py` và filter `"time"` bị ghi đè (mất cận dưới khoảng truy vấn) trong `utils/calc.py`.
