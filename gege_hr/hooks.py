@@ -185,9 +185,7 @@ def normalize_advance_repayment_plans():
             fields=["name", "repayment_plan"],
         )
         stale = [
-            r["name"]
-            for r in (rows or [])
-            if (r.get("repayment_plan") or "") != REPAYMENT_PLAN_NEXT_MONTH
+            r["name"] for r in (rows or []) if (r.get("repayment_plan") or "") != REPAYMENT_PLAN_NEXT_MONTH
         ]
         for name in stale:
             frappe.db.set_value(

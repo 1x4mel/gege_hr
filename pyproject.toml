@@ -34,8 +34,10 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Package markers are intentionally empty.
 "__init__.py" = ["F401", "F403"]
-# Tests: allow unused fixtures / star imports / longer locals.
-"tests/*" = ["F401", "F811", "E402"]
+# Tests: allow unused fixtures / star imports / longer locals, blind
+# pytest.raises(Exception) asserts, short loop vars and unused locals —
+# common pytest idioms, not worth churn in legacy suites.
+"tests/*" = ["F401", "F811", "E402", "B017", "E741", "F841"]
 # hooks.py legitimately sets app_* config before imports (Frappe convention).
 "hooks.py" = ["E402"]
 
