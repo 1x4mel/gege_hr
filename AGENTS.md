@@ -26,7 +26,7 @@ pytest tests/ -k <module> -q
 
 ## Nợ kỹ thuật (baseline 2026-08-24)
 
-Khi áp gate, toàn repo còn **~78 lỗi check + 74 file lệch format** (lịch sử trước gate). Nguyên tắc dọn dần:
+Khi áp gate, toàn repo còn **32 lỗi check + 73 file lệch format** (baseline gốc 78/74 trước khi tune ignores cho tests). Nguyên tắc dọn dần:
 
 - Mỗi PR `chore/ruff-<nhóm-file>` xử lý một nhóm file nhỏ, giữ nguyên semantics.
 - Ưu tiên `--fix` an toàn trước (F401 unused imports, I001 isort, UP032 f-string), phần còn lại sửa tay + kèm test.
