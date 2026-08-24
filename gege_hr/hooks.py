@@ -356,6 +356,10 @@ boot_session = "gege_hr.gege_hr.api.auth.get_boot_data"
 # --------------------------------------------------------------------------- #
 after_migrate = [
     "gege_hr.hooks.sync_custom_fields",
+    # Self-heal: re-run the seed (idempotent — fills gaps only) so a site whose
+    # after_install was interrupted still gets Company/policy/matrices on the
+    # next `bench migrate`.
+    "gege_hr.hooks.create_seed_data",
     "gege_hr.hooks.seed_advance_deduction_component",
     "gege_hr.hooks.normalize_advance_repayment_plans",
     "gege_hr.gege_hr.api.setup_permissions.grant_hr_permissions",

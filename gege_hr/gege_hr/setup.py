@@ -40,6 +40,9 @@ import frappe
 # --------------------------------------------------------------------------- #
 DEFAULT_POLICY_NAME = "Default Attendance Policy"
 DEFAULT_COMPANY_FALLBACK = "Gege"
+# Bootstrap company for fresh headless deploys (no ERPNext setup wizard run).
+DEFAULT_COMPANY_NAME = "GeGe Vietnam"
+DEFAULT_COMPANY_ABBR = "GG"
 
 _MATRIX_NAMES = {
     "Leave Application": "Default Leave Approval Matrix",
@@ -100,6 +103,66 @@ def _table_ready(doctype: str) -> bool:
         return bool(frappe.db.table_exists(doctype))
     except Exception:
         return False
+
+
+def _ensure_warehouse_type() -> None:
+    """Create the ``Transit`` Warehouse Type when ERPNext's install-time
+    defaults are missing (e.g. an interrupted ``bench install-app erpnext``).
+
+    Company creation builds default warehouses referencing this type; on a
+    healthy ERPNext install it already exists, making this a no-op.
+    """
+    if not _table_ready("Warehouse Type"):
+        return
+    if not _exists("Warehouse Type", "Transit"):
+        try:
+            frappe.get_doc(
+                {
+                    "doctype": "Warehouse Type",
+                    "warehouse_type": "Transit",
+                    "__newname": "Transit",
+                }
+            ).insert(ignore_permissions=True)
+            frappe.db.commit()
+        except Exception:
+            frappe.log_error("gege_hr seed: failed to create Warehouse Type 'Transit'")
+
+
+def _seed_company() -> None:
+    """Create the default Company when none exists (fresh headless deploy).
+
+    ERPNext's setup wizard normally creates the first Company; on a fresh
+    server deployed via scripts the wizard never runs and every company-scoped
+    seed would silently degrade. Idempotent — never touches existing Companies.
+    """
+    if not _table_ready("Company"):
+        return
+    existing = None
+    try:
+        existing = frappe.get_all("Company", filters={"disabled": 0}, pluck="name", limit=1)
+    except Exception:
+        try:
+            existing = frappe.get_all("Company", pluck="name", limit=1)
+        except Exception:
+            return
+    if existing:
+        return
+
+    _ensure_warehouse_type()
+    try:
+        frappe.get_doc(
+            {
+                "doctype": "Company",
+                "company_name": DEFAULT_COMPANY_NAME,
+                "abbr": DEFAULT_COMPANY_ABBR,
+                "country": "Vietnam",
+                "default_currency": "VND",
+                "chart_of_accounts": "Standard",
+            }
+        ).insert(ignore_permissions=True)
+        frappe.db.commit()
+    except Exception:
+        frappe.log_error("gege_hr seed: failed to create default Company")
 
 
 # --------------------------------------------------------------------------- #
@@ -338,6 +401,13 @@ def create_seed_data() -> dict:
     or manually via ``bench execute``. Returns a small summary dict.
     """
     created = []
+
+    # Fresh headless deploys: bootstrap the first Company (idempotent) so the
+    # company-scoped seeds below wire to a real company, not the sentinel.
+    try:
+        _seed_company()
+    except Exception:
+        frappe.log_error("gege_hr seed: company bootstrap failed")
 
     try:
         company = _default_company()
