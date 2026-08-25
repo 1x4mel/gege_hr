@@ -38,6 +38,10 @@ ruff format --check <file1> <file2> ...
 
 `ruff check .` = **0 lỗi** • `ruff format --check .` = **227/227 file đạt chuẩn** • `pytest` = **992 passed**. Gate giờ áp dụng được cho TOÀN repo (không chỉ file sửa): chạy `ruff check . && ruff format --check .` trước mọi push. Đợt dọn đã sửa 2 bug thật: `SLIP_DOCTYPE` NameError trong `api/payroll.py` và filter `"time"` bị ghi đè (mất cận dưới khoảng truy vấn) trong `utils/calc.py`.
 
+## Runbook hạ tầng (infra)
+
+- Gán domain Cloudflare / expose máy nội bộ ra Internet: làm theo `docs/deploy-cloudflare-tunnel.md` (runbook từ lần deploy thành công 2026-08-24 — cloudflared 2026.8.2, tunnel 9637e533, verify từng bước). KHÔNG ghi token tunnel (`eyJ...`) vào repo/log.
+
 ## Quy ước code
 
 - Python ≥3.10, line-length 110, ngoặc kép đôi (ruff format, black-compatible).
