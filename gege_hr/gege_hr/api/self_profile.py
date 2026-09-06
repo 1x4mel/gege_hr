@@ -890,23 +890,34 @@ def my_salary_summary() -> dict:
 
 
 @frappe.whitelist()
+def _is_valid_timezone(tz: str) -> bool:
+    """Bench validates via pytz (a Frappe dependency); bench-free CI runs
+    (no pytz installed) fall back to the stdlib zoneinfo database."""
+    try:
+        import pytz
+
+        pytz.timezone(tz)
+        return True
+    except ImportError:
+        try:
+            from zoneinfo import ZoneInfo
+
+            ZoneInfo(tz)
+            return True
+        except Exception:
+            return False
+    except Exception:
+        return False
+
+
 def update_my_preferences(language: str | None = None, time_zone: str | None = None) -> dict:
     """Set MY User.language / User.time_zone (PF-17). Non-employees too (G14)."""
     user = _current_user()
     tz = _norm(time_zone)
     lang = _norm(language)
 
-    if tz:
-        tz_ok = False
-        try:
-            import pytz
-
-            pytz.timezone(tz)
-            tz_ok = True
-        except Exception:
-            tz_ok = False
-        if not tz_ok:
-            frappe.throw(_("Múi giờ không hợp lệ."))
+    if tz and not _is_valid_timezone(tz):
+        frappe.throw(_("Múi giờ không hợp lệ."))
 
     if lang:
         try:
