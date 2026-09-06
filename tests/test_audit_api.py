@@ -37,6 +37,9 @@ def _build_stub_frappe():
     mod.db = None
     mod.get_doc = None
     mod.log_error = lambda *a, **k: None
+    # audit_events gate + realtime publish (swapped per-test in `fake`).
+    mod.get_roles = lambda user: ("HR Manager",)
+    mod.publish_realtime = lambda *a, **k: None
 
     class _S:
         pass
@@ -65,9 +68,17 @@ class _FakeDoc:
 class _FakeDB:
     def __init__(self):
         self.table_exists_flag = True
+        self.rows = []  # audit-shaped dicts returned by get_all
+        self.get_all_calls = []
 
     def table_exists(self, doctype):
         return self.table_exists_flag
+
+    def get_all(self, doctype, filters=None, or_filters=None, fields=None, **kw):
+        self.get_all_calls.append(
+            {"doctype": doctype, "filters": filters, "or_filters": or_filters, "kw": kw}
+        )
+        return list(self.rows)
 
 
 class _FakeFrappe:
@@ -99,6 +110,14 @@ def fake(monkeypatch):
     monkeypatch.setattr(stub, "db", harness.db)
     monkeypatch.setattr(stub, "get_doc", harness.get_doc)
     monkeypatch.setattr(stub, "log_error", harness.log_error)
+
+    # Realtime publish spy (plan audit-center B4 / RT1-RT2).
+    harness.published = []
+    monkeypatch.setattr(
+        stub,
+        "publish_realtime",
+        lambda event, payload=None: harness.published.append((event, payload)),
+    )
 
     harness.api = api_audit
     harness.stub = stub
@@ -222,3 +241,98 @@ def test_record_returns_none_when_company_missing(fake):
     name = fake.api.record(audit_type="Manual Override", company="")
     assert name is None
     assert fake.docs_created == []
+
+
+# --------------------------------------------------------------------------- #
+# audit_events — actor/reference filters + whitelisted sort (plan B1, prefix AX)
+# --------------------------------------------------------------------------- #
+def _ev_row(n=1, **kw):
+    base = {
+        "name": f"AE-{n}",
+        "audit_type": "Leave Submit",
+        "company": "Gege Co",
+        "employee": "HR-EMP-0001",
+        "work_date": "2026-08-18",
+        "actor": "hr@example.com",
+        "actor_ip": None,
+        "reference_doctype": "Leave Application",
+        "reference_name": "HR-LAP-0001",
+        "description": "status → Open",
+        "old_value": None,
+        "new_value": None,
+        "created_at": "2026-08-18 08:00:00",
+        "owner": "hr@example.com",
+    }
+    base.update(kw)
+    return base
+
+
+# AX1 — a whitelisted (field, dir) pair reaches the page query's order_by
+def test_ax1_order_by_whitelisted(fake):
+    fake.db.rows = [_ev_row()]
+    res = fake.api.audit_events(order_by="actor", order_dir="asc", page_size=20)
+    page_calls = [c for c in fake.db.get_all_calls if "limit_start" in c["kw"]]
+    assert page_calls, "paginated branch must issue a page query"
+    assert page_calls[0]["kw"]["order_by"] == "actor asc, name desc"
+    assert res["data"] and res["data"][0]["audit_type"] == "Leave Submit"
+
+
+# AX2 — a hostile/unknown order_by falls back to the default clause
+def test_ax2_order_by_hostile_falls_back(fake):
+    fake.db.rows = [_ev_row()]
+    fake.api.audit_events(order_by="evil; drop table", order_dir="sideways", page_size=20)
+    page_calls = [c for c in fake.db.get_all_calls if "limit_start" in c["kw"]]
+    assert page_calls[0]["kw"]["order_by"] == "created_at desc, name desc"
+
+
+# AX3 — actor + reference filters reach the DB filters
+def test_ax3_actor_reference_filters_applied(fake):
+    fake.db.rows = [_ev_row()]
+    fake.api.audit_events(
+        actor="hr@example.com",
+        reference_doctype="Leave Application",
+        reference_name="HR-LAP-0001",
+        page_size=20,
+    )
+    page_calls = [c for c in fake.db.get_all_calls if "limit_start" in c["kw"]]
+    f = page_calls[0]["filters"]
+    assert f["actor"] == "hr@example.com"
+    assert f["reference_doctype"] == "Leave Application"
+    assert f["reference_name"] == "HR-LAP-0001"
+
+
+# AX4 — legacy call (no new params) keeps the bare-list shape + default order
+def test_ax4_legacy_call_unchanged(fake):
+    fake.db.rows = [_ev_row()]
+    res = fake.api.audit_events()
+    assert isinstance(res, list) and len(res) == 1
+    legacy_calls = [
+        c for c in fake.db.get_all_calls if c["kw"].get("limit_page_length") == 200
+    ]
+    assert legacy_calls[0]["kw"]["order_by"] == "created_at desc, name desc"
+
+
+# --------------------------------------------------------------------------- #
+# record() — realtime publish (plan B4, prefix RT)
+# --------------------------------------------------------------------------- #
+def test_rt1_record_publishes_audit_event_created(fake):
+    name = fake.api.record(audit_type="Manual Override", company="Gege Co")
+    assert name == "AUD-0001"
+    assert len(fake.published) == 1
+    event, payload = fake.published[0]
+    assert event == "audit_event_created"
+    assert payload["name"] == "AUD-0001"
+    assert payload["audit_type"] == "Manual Override"
+    assert payload["company"] == "Gege Co"
+    assert payload["actor"] == "hr.demo@gege.demo"
+
+
+def test_rt2_failed_insert_does_not_publish(fake, monkeypatch):
+    def boom(payload):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(fake.stub, "get_doc", boom)
+    name = fake.api.record(audit_type="Manual Override", company="Gege Co")
+    assert name is None
+    assert fake.published == []
+    assert fake.last_error is not None

@@ -50,6 +50,9 @@ _TRANSACTION_TO_TYPE = {
     "Overtime Request": "OT",
     "Correction Request": "Correction",
     "Salary Advance Request": "Advance",
+    # services-deskfree P1c — inbox decisions trên 2 doctype này.
+    "Employee Grievance": "Alert",
+    "Travel Request": "Alert",
 }
 
 # Terminal/progress outcomes → (title template, message template).
@@ -66,6 +69,12 @@ _OUTCOME_TEMPLATES = {
     "submitted": (
         "{label} đang chờ duyệt",
         "Yêu cầu {label} của bạn đã gửi và đang chờ phê duyệt.",
+    ),
+    # Desk-free Phase B1 (plans/approvals-deskfree-complete §3.4) — approver
+    # bounced the request back to Draft for the employee to fix + resend.
+    "returned": (
+        "{label} bị trả lại để sửa",
+        "Yêu cầu {label} của bạn bị trả lại để chỉnh sửa rồi gửi lại.",
     ),
 }
 

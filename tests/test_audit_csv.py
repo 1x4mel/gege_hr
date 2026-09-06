@@ -27,6 +27,9 @@ class StubFrappe:
         self.rows = rows if rows is not None else []
         self.get_all_calls = []
         self.response = types.SimpleNamespace()
+        self.docs_created = []
+        self.published = []
+        self.last_error = None
 
         outer = self
 
@@ -49,6 +52,24 @@ class StubFrappe:
     def get_all(self, doctype, filters=None, or_filters=None, fields=None, **kw):
         self.get_all_calls.append({"doctype": doctype, "filters": filters, "kw": kw})
         return list(self.rows)
+
+    # Export now stamps an audit row (plan audit-center B5 / AU5-AU6): the
+    # stamp goes through record() → get_doc + publish_realtime + log_error.
+    def get_doc(self, payload):
+        doc = types.SimpleNamespace(
+            name=f"AE-STAMP-{len(self.docs_created) + 1}",
+            payload=payload,
+            inserted=False,
+        )
+        doc.insert = lambda ignore_permissions=False: setattr(doc, "inserted", True) or doc
+        self.docs_created.append(payload)
+        return doc
+
+    def publish_realtime(self, event, payload=None):
+        self.published.append((event, payload))
+
+    def log_error(self, title=None, message=None):
+        self.last_error = title
 
 
 def _row(n=1, **kw):
@@ -85,6 +106,9 @@ def audit_mod(monkeypatch):
         frappe_mod.response = stub.response
         frappe_mod.session = types.SimpleNamespace(user="hr@example.com")
         frappe_mod.PermissionError = FrappeError
+        frappe_mod.get_doc = stub.get_doc
+        frappe_mod.publish_realtime = stub.publish_realtime
+        frappe_mod.log_error = stub.log_error
 
         utils = types.ModuleType("frappe.utils")
         utils.getdate = lambda v=None: __import__("datetime").date(2026, 8, 18)
@@ -142,3 +166,31 @@ def test_download_mode_sets_file_response(audit_mod):
     assert res["rows"] == 1
     assert frappe_mod.response.type == "binary"
     assert frappe_mod.response.filecontent.startswith(b"\xef\xbb\xbf")
+
+
+# AU5 — the export itself stamps a Manual Override audit row (B5)
+def test_au5_export_stamps_audit_row(audit_mod):
+    mod, stub = audit_mod(rows=[_row()])
+    res = mod.export_audit_csv(employee="HR-EMP-001")
+    assert res["rows"] == 1
+    assert len(stub.docs_created) == 1
+    payload = stub.docs_created[0]
+    assert payload["audit_type"] == "Manual Override"
+    assert "Xuất CSV" in payload["description"]
+    assert "1 dòng" in payload["description"]
+    # company fell back to the first exported row's company
+    assert payload["company"] == "GeGe Esport"
+    # the stamp carries the applied filters + row count (JSON-serialised)
+    new_value = str(payload.get("new_value"))
+    assert "rows" in new_value and "HR-EMP-001" in new_value
+    # stamp minted through record() → realtime ping fired too
+    assert stub.published and stub.published[0][0] == "audit_event_created"
+
+
+# AU6 — no rows + no company filter → nothing to attribute, no stamp
+def test_au6_export_empty_no_stamp(audit_mod):
+    mod, stub = audit_mod(rows=[])
+    res = mod.export_audit_csv()
+    assert res["rows"] == 0
+    assert stub.docs_created == []
+    assert stub.published == []

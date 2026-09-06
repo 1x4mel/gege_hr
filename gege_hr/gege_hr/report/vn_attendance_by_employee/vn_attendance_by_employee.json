@@ -1,0 +1,58 @@
+{
+ "add_total_row": 1,
+ "columns": [],
+ "creation": "2026-08-29 11:00:00.000000",
+ "disabled": 0,
+ "docstatus": 0,
+ "doctype": "Report",
+ "filters": [
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1
+  },
+  {
+   "fieldname": "period_month",
+   "fieldtype": "Select",
+   "label": "Tháng",
+   "options": "\n01\n02\n03\n04\n05\n06\n07\n08\n09\n10\n11\n12",
+   "reqd": 1
+  },
+  {
+   "fieldname": "period_year",
+   "fieldtype": "Int",
+   "label": "Năm",
+   "reqd": 1
+  },
+  {
+   "fieldname": "search",
+   "fieldtype": "Data",
+   "label": "Tìm kiếm"
+  }
+ ],
+ "idx": 0,
+ "is_standard": "Yes",
+ "letterhead": null,
+ "modified": "2026-08-29 11:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Gege HR",
+ "name": "VN Attendance by Employee",
+ "owner": "Administrator",
+ "prepared_report": 0,
+ "ref_doctype": "VN Monthly Attendance Period",
+ "report_name": "VN Attendance by Employee",
+ "report_type": "Script Report",
+ "roles": [
+  {
+   "role": "System Manager"
+  },
+  {
+   "role": "HR Manager"
+  },
+  {
+   "role": "HR User"
+  }
+ ]
+}

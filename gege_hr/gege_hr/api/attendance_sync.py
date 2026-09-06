@@ -211,10 +211,17 @@ def on_work_session_update(doc, method: str | None = None) -> None:
 
 
 @frappe.whitelist()
-def backfill_attendance(from_date: str | None = None, to_date: str | None = None) -> dict:
+def backfill_attendance(
+    from_date: str | None = None,
+    to_date: str | None = None,
+    employee: str | None = None,
+) -> dict:
     """Regenerate ``Attendance`` for every Work Session in a date window.
 
     HR Manager / System Manager only. Safe to re-run (idempotent per row).
+    ``employee`` (optional, plan deskfree-attendance-admin E6) narrows the
+    backfill to one employee — the SPA admin drawer generates for the row's
+    employee while the header button generates for the whole filtered window.
     """
     frappe.only_for(["HR Manager", "System Manager"])
     range_filters: list = []
@@ -222,6 +229,8 @@ def backfill_attendance(from_date: str | None = None, to_date: str | None = None
         range_filters.append(["work_date", ">=", from_date])
     if to_date:
         range_filters.append(["work_date", "<=", to_date])
+    if employee:
+        range_filters.append(["employee", "=", employee])
 
     try:
         names = (

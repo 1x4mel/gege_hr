@@ -148,6 +148,9 @@ class _FakeDB:
                     elif isinstance(v, list) and len(v) == 2 and v[0] == "not in":
                         if r.get(k) in v[1]:
                             return False
+                    elif isinstance(v, list) and len(v) == 2 and v[0] == "<=":
+                        if not (r.get(k) or 0) <= v[1]:
+                            return False
                     elif r.get(k) != v:
                         return False
                 return True
@@ -158,6 +161,14 @@ class _FakeDB:
         if fields:
             return [_DotDict({f: r.get(f) for f in fields}) if isinstance(r, dict) else r for r in base]
         return [_DotDict(r) if isinstance(r, dict) else r for r in base]
+
+    def delete(self, doctype, filters=None, **kw):
+        """Fake frappe.db.delete — remove matching rows (used by delete_employee)."""
+
+        def _match(r):
+            return all(r.get(k) == v for k, v in (filters or {}).items())
+
+        self.rows[doctype] = [r for r in self.rows.get(doctype, []) if not _match(r)]
 
     def get_value(self, doctype, name, fields=None, as_dict=False):
         if isinstance(name, dict):
@@ -191,6 +202,14 @@ class _OutgoingEmailError(Exception):
     pass
 
 
+class _ValidationError(Exception):
+    pass
+
+
+class _LinkExistsError(Exception):
+    pass
+
+
 class _Stub:
     def __init__(self, db):
         self._ = lambda s: s
@@ -198,9 +217,17 @@ class _Stub:
         self.only_for = lambda roles: None  # gate satisfied by default
         self.log_error = lambda *a, **k: None
         self.clear_messages = lambda *a, **k: None
-        self.msgprint = lambda *a, **k: None
+        # Record msgprint calls so tests can assert exactly which warnings
+        # were raised (create_user must NOT queue a core-style warning).
+        self.msgprint_calls = []
+        self.msgprint = lambda *a, **k: self.msgprint_calls.append((a, k))
+        self.bold = lambda s: f"<b>{s}</b>"
         self.PermissionError = _PermissionError
         self.OutgoingEmailError = _OutgoingEmailError
+        self.ValidationError = _ValidationError
+        self.LinkExistsError = _LinkExistsError
+        self.ValidationError = _ValidationError
+        self.LinkExistsError = _LinkExistsError
         self.db = db
         self.get_all = db.get_all
         self.get_value = db.get_value
@@ -395,6 +422,220 @@ def test_create_user_custom_username_succeeds(admin):
     assert admin.stub.created
     assert admin.stub.created[-1]._data["username"] == "customname"
     assert admin.stub.created[-1].inserted is True
+
+
+# --------------------------------------------------------------------------- #
+# create_user atomic creation (BE-CR1..BE-CR4 — plans/plan-fix-create-user-roles.md)
+# --------------------------------------------------------------------------- #
+def test_create_user_attaches_roles_atomically_without_warning(admin):
+    """BE-CR1 — non-Employee roles ride along on the single insert, warning-free.
+
+    The old flow inserted the User role-less and saved again, which queued
+    Frappe core's "Newly created user … has no roles enabled" msgprint and
+    masked later errors in the SPA. New contract: zero msgprint when a
+    (non-deferred) role is supplied, and no second save. Employee is not
+    used here because it is ERPNext-deferred (BE-CR5/BE-CR6).
+    """
+    res = admin.mod.create_user(
+        email="vuw@gegeteam.net", full_name="Vu W", roles=["HR User"], password="12345678"
+    )
+    doc = admin.stub.created[-1]
+    assert doc.inserted is True
+    assert [d.role for d in doc.roles] == ["HR User"]
+    assert res["roles"] == ["HR User"]
+    assert res["deferred_roles"] == []
+    assert res["roles_warning"] is False
+    assert doc.saved is False  # single-phase creation — no second save
+    assert admin.stub.msgprint_calls == []
+    assert admin.pw_calls == [("NEW-1", "12345678")]
+    assert admin.audit_calls  # creation was audited
+
+
+def test_create_user_drops_non_portal_roles(admin):
+    """BE-CR2 — a role outside PORTAL_ROLES is silently ignored (no escalation)."""
+    res = admin.mod.create_user(email="esc@x.vn", full_name="Esc A", roles=["Employee", "System Manager"])
+    doc = admin.stub.created[-1]
+    assert [d.role for d in doc.roles] == []  # Employee deferred, System Manager dropped
+    assert res["roles"] == []
+    assert res["deferred_roles"] == ["Employee"]
+
+
+def test_create_user_short_password_rejected_before_any_write(admin):
+    """BE-CR3 — <8 chars throws up-front: no User doc built, nothing stored.
+
+    The old flow created the User then deleted it on a short password,
+    leaving the stale "no roles enabled" msgprint to mask this error.
+    """
+    with pytest.raises(Exception, match="Mật khẩu tạm phải có ít nhất 8 ký tự"):
+        admin.mod.create_user(email="short@x.vn", full_name="Short P", password="123456")
+    assert admin.stub.created == []  # frappe.get_doc was never reached
+    assert admin.pw_calls == []
+    assert admin.audit_calls == []
+
+
+def test_create_user_without_roles_warns_in_vietnamese(admin):
+    """BE-CR4 — role-less creation succeeds but flags + warns in Vietnamese."""
+    res = admin.mod.create_user(email="norole@x.vn", full_name="No Role")
+    doc = admin.stub.created[-1]
+    assert doc.inserted is True
+    assert doc.roles == []
+    assert res["roles"] == []
+    assert res["roles_warning"] is True
+    assert len(admin.stub.msgprint_calls) == 1
+    args, kwargs = admin.stub.msgprint_calls[0]
+    assert "chưa có vai trò nào" in args[0]
+    assert kwargs.get("indicator") == "orange"
+
+
+def test_create_user_defers_employee_role_until_linked(admin):
+    """BE-CR5 — Employee is deferred (not silently stripped) with no Employee link.
+
+    ERPNext's User-validate hook would strip Employee from unlinked users and
+    queue an English msgprint; create_user now reports it as deferred_roles so
+    the SPA can explain the users→employees flow, and link_user_to_employee
+    re-adds the role later (FINDING-LC1b).
+    """
+    res = admin.mod.create_user(email="newemp@x.vn", full_name="New Emp", roles=["Employee"])
+    doc = admin.stub.created[-1]
+    assert doc.inserted is True
+    assert doc.roles == []  # not sent to ERPNext's stripper at all
+    assert res["roles"] == []
+    assert res["deferred_roles"] == ["Employee"]
+    assert res["roles_warning"] is False  # a role IS coming — just later
+    assert len(admin.stub.msgprint_calls) == 1
+    args, kwargs = admin.stub.msgprint_calls[0]
+    assert "liên kết với nhân viên" in args[0]
+    assert kwargs.get("indicator") == "blue"
+
+
+def test_create_user_assigns_employee_role_when_already_linked(admin):
+    """BE-CR6 — an already-linked email gets Employee immediately."""
+    admin.db.rows["Employee"] = [{"name": "HR-EMP-9", "user_id": "linked@x.vn"}]
+    res = admin.mod.create_user(email="linked@x.vn", full_name="Linked", roles=["Employee"])
+    doc = admin.stub.created[-1]
+    assert [d.role for d in doc.roles] == ["Employee"]
+    assert res["roles"] == ["Employee"]
+    assert res["deferred_roles"] == []
+    assert admin.stub.msgprint_calls == []
+
+
+def test_create_user_keeps_full_vietnamese_name_in_first_name(admin):
+    """BE-CR7 — "Lại Minh Hiếu" stays whole in first_name (old split()[0] → "Lại")."""
+    res = admin.mod.create_user(email="hieu@x.vn", full_name="Lại Minh Hiếu")
+    doc = admin.stub.created[-1]
+    assert doc._data["first_name"] == "Lại Minh Hiếu"
+    assert not doc._data["last_name"]
+    assert res["full_name"] == "Lại Minh Hiếu"
+
+
+def test_create_user_honours_explicit_first_last_name(admin):
+    """BE-CR7b — explicit first/last (edit modal) still override the fallback."""
+    admin.mod.create_user(
+        email="split@x.vn", full_name="Nguyễn Văn B", first_name="Văn B", last_name="Nguyễn"
+    )
+    doc = admin.stub.created[-1]
+    assert doc._data["first_name"] == "Văn B"
+    assert doc._data["last_name"] == "Nguyễn"
+
+
+# --------------------------------------------------------------------------- #
+# delete_employee (DEL-1..DEL-4)
+# --------------------------------------------------------------------------- #
+def test_delete_employee_not_found_throws(admin):
+    """DEL-1 — unknown employee raises a friendly Vietnamese error."""
+    with pytest.raises(Exception, match="Nhân viên không tồn tại"):
+        admin.mod.delete_employee("ghost-emp")
+
+
+def test_delete_employee_happy_path_audits(admin):
+    """DEL-2 — a clean employee is deleted + audited."""
+    admin.db.exists_pairs.add(("Employee", "HR-EMP-1"))
+    res = admin.mod.delete_employee("HR-EMP-1")
+    assert res == {"name": "HR-EMP-1", "deleted": True}
+    assert admin.stub.deleted == [("Employee", "HR-EMP-1")]
+    assert admin.audit_calls
+
+
+def test_delete_employee_surfaces_guard_validation_error(admin):
+    """DEL-3 — the attendance-guard ValidationError passes through verbatim."""
+    admin.db.exists_pairs.add(("Employee", "HR-EMP-2"))
+
+    def _boom(*a, **k):
+        raise _ValidationError("Không thể xoá nhân viên còn dữ liệu chấm công")
+
+    admin.stub.delete_doc = _boom
+    with pytest.raises(Exception, match="dữ liệu chấm công"):
+        admin.mod.delete_employee("HR-EMP-2")
+
+
+def test_delete_employee_link_exists_becomes_friendly_vn_error(admin):
+    """DEL-4 — a raw LinkExistsError is re-raised as Vietnamese guidance."""
+    admin.db.exists_pairs.add(("Employee", "HR-EMP-3"))
+
+    def _boom(*a, **k):
+        raise _LinkExistsError("linked with VN Employee Bank Account")
+
+    admin.stub.delete_doc = _boom
+    with pytest.raises(Exception, match="Không thể xoá nhân viên"):
+        admin.mod.delete_employee("HR-EMP-3")
+
+
+def test_delete_employee_cleans_auto_generated_empty_review_lines(admin):
+    """DEL-5 — empty (net_pay<=0) payroll review lines are pre-cleaned.
+
+    These lines are upserted for EVERY employee whenever a payroll period is
+    calculated — even employees with zero attendance — so they must not block
+    deletion (mirrors e2e_ops.lc_drop).
+    """
+    admin.db.exists_pairs.add(("Employee", "HR-EMP-5"))
+    admin.db.rows["VN Payroll Review Line"] = [
+        {"name": "L-EMPTY", "employee": "HR-EMP-5", "net_pay": 0},
+        {"name": "L-OTHER", "employee": "HR-EMP-9", "net_pay": 0},
+    ]
+    admin.db.rows["VN Notification"] = [
+        {"name": "NT-1", "employee": "HR-EMP-5"},
+        {"name": "NT-OTHER", "employee": "HR-EMP-9"},
+    ]
+    admin.db.rows["User Permission"] = [
+        {"name": "UP-1", "allow": "Employee", "for_value": "HR-EMP-5"},
+    ]
+    deleted_lines = []
+    real_delete = admin.stub.delete_doc
+
+    def _spy(doctype, name, **kw):
+        if doctype == "VN Payroll Review Line":
+            deleted_lines.append(name)
+        if doctype == "VN Notification" and name == "NT-1":
+            deleted_lines.append("NT-1")
+        return real_delete(doctype, name, **kw)
+
+    admin.stub.delete_doc = _spy
+    res = admin.mod.delete_employee("HR-EMP-5")
+    assert res["deleted"] is True
+    assert deleted_lines == ["L-EMPTY", "NT-1"]  # this employee's rows only
+    # User Permission auto-row cleaned via frappe.db.delete (fake removes rows).
+    assert admin.db.rows["User Permission"] == []
+    # (stub.delete_doc không đụng fake-rows — spy ở trên đã chứng minh NT-1
+    # được gọi đúng, NT-OTHER của nhân viên khác không bị đụng.)
+
+
+def test_delete_employee_keeps_real_payroll_review_lines(admin):
+    """DEL-6 — a net_pay>0 review line (real salary) still blocks deletion."""
+    admin.db.exists_pairs.add(("Employee", "HR-EMP-6"))
+    admin.db.rows["VN Payroll Review Line"] = [
+        {"name": "L-PAID", "employee": "HR-EMP-6", "net_pay": 5_000_000},
+    ]
+
+    def _employee_only(doctype, name, **kw):
+        # The pre-clean must NOT have force-deleted the PAID line: simulate the
+        # DB state by refusing the Employee delete (link still exists).
+        if doctype == "Employee":
+            raise _LinkExistsError("linked with VN Payroll Review Line L-PAID")
+        return None
+
+    admin.stub.delete_doc = _employee_only
+    with pytest.raises(Exception, match="Không thể xoá nhân viên"):
+        admin.mod.delete_employee("HR-EMP-6")
 
 
 # --------------------------------------------------------------------------- #

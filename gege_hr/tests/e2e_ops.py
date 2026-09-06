@@ -927,3 +927,392 @@ def lc_payslips_as(email):
 def cleanup():
     _clean_e2e()
     print("ASSERT: CLEANED ok")
+
+
+def leave_calendar_seed_cleanup():
+    """Leave-calendar desk-free e2e (plans/plan-leave-calendar-desk-free):
+    drop EVERY leftover seeded Leave Application (description like 'E2E-LC-%',
+    any run). Submitted docs are cancelled first (mirror :func:`_lc_drop`)."""
+    names = frappe.get_all(
+        "Leave Application", filters={"description": ["like", "E2E-LC-%"]}, pluck="name"
+    )
+    deleted = 0
+    for n in names:
+        try:
+            doc = frappe.get_doc("Leave Application", n)
+            if doc.docstatus == 1:
+                try:
+                    doc.cancel()
+                except Exception:
+                    frappe.db.rollback()
+            frappe.delete_doc("Leave Application", n, force=1, ignore_permissions=True, ignore_missing=True)
+            deleted += 1
+        except Exception:
+            frappe.db.rollback()
+    frappe.db.commit()
+    print(f"ASSERT: LC_SEED_CLEANED deleted={deleted} total={len(names)}")
+    return {"deleted": deleted, "total": len(names)}
+
+
+def leave_status(name):
+    """Leave-calendar e2e assert: raw-DB status of a Leave Application
+    (frappe.client.get_value chokes on the permlevel-1 ``status`` field)."""
+    st = frappe.db.get_value("Leave Application", name, "status")
+    ds = frappe.db.get_value("Leave Application", name, "docstatus")
+    print(f"ASSERT: LEAVE_STATUS {name} status={st} docstatus={ds}")
+    return {"status": st, "docstatus": ds}
+
+
+def calendar_as(user, company, year, month, statuses=None):
+    """Debug probe (leave-calendar e2e): run get_leave_calendar AS ``user``
+    (force refresh) to expose permission-filtered reads."""
+    frappe.set_user(user)
+    try:
+        from gege_hr.gege_hr.api import leave_calendar as lc
+
+        out = lc.get_leave_calendar(
+            company=company, year=year, month=month, statuses=statuses, force_refresh=True
+        )
+    finally:
+        frappe.set_user("Administrator")
+    n = len((out.get("data") or {}).get("leaves") or [])
+    print(f"ASSERT: CAL_AS user={user} leaves={n}")
+    return {"user": user, "leaves": n}
+
+
+def holiday_out_of_window(holiday_list, year, month):
+    """Leave-calendar e2e: move every Holiday of ``holiday_list`` that falls
+    inside (year, month) to 25/12 of the same year. HRMS apply validation
+    rejects leave applications whose days are all holidays ("You need not
+    apply for leave"), and the e2e seeds land in month+1 days 03–05 — the
+    E2E holiday list must therefore stay clear of that window."""
+    from datetime import date
+
+    doc = frappe.get_doc("Holiday List", holiday_list)
+    lo = date(int(year), int(month), 1)
+    hi = date(int(year) + (1 if int(month) == 12 else 0), (int(month) % 12) + 1, 1)
+    moved = 0
+    for h in doc.get("holidays") or []:
+        d = h.holiday_date.date() if hasattr(h.holiday_date, "date") else h.holiday_date
+        if lo <= d < hi:
+            h.holiday_date = date(int(year), 12, 25)
+            moved += 1
+    if moved:
+        doc.save(ignore_permissions=True)
+    frappe.db.commit()
+    print(f"ASSERT: HL_OUT_OF_WINDOW moved={moved} list={holiday_list}")
+    return {"moved": moved}
+
+
+def shift_crud_smoke():
+    """Shift Assignment full-CRUD smoke (plans/shift-assignment-frontend-crud §6).
+
+    Exercises every new admin endpoint against the real site:
+    create → get(can-matrix) → update(end_date) → amend(cancel+amended_from)
+    → get(cancelled, can.delete) → bulk_end → delete ×2.
+    Idempotent: scoped to EMP, future-dated spans, and everything it creates is
+    deleted before returning.
+    """
+    from gege_hr.gege_hr.api import admin
+
+    st = frappe.db.get_value("Shift Type", {"name": ["like", "E2E%"]}, "name") or frappe.db.get_value(
+        "Shift Type", {}, "name"
+    )
+    assert st, "shift_crud_smoke: no Shift Type on site"
+    frappe.only_for("System Manager")  # mirror the admin gate on the console user
+
+    # A dedicated throw-away employee sidesteps every overlap/native-timing rule
+    # (hrms throws OverlappingShifts even with allow_multiple on when timings
+    # collide) and guarantees no linked Checkin/Attendance for cancel safety.
+    company = frappe.db.get_value("Employee", {}, "company")
+    emp_doc = frappe.get_doc(
+        {
+            "doctype": "Employee",
+            "first_name": "E2E CRUD",
+            "last_name": "Smoke",
+            "company": company,
+            "status": "Active",
+            "gender": "Other",
+            "date_of_birth": "1990-01-01",
+            "date_of_joining": _day_str(-365),
+        }
+    )
+    emp_doc.insert(ignore_permissions=True)
+    emp = emp_doc.name
+    print(f"ASSERT: CRUD_TMP_EMP {emp}")
+    try:
+        _shift_crud_smoke_body(admin, emp, st)
+    finally:
+        for sa in frappe.get_all(
+            "Shift Assignment", filters={"employee": emp}, fields=["name", "docstatus"]
+        ):
+            try:
+                if sa.docstatus == 1:
+                    frappe.get_doc("Shift Assignment", sa.name).cancel()
+                frappe.delete_doc("Shift Assignment", sa.name, force=True, ignore_permissions=True)
+            except Exception:
+                pass
+        frappe.delete_doc("Employee", emp, force=True, ignore_permissions=True)
+        frappe.db.commit()
+        print(f"ASSERT: CRUD_TMP_CLEANED {emp}")
+
+
+def _shift_crud_smoke_body(admin, emp, st):
+    """Inner body of :func:`shift_crud_smoke` (runs with its own throw-away employee)."""
+
+    s = _day_str(30)
+    e = _day_str(40)
+    doc = admin.create_shift_assignment(employee=emp, shift_type=st, start_date=s, end_date=e)
+    n1 = doc["name"]
+    print(f"ASSERT: CRUD_CREATE {n1}")
+
+    d1 = admin.get_shift_assignment(n1)
+    assert d1["docstatus"] == 1 and d1["can"]["edit_end_date"] and not d1["can"]["delete"]
+    print("ASSERT: CRUD_GET_ACTIVE can=" + json.dumps(d1["can"]))
+
+    up = admin.update_shift_assignment(n1, end_date=_day_str(45))
+    assert str(up.get("end_date") or "") == _day_str(45)
+    print("ASSERT: CRUD_UPDATE_END ok")
+
+    am = admin.amend_shift_assignment(n1, start_date=_day_str(50), end_date=_day_str(60))
+    n2 = am["name"]
+    assert n2 and n2 != n1 and am["amended_from"] == n1
+    old = frappe.db.get_value("Shift Assignment", n1, ["docstatus", "status", "end_date"], as_dict=True)
+    assert old.docstatus == 2 and str(old.end_date) == _day_str(49), "amend must cut+cancel the old span"
+    print(f"ASSERT: CRUD_AMEND {n1} -> {n2} (old cut to {old.end_date})")
+
+    d1b = admin.get_shift_assignment(n1)
+    assert d1b["display_status"] == "Cancelled" and d1b["can"]["delete"]
+    print("ASSERT: CRUD_GET_CANCELLED can=" + json.dumps(d1b["can"]))
+
+    be = admin.bulk_end_shift_assignments([n2], _day_str(59))
+    assert be["ended"] == [n2] and not be["failed"], be
+    print("ASSERT: CRUD_BULK_END " + json.dumps(be))
+
+    admin.delete_shift_assignment(n2)
+    admin.delete_shift_assignment(n1)
+    assert not frappe.db.exists("Shift Assignment", n1)
+    assert not frappe.db.exists("Shift Assignment", n2)
+    frappe.db.commit()
+    print("ASSERT: CRUD_DELETE_BOTH ok — smoke PASSED")
+
+
+def schedule_ui_user():
+    """Idempotent throw-away employee-linked user for the /hr/schedule BROWSER
+    e2e (tests-e2e/schedule-deskfree.mjs part B). Creates/refreshes
+    ``e2e.sched.ui@gege.test`` (pwd SchedE2e!234, role Employee) + a linked
+    Active Employee with ``shift_request_approver`` set. Never touches real
+    gegeteam users. ASSERT: UI_USER <email> <employee>."""
+    email = "e2e.sched.ui@gege.test"
+    if not frappe.db.exists("User", email):
+        u = frappe.get_doc(
+            {
+                "doctype": "User",
+                "email": email,
+                "first_name": "E2E Sched UI",
+                "enabled": 1,
+                "new_password": "SchedE2e!234",
+            }
+        )
+        u.insert(ignore_permissions=True)
+        u.add_roles("Employee")
+    else:
+        frappe.set_value("User", email, "enabled", 1)
+    emp = frappe.db.get_value("Employee", {"user_id": email}, "name")
+    if not emp:
+        company = frappe.db.get_value("Company", {}, "name")
+        d = frappe.get_doc(
+            {
+                "doctype": "Employee",
+                "__newname": "E2E-SCHED-UI",
+                "first_name": "E2E",
+                "last_name": "Sched UI",
+                "gender": "Other",
+                "date_of_birth": "1990-01-01",
+                "date_of_joining": "2026-01-01",
+                "status": "Active",
+                "company": company,
+                "user_id": email,
+                "shift_request_approver": "Administrator",
+            }
+        )
+        d.insert(ignore_permissions=True)
+        emp = d.name
+    frappe.db.commit()
+    print(f"ASSERT: UI_USER {email} {emp}")
+
+
+def schedule_deskfree_smoke():
+    """Full-stack smoke for the desk-free /hr/schedule endpoints
+    (plans/plan-schedule-desk-free.md §4.3) — run on the bench with THROW-AWAY
+    data (own user + employee + shift types), exercising every new endpoint
+    under a real employee session (``frappe.set_user``), then cleaning up.
+
+    ASSERT lines: SCTX_CREATE / SREQ_DRAFT / SREQ_OVERLAP / SREQ_CANCEL /
+    HARDEN_DENIED / APPROVE_LINK / OVERRIDE_SPLIT / CONFLICT_PREVIEW /
+    SKIP_RESTORE / CLEANED.
+    """
+    from gege_hr.gege_hr.api import admin as admin_api
+    from gege_hr.gege_hr.api import shift as shift_api
+
+    ts = datetime.now().strftime("%H%M%S")
+    email = f"e2e.sched{ts}@gege.test"
+    day, night = f"E2E Sched Day {ts}", f"E2E Sched Night {ts}"
+    d1, d2, d3 = _day_str(7), _day_str(8), _day_str(9)
+
+    user = frappe.get_doc(
+        {
+            "doctype": "User",
+            "email": email,
+            "first_name": "E2E Sched",
+            "enabled": 1,
+            "new_password": "SchedE2e!234",
+        }
+    )
+    user.insert(ignore_permissions=True)
+    user.add_roles("Employee")
+    company = frappe.db.get_value("Company", {}, "name")
+    for st_name, s, e in ((day, "09:00", "17:00"), (night, "18:00", "22:00")):
+        frappe.get_doc(
+            {
+                "doctype": "Shift Type",
+                "__newname": st_name,
+                "start_time": s,
+                "end_time": e,
+            }
+        ).insert(ignore_permissions=True)
+    emp_doc = frappe.get_doc(
+        {
+            "doctype": "Employee",
+            "__newname": f"E2E-SCHED-{ts}",
+            "first_name": "E2E",
+            "last_name": f"Sched {ts}",
+            "gender": "Other",
+            "date_of_birth": "1990-01-01",
+            "date_of_joining": "2026-01-01",
+            "status": "Active",
+            "company": company,
+            "user_id": email,
+            "shift_request_approver": "Administrator",
+        }
+    )
+    emp_doc.insert(ignore_permissions=True)
+    emp = emp_doc.name
+    try:
+        # ── Employee session: context + self-service Shift Request ──────────
+        frappe.set_user(email)
+        ctx = shift_api.schedule_context()
+        assert ctx["viewer_employee"] == emp
+        assert ctx["can"] == {"create_shift_request": True, "manage_schedule": False}
+        assert ctx["approver"] and ctx["approver"]["user"]
+        print("ASSERT: SCTX_CREATE " + json.dumps(ctx["can"]))
+
+        res = shift_api.create_my_shift_request(
+            shift_type=night, from_date=d1, to_date=d1, reason="e2e desk-free"
+        )
+        req_name = res["name"]
+        rows = shift_api.my_shift_requests()
+        assert any(r["name"] == req_name and r["status"] == "Draft" for r in rows)
+        assert shift_api.schedule_context()["my_requests"]["pending"] == 1
+        print(f"ASSERT: SREQ_DRAFT {req_name}")
+
+        try:
+            shift_api.create_my_shift_request(shift_type=night, from_date=d1, to_date=d1)
+            raise AssertionError("overlap draft must be blocked")
+        except Exception as exc:
+            assert "trùng" in str(exc).lower(), str(exc)
+        print("ASSERT: SREQ_OVERLAP draft-vs-draft blocked")
+
+        shift_api.cancel_my_shift_request(req_name)
+        assert not frappe.db.exists("Shift Request", req_name)
+        assert shift_api.schedule_context()["my_requests"]["pending"] == 0
+        print("ASSERT: SREQ_CANCEL deleted")
+
+        # ── Hardening: another employee's schedule needs a manager role ─────
+        other = frappe.db.get_value("Employee", {"status": "Active", "name": ["!=", emp]}, "name")
+        if other:
+            try:
+                shift_api.my_schedule(employee=other)
+                raise AssertionError("employee must not read another's schedule")
+            except Exception as exc:
+                assert "quyền" in str(exc).lower() or "Permission" in str(exc), str(exc)
+            print(f"ASSERT: HARDEN_DENIED other={other}")
+
+        # ── HR (Administrator): assign + approve-back-link + override day ────
+        frappe.set_user("Administrator")
+        sa = admin_api.create_shift_assignment(employee=emp, shift_type=day, start_date=d1, end_date=d3)
+        sa_name = sa["name"]
+
+        frappe.set_user(email)
+        req2 = shift_api.create_my_shift_request(shift_type=night, from_date=_day_str(12))["name"]
+        frappe.set_user("Administrator")
+        try:
+            admin_api.approve_shift_request(req2)
+            linked = frappe.db.get_value("Shift Assignment", {"shift_request": req2}, "name")
+            assert linked
+            frappe.set_user(email)
+            rows = shift_api.my_shift_requests()
+            row2 = next(r for r in rows if r["name"] == req2)
+            assert row2["status"] == "Approved" and row2["shift_assignment"] == linked
+            print(f"ASSERT: APPROVE_LINK {req2} -> {linked}")
+        finally:
+            frappe.set_user("Administrator")
+
+        ov = admin_api.override_day_shift_assignment(employee=emp, date=d2, shift_type=night)
+        cut_end = frappe.db.get_value("Shift Assignment", sa_name, "end_date")
+        assert str(cut_end) == _day_str(7) and str(_day_str(8)) == d2, (cut_end, d2)
+        assert len(ov["created"]) == 2 and ov["adjusted"] == [sa_name]
+        inst = frappe.db.get_value(
+            "VN Employee Shift Instance", {"employee": emp, "work_date": d2}, "name"
+        )
+        assert inst, "override must backfill the day's instance immediately"
+        print(f"ASSERT: OVERRIDE_SPLIT created={ov['created']} instance={inst}")
+
+        conflicts = admin_api.check_schedule_conflicts(
+            employee=emp, shift_type=day, from_date=d3, to_date=d3
+        )
+        assert any(c["type"] == "shift_assignment" for c in conflicts), conflicts
+        print("ASSERT: CONFLICT_PREVIEW " + json.dumps(conflicts[:2]))
+
+        flipped = shift_api.set_shift_instance_status(inst, "Skipped")
+        assert flipped["status"] == "Skipped"
+        restored = shift_api.set_shift_instance_status(inst, "Scheduled")
+        assert restored["status"] == "Scheduled"
+        print("ASSERT: SKIP_RESTORE ok")
+    finally:
+        frappe.set_user("Administrator")
+        for sr in frappe.get_all("Shift Request", filters={"employee": emp}, pluck="name"):
+            try:
+                frappe.delete_doc("Shift Request", sr, force=True, ignore_permissions=True)
+            except Exception:
+                pass
+        for sa_row in frappe.get_all(
+            "Shift Assignment", filters={"employee": emp}, fields=["name", "docstatus"]
+        ):
+            try:
+                if sa_row.docstatus == 1:
+                    frappe.get_doc("Shift Assignment", sa_row.name).cancel()
+                frappe.delete_doc("Shift Assignment", sa_row.name, force=True, ignore_permissions=True)
+            except Exception:
+                pass
+        for si in frappe.get_all(
+            "VN Employee Shift Instance", filters={"employee": emp}, pluck="name"
+        ):
+            try:
+                frappe.delete_doc(
+                    "VN Employee Shift Instance", si, force=True, ignore_permissions=True
+                )
+            except Exception:
+                pass
+        for st_name in (day, night):
+            try:
+                frappe.delete_doc("Shift Type", st_name, force=True, ignore_permissions=True)
+            except Exception:
+                pass
+        try:
+            frappe.delete_doc("Employee", emp, force=True, ignore_permissions=True)
+            frappe.delete_doc("User", email, force=True, ignore_permissions=True)
+        except Exception:
+            pass
+        frappe.db.commit()
+        print("ASSERT: CLEANED")

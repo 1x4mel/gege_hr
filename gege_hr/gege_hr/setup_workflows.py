@@ -57,7 +57,17 @@ import frappe
 _STATES = ["Draft", "Pending Manager", "Pending HR", "Approved", "Confirmed", "Paid", "Rejected"]
 
 # Every action referenced below must exist as a "Workflow Action Master".
-_ACTIONS = ["Send for Approval", "Approve", "Reject", "Confirm", "Mark Paid", "Reverse"]
+# "Return" (desk-free Phase B1): approver trả lại request cho nhân viên sửa —
+# Pending → Draft, validated như mọi transition khác.
+_ACTIONS = [
+    "Send for Approval",
+    "Approve",
+    "Reject",
+    "Confirm",
+    "Mark Paid",
+    "Reverse",
+    "Return",
+]
 
 # Roles we sprinkle across transitions so role-based validate_workflow never
 # blocks a matrix-driven save (matrix is the real gate).
@@ -145,11 +155,22 @@ def _common_transitions() -> list[tuple]:
     # Rejections from any pending step.
     for role in broad:
         rows.append(("Pending Manager", "Reject", "Rejected", role))
-    for role in (_HRU, _HRM):
+    # B-1 fix (plans/overtime-deskfree-complete.md OT7): the owner Employee must
+    # also be able to cancel their own request while it sits at Pending HR —
+    # cancel_overtime_request writes Rejected via doc.save(), which validate_workflow
+    # checks against these rows. Verified missing on the live site (2026-09-03).
+    for role in broad:
         rows.append(("Pending HR", "Reject", "Rejected", role))
     # Cancelling a just-saved draft directly → Rejected.
     for role in (_EMP, _HRM):
         rows.append(("Draft", "Reject", "Rejected", role))
+    # Desk-free Phase B1 (plans/approvals-deskfree-complete §3.7): "Trả lại để
+    # sửa" — the approver bounces an incomplete request to Draft (with a
+    # comment) instead of rejecting it. validate_workflow needs these rows for
+    # the doc.save() inside return_request.
+    for role in broad:
+        rows.append(("Pending Manager", "Return", "Draft", role))
+        rows.append(("Pending HR", "Return", "Draft", role))
     return rows
 
 
@@ -203,6 +224,94 @@ _WORKFLOWS = [
     },
 ]
 
+# --------------------------------------------------------------------------- #
+# Desk-free COMPLETE (C2) — checkout-miss ticket workflow.
+#
+# Same "permissive state machine" doctrine as above, with one twist: the
+# status field IS the workflow field (``workflow_state_field="status"``). The
+# API layer's ``_ALLOWED_ACTIONS`` (api/checkout_miss.py) stays the real gate;
+# the workflow only exists so Frappe's native ``validate_workflow`` recognises
+# every state/transition the API performs (resolve/reopen via doc.save) and
+# never blocks it. Engine + explain + appeal write via ``db.set_value``/
+# ``db_set`` (out-of-band by design), so only the save-driven paths matter —
+# every transition is duplicated across all four broad roles.
+# --------------------------------------------------------------------------- #
+_CM_STATES = ["Pending", "Explained", "Waived", "Penalised", "Closed"]
+_CM_ACTIONS = ["Explain", "Waive", "Penalise", "Close", "Reopen"]
+
+
+def _cm_transitions() -> list[tuple]:
+    moves = [
+        ("Pending", "Explain", "Explained"),
+        ("Pending", "Waive", "Waived"),
+        ("Pending", "Penalise", "Penalised"),
+        ("Pending", "Close", "Closed"),
+        ("Explained", "Waive", "Waived"),
+        ("Explained", "Penalise", "Penalised"),
+        ("Explained", "Close", "Closed"),
+        ("Waived", "Penalise", "Penalised"),
+        ("Waived", "Close", "Closed"),
+        ("Penalised", "Waive", "Waived"),
+        ("Penalised", "Close", "Closed"),
+        ("Closed", "Reopen", "Pending"),
+    ]
+    rows = []
+    for (s, a, nxt) in moves:
+        for role in (_EMP, _HRU, _HRM, _PAY):
+            rows.append((s, a, nxt, role))
+    return rows
+
+
+def seed_checkout_miss_workflow() -> str | None:
+    """Create the permissive VN Checkout Miss workflow if absent.
+
+    Idempotent + bench-guarded; returns the workflow name (or None).
+    """
+    if not (_table_ready("Workflow") and _table_ready("Workflow State")):
+        return None
+    # Ensure the extra masters referenced only by this workflow exist.
+    for state in _CM_STATES:
+        if not _exists("Workflow State", state):
+            try:
+                frappe.get_doc({"doctype": "Workflow State", "workflow_state_name": state}).insert(
+                    ignore_permissions=True
+                )
+            except Exception:
+                frappe.log_error(f"gege_hr workflow seed: Workflow State {state}")
+    for action in _CM_ACTIONS:
+        if not _exists("Workflow Action Master", action):
+            try:
+                frappe.get_doc({"doctype": "Workflow Action Master", "workflow_action_name": action}).insert(
+                    ignore_permissions=True
+                )
+            except Exception:
+                frappe.log_error(f"gege_hr workflow seed: Workflow Action {action}")
+
+    name = "VN Checkout Miss Workflow"
+    if _exists("Workflow", name):
+        try:
+            frappe.db.set_value("Workflow", name, "is_active", 1)
+        except Exception:
+            frappe.log_error(f"gege_hr workflow seed: reactivate {name}")
+        return name
+    try:
+        frappe.get_doc(
+            {
+                "doctype": "Workflow",
+                "workflow_name": name,
+                "document_type": "VN Checkout Miss",
+                "workflow_state_field": "status",
+                "is_active": 1,
+                "send_email_alert": 0,
+                "states": _state_rows(_CM_STATES),
+                "transitions": _transition_rows(_cm_transitions()),
+            }
+        ).insert(ignore_permissions=True)
+        return name
+    except Exception:
+        frappe.log_error("gege_hr workflow seed: failed to create VN Checkout Miss Workflow")
+        return None
+
 
 # --------------------------------------------------------------------------- #
 # Public entry point
@@ -220,6 +329,7 @@ def seed_workflows() -> dict:
     _ensure_masters()
 
     created = []
+    transitions_added = 0
     for spec in _WORKFLOWS:
         wf_name = spec["name"]
         if _exists("Workflow", wf_name):
@@ -228,6 +338,10 @@ def seed_workflows() -> dict:
                 frappe.db.set_value("Workflow", wf_name, "is_active", 1)
             except Exception:
                 frappe.log_error(f"gege_hr workflow seed: reactivate {wf_name}")
+            # Bring NEW blueprint transitions into an already-seeded workflow
+            # (B-1 upsert — seeding itself is insert-if-absent and would never
+            # deliver the fix to an existing site).
+            transitions_added += _ensure_transition_rows(wf_name, spec["transitions"])
             continue
         try:
             doc = frappe.get_doc(
@@ -248,7 +362,44 @@ def seed_workflows() -> dict:
         except Exception:
             frappe.log_error(f"gege_hr workflow seed: failed to create {wf_name}")
 
-    return {"seeded": created}
+    return {"seeded": created, "transitions_added": transitions_added}
+
+
+def _ensure_transition_rows(workflow_name: str, wanted_rows: list[dict]) -> int:
+    """Append any MISSING transition rows to an existing Workflow (B-1 upsert).
+
+    The seed is insert-if-absent by design ("re-runs never overwrite a manager's
+    manual edits"), so a transition added to the blueprint after a site already
+    seeded would never land. This upsert appends only rows whose
+    ``(state, action, next_state, allowed)`` key is absent — it never deletes
+    or edits anything. Returns the number of rows added (0 on no-op / failure).
+    """
+    if not wanted_rows:
+        return 0
+    try:
+        wf = frappe.get_doc("Workflow", workflow_name)
+    except Exception:
+        return 0
+    have = {
+        (t.get("state"), t.get("action"), t.get("next_state"), t.get("allowed"))
+        for t in (wf.transitions or [])
+    }
+    added = 0
+    for row in wanted_rows:
+        key = (row.get("state"), row.get("action"), row.get("next_state"), row.get("allowed"))
+        if key in have:
+            continue
+        wf.append("transitions", dict(row))
+        added += 1
+    if not added:
+        return 0
+    try:
+        wf.flags.ignore_permissions = True
+        wf.save(ignore_permissions=True)
+    except Exception:
+        frappe.log_error(f"gege_hr workflow seed: ensure transitions failed for {workflow_name}")
+        return 0
+    return added
 
 
 def verify_workflows() -> dict:

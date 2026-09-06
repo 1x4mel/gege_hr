@@ -64,6 +64,11 @@ _CATALOG_DOCTYPES = frozenset(
         "VN Payroll Component Mapping",
         "VN Device Employee Mapping",
         "VN Leave Policy Extension",
+        # plan-hr-settings-desk-free §2.3 — extra flat masters (verified on the
+        # live site in plan Bước 0.1; "Source of Hire" does NOT exist → skipped).
+        "Employee Grade",
+        "Grievance Type",
+        "Purpose of Travel",
     }
 )
 
@@ -84,6 +89,9 @@ _EDITABLE_SIMPLE = frozenset(
         "VN Payroll Component Mapping",
         "VN Device Employee Mapping",
         "VN Leave Policy Extension",
+        "Employee Grade",
+        "Grievance Type",
+        "Purpose of Travel",
     }
 )
 
@@ -201,6 +209,12 @@ def save_catalog_master(doctype: str, values=None, is_new: int = 0) -> dict:
     created = bool(int(is_new or 0)) or not name
 
     if created:
+        # Autoname "Prompt" masters (Employee Grade, Grievance Type) take their
+        # name from the user — Frappe honours a pre-set `name` on insert for
+        # them, so re-attach the popped name (plan §2.3).
+        autoname = (getattr(frappe.get_meta(doctype), "autoname", "") or "").strip().lower()
+        if name and autoname == "prompt":
+            payload["name"] = name
         doc = frappe.get_doc({"doctype": doctype, **payload})
         doc.insert()
         ref = doc.name

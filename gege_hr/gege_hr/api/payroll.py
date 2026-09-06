@@ -23,6 +23,7 @@ admin operation); ``my_payslips`` / ``payslip_detail`` are employee-readable.
 
 from __future__ import annotations
 
+import datetime
 import json
 
 import frappe
@@ -67,6 +68,7 @@ _LINE_FIELDS = [
     "branch",
     "company",
     "status",
+    "payroll_mode",
     "base_salary",
     "hourly_rate",
     "worked_hours",
@@ -598,38 +600,50 @@ def calculate_payroll_review(name: str | None = None) -> dict:
         period.company, emp_names, period.from_date, period.to_date
     )
 
+    # Per-employee salary plan (plan per-employee-salary §4.3): resolve every
+    # setting ONCE up-front — Monthly employees missing a base fail fast with
+    # the full offender list (same pattern as the blockers above).
+    settings = {
+        e["employee"]: calc.resolve_payroll_setting(e["employee"], period.to_date) for e in employees
+    }
+    missing_base = _monthly_missing_base(settings)
+    if missing_base:
+        frappe.throw(
+            _(
+                "NV tính lương tháng chưa có mức lương tháng (SSA.base) > 0: {0}"
+                " — gán bảng lương + base trước khi tính."
+            ).format(", ".join(missing_base)),
+            frappe.ValidationError,
+        )
+
     line_amounts: list[dict] = []
+    default_rate_count = 0  # Hourly employees priced by the portal default (info only)
     for emp in employees:
         emp_id = emp["employee"]
-        hourly_rate = calc.resolve_hourly_rate(emp_id, period.to_date)
+        setting = settings[emp_id]
 
-        # Split IN/OUT checkin pairs by time brackets → {coeff: hours}.
-        bracket_hours = _employee_bracket_hours(emp_id, period.from_date, period.to_date, time_brackets)
-
-        # Late minutes (from Attendance late_entry rows) → penalty.
-        late_minutes_list = _employee_late_minutes(emp_id, period.from_date, period.to_date)
-        # daily_rate = 8 standard hours × hourly rate (basis for Percentage /
-        # Half-Day / Full-Day penalty rules — M4).
-        late_penalty = calc.compute_late_penalty(
-            late_minutes_list, penalty_rules, daily_rate=hourly_rate * 8.0
-        )
-
-        # Checkout-miss penalty: Σ penalty_amount of Penalised (non-waived) tickets this period.
-        checkout_miss_penalty = calc.load_checkout_miss_penalty(emp_id, period.from_date, period.to_date)
-
-        # Load Salary Structure allowances + extra deductions (fixed amounts).
-        allowances, extra_deductions = _employee_salary_components(emp_id)
-
-        amounts = calc.compute_hourly_line(
-            bracket_hours=bracket_hours,
-            hourly_rate=hourly_rate,
-            deduction_rates=deduction_rates,
-            late_penalty=late_penalty,
-            checkout_miss_penalty=checkout_miss_penalty,
-            salary_advance_deduction=advance_ded.get(emp_id, 0.0),
-            allowances=allowances,
-            extra_deductions=extra_deductions,
-        )
+        if setting["mode"] == "Monthly":
+            amounts = _compute_monthly_amounts(
+                emp_id,
+                period,
+                setting,
+                penalty_rules=penalty_rules,
+                deduction_rates=deduction_rates,
+                salary_advance_deduction=advance_ded.get(emp_id, 0.0),
+            )
+        else:
+            if setting["rate_source"] == "default":
+                default_rate_count += 1
+            amounts = _compute_hourly_amounts(
+                emp_id,
+                period,
+                setting,
+                time_brackets=time_brackets,
+                penalty_rules=penalty_rules,
+                deduction_rates=deduction_rates,
+                salary_advance_deduction=advance_ded.get(emp_id, 0.0),
+            )
+        amounts["payroll_mode"] = setting["mode"]
 
         # WP2 (F-LC13): REAL hours/days from the Work-Session engine — the
         # line's regular/OT hours and payable days must reflect actual work
@@ -677,8 +691,119 @@ def calculate_payroll_review(name: str | None = None) -> dict:
         "total_gross_pay": totals["total_gross_pay"],
         "total_deductions": totals["total_deductions"],
         "total_net_pay": totals["total_net_pay"],
-        "message": _("Đã tính {0} dòng lương.").format(totals["total_employees"]),
+        "message": _("Đã tính {0} dòng lương.").format(totals["total_employees"])
+        + (f" — {default_rate_count} NV dùng lương giờ mặc định." if default_rate_count else ""),
     }
+
+
+def _monthly_missing_base(settings: dict) -> list[str]:
+    """Employees set to Monthly whose SSA base is missing/≤0 (fail-fast list)."""
+    return sorted(
+        eid
+        for eid, s in (settings or {}).items()
+        if (s or {}).get("mode") == "Monthly" and float((s or {}).get("monthly_base") or 0) <= 0
+    )
+
+
+def _compute_hourly_amounts(
+    emp_id: str,
+    period,
+    setting: dict,
+    *,
+    time_brackets: list[dict],
+    penalty_rules: list[dict],
+    deduction_rates: dict,
+    salary_advance_deduction: float,
+) -> dict:
+    """Hourly-mode review-line amounts (the pre-plan path, extracted intact)."""
+    hourly_rate = float(setting.get("hourly_rate") or 0)
+
+    # Split IN/OUT checkin pairs by time brackets → {coeff: hours}.
+    bracket_hours = _employee_bracket_hours(emp_id, period.from_date, period.to_date, time_brackets)
+
+    # Late minutes (from Attendance late_entry rows) → penalty.
+    late_minutes_list = _employee_late_minutes(emp_id, period.from_date, period.to_date)
+    # daily_rate = 8 standard hours × hourly rate (basis for Percentage /
+    # Half-Day / Full-Day penalty rules — M4).
+    late_penalty = calc.compute_late_penalty(
+        late_minutes_list, penalty_rules, daily_rate=hourly_rate * 8.0
+    )
+
+    # Checkout-miss penalty: Σ penalty_amount of Penalised (non-waived) tickets this period.
+    checkout_miss_penalty = calc.load_checkout_miss_penalty(emp_id, period.from_date, period.to_date)
+
+    # Load Salary Structure allowances + extra deductions (fixed amounts).
+    allowances, extra_deductions = _employee_salary_components(emp_id)
+
+    return calc.compute_hourly_line(
+        bracket_hours=bracket_hours,
+        hourly_rate=hourly_rate,
+        deduction_rates=deduction_rates,
+        late_penalty=late_penalty,
+        checkout_miss_penalty=checkout_miss_penalty,
+        salary_advance_deduction=salary_advance_deduction,
+        allowances=allowances,
+        extra_deductions=extra_deductions,
+    )
+
+
+def _compute_monthly_amounts(
+    emp_id: str,
+    period,
+    setting: dict,
+    *,
+    penalty_rules: list[dict],
+    deduction_rates: dict,
+    salary_advance_deduction: float,
+) -> dict:
+    """Monthly-mode review-line amounts (plan per-employee-salary §4.3).
+
+    Full semantics (user-confirmed 2026-08-31): base × payable_days/standard
+    + OT buckets × (base/standard_hours) × segment multipliers + allowances,
+    minus % deductions / unpaid days / tiered late penalty / advance / checkout.
+    """
+    base = float(setting.get("monthly_base") or 0)
+    summary = calc.load_employee_period_summary(emp_id, period.from_date, period.to_date)
+    agg = calc.build_monthly_agg(
+        calc.load_employee_period_agg(emp_id, period.from_date, period.to_date), summary
+    )
+    seg_mult = calc.load_segment_multipliers(period.company)
+
+    # Tiered late penalty with the MONTHLY daily rate (base / standard days).
+    late_minutes_list = _employee_late_minutes(emp_id, period.from_date, period.to_date)
+    standard_days = calc.DEFAULT_STANDARD_DAYS or 26.0
+    late_penalty = calc.compute_late_penalty(
+        late_minutes_list,
+        penalty_rules,
+        daily_rate=(base / standard_days) if standard_days else 0.0,
+    )
+    checkout_miss_penalty = calc.load_checkout_miss_penalty(emp_id, period.from_date, period.to_date)
+    allowances, extra_deductions = _employee_salary_components(emp_id)
+
+    amounts = calc.compute_line(
+        agg,
+        base,
+        config={
+            "segment_multipliers": seg_mult,
+            "salary_advance_deduction": salary_advance_deduction,
+            "checkout_miss_penalty": checkout_miss_penalty,
+        },
+        late_penalty=late_penalty,
+        deduction_rates=deduction_rates,
+        allowances=allowances,
+        extra_deductions=extra_deductions,
+    )
+    # Hourly-only columns are explicitly zeroed so a mode switch + recalc
+    # never leaves stale bracket numbers on the line.
+    amounts["hourly_rate"] = 0.0
+    amounts["bracket_hours_1"] = 0.0
+    amounts["bracket_hours_1_2"] = 0.0
+    amounts["bracket_hours_1_5"] = 0.0
+    amounts["late_penalty"] = amounts.get("late_penalty_amount", 0.0)
+    amounts["worked_hours"] = round(
+        calc._num(summary.get("regular_hours")) + calc._num(summary.get("overtime_hours")), 2
+    )
+    return amounts
 
 
 @frappe.whitelist()
@@ -737,6 +862,133 @@ def delete_payroll_review(name: str | None = None) -> dict:
             name, len(lines)
         ),
     }
+
+
+@frappe.whitelist()
+def update_payroll_review(
+    name: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    attendance_period: str | None = None,
+) -> dict:
+    """Sửa ngày / kỳ công của một kỳ lương Draft (plan payroll-periods-desk-free P2).
+
+    Company / month / year là key chống trùng của create_payroll_review nên
+    KHÔNG cho đổi — chỉ from_date / to_date / attendance_period, và chỉ khi
+    status=Draft (kỳ đã tính trở đi bị khoá để bảo vệ lines đã sinh).
+    """
+    _assert_closer()
+    period = _get_period(name)
+    if period.status != "Draft":
+        frappe.throw(
+            _("Chỉ sửa được kỳ lương ở trạng thái Nháp (kỳ hiện tại: {0}).").format(period.status)
+        )
+
+    old = {
+        "from_date": str(period.from_date or ""),
+        "to_date": str(period.to_date or ""),
+        "attendance_period": period.attendance_period or "",
+    }
+    new_from = (from_date or "").strip()
+    new_to = (to_date or "").strip()
+    if new_from:
+        period.from_date = new_from
+    if new_to:
+        period.to_date = new_to
+    if str(period.from_date or "") > str(period.to_date or ""):
+        frappe.throw(_("Ngày kết thúc không được trước ngày bắt đầu."))
+    if attendance_period is not None:
+        period.attendance_period = (attendance_period or "").strip() or None
+    period.save()
+
+    audit_api.log(
+        "Manual Override",
+        doc=period.as_dict(),
+        description=f"Sửa kỳ lương Draft {name}",
+        old_value=old,
+        new_value={
+            "from_date": str(period.from_date or ""),
+            "to_date": str(period.to_date or ""),
+            "attendance_period": period.attendance_period or "",
+        },
+    )
+    frappe.db.commit()
+    return {
+        "name": name,
+        "from_date": str(period.from_date or ""),
+        "to_date": str(period.to_date or ""),
+        "attendance_period": period.attendance_period or "",
+    }
+
+
+@frappe.whitelist()
+def cancel_payroll_review(name: str | None = None, reason: str = "") -> dict:
+    """Huỷ một kỳ lương (status → Cancelled, GIỮ lines để truy vết) — plan P2.
+
+    Cho phép từ Draft / Calculated / Approved. Từ Slips Generated / Published
+    chỉ huỷ được khi toàn bộ payslip của kỳ còn draft (tự xoá slip draft + gỡ
+    link trên line); đã có slip submit — hoặc slip được nhân viên xác nhận —
+    thì phải đi qua "Mở lại để điều chỉnh" (payslip_ack.reopen_confirmed_period)
+    hoặc xoá hẳn kỳ (delete_payroll_review).
+    """
+    _assert_closer()
+    reason = (reason or "").strip()
+    if len(reason) < 4:
+        frappe.throw(_("Lý do huỷ tối thiểu 4 ký tự (để lưu audit)."))
+    period = _get_period(name)
+    if period.status == "Cancelled":
+        frappe.throw(_("Kỳ lương đã bị huỷ từ trước."))
+
+    if calc.period_has_confirmed_slips(name) > 0:
+        frappe.throw(
+            _("Kỳ đã có phiếu lương được nhân viên xác nhận — dùng 'Mở lại để điều chỉnh'.")
+        )
+
+    lines = frappe.db.get_all(
+        LINE_DOCTYPE,
+        filters={"payroll_review_period": name},
+        fields=["name", "salary_slip"],
+    )
+    slip_names = [ln.salary_slip for ln in lines if ln.salary_slip]
+    removed_slips = 0
+    if slip_names:
+        submitted = frappe.db.get_all(
+            "Salary Slip",
+            filters={"name": ["in", slip_names], "docstatus": 1},
+            fields=["name"],
+            limit=1,
+        )
+        if submitted:
+            frappe.throw(
+                _(
+                    "Kỳ đã sinh phiếu lương đã submit — dùng 'Mở lại để điều chỉnh' rồi xoá để tính lại."
+                )
+            )
+        for slip in slip_names:
+            try:
+                frappe.delete_doc("Salary Slip", slip, ignore_permissions=True, force=True)
+            except Exception:
+                frappe.db.delete("Salary Slip", {"name": slip})
+            removed_slips += 1
+        # Gỡ link slip trên lines để danh sách không trỏ tới slip đã xoá.
+        for ln in lines:
+            if ln.salary_slip:
+                frappe.db.set_value(LINE_DOCTYPE, ln.name, "salary_slip", None)
+
+    old_status = period.status
+    period_dict = period.as_dict()
+    if period.docstatus == 1:
+        period.cancel()
+    frappe.db.set_value(PERIOD_DOCTYPE, name, "status", "Cancelled")
+    audit_api.log(
+        "Manual Override",
+        doc=period_dict,
+        description=f"Huỷ kỳ lương {name} ({old_status} → Cancelled). Lý do: {reason}",
+        old_value=old_status,
+        new_value="Cancelled",
+    )
+    frappe.db.commit()
+    return {"name": name, "status": "Cancelled", "removed_slips": removed_slips}
 
 
 def _employee_bracket_hours(employee: str, from_date, to_date, brackets: list[dict]) -> dict:
@@ -1055,16 +1307,30 @@ def _parse_worked_days(raw) -> dict:
 
 def _line_breakdown(doc) -> dict:
     """Build the formula-breakdown dict for the line-detail popup."""
-    hourly_rate = float(doc.get("hourly_rate") or 0)
-    brackets = [
-        {"coeff": 1.0, "hours": float(doc.get("bracket_hours_1") or 0), "label": "Thường (1.0×)"},
-        {"coeff": 1.2, "hours": float(doc.get("bracket_hours_1_2") or 0), "label": "Tăng ca (1.2×)"},
-        {"coeff": 1.5, "hours": float(doc.get("bracket_hours_1_5") or 0), "label": "OT / đêm (1.5×)"},
-    ]
-    for b in brackets:
-        b["rate"] = hourly_rate
-        b["amount"] = round(b["hours"] * hourly_rate * b["coeff"], 2)
-    base_gross = round(sum(b["amount"] for b in brackets), 2)
+    mode = (doc.get("payroll_mode") or "Hourly").strip() or "Hourly"
+    monthly = mode == "Monthly"
+    base_salary = float(doc.get("base_salary") or 0)
+    payable_days = float(doc.get("payable_days") or 0)
+    standard_days = calc.DEFAULT_STANDARD_DAYS or 26.0
+    if monthly:
+        # Monthly popup: base × payable/standard + OT buckets (plan
+        # per-employee-salary §4.4) — no time brackets on these lines.
+        hourly_rate = 0.0
+        brackets = []
+        proportional_base = round(base_salary * payable_days / standard_days, 2)
+        base_gross = proportional_base
+    else:
+        hourly_rate = float(doc.get("hourly_rate") or 0)
+        brackets = [
+            {"coeff": 1.0, "hours": float(doc.get("bracket_hours_1") or 0), "label": "Thường (1.0×)"},
+            {"coeff": 1.2, "hours": float(doc.get("bracket_hours_1_2") or 0), "label": "Tăng ca (1.2×)"},
+            {"coeff": 1.5, "hours": float(doc.get("bracket_hours_1_5") or 0), "label": "OT / đêm (1.5×)"},
+        ]
+        for b in brackets:
+            b["rate"] = hourly_rate
+            b["amount"] = round(b["hours"] * hourly_rate * b["coeff"], 2)
+        proportional_base = 0.0
+        base_gross = round(sum(b["amount"] for b in brackets), 2)
     gross = float(doc.get("gross_pay") or 0)
     rates = calc.load_deduction_rates() or {}
     deductions_pct = [
@@ -1088,7 +1354,18 @@ def _line_breakdown(doc) -> dict:
         "absent_days": int(doc.get("absent_days") or 0),
         "need_review_days": int(doc.get("need_review_days") or 0),
         "worked_days": _parse_worked_days(doc.get("worked_days")),
+        "payroll_mode": mode,
         "base_gross": base_gross,
+        "monthly": {
+            "base_salary": base_salary,
+            "payable_days": payable_days,
+            "standard_days": standard_days,
+            "daily_rate": round(base_salary / standard_days, 2) if standard_days else 0.0,
+            "hourly_equivalent": round(
+                base_salary / (calc.DEFAULT_STANDARD_HOURS or 208.0), 2
+            ),
+            "proportional_base": proportional_base if monthly else 0.0,
+        },
         "allowance_amount": float(doc.get("allowance_amount") or 0),
         "gross_pay": gross,
         "deductions_pct": deductions_pct,
@@ -1942,6 +2219,17 @@ def publish_payslips(name: str | None = None) -> dict:
         )
     except Exception:
         pass
+    # Payslips desk-free (plan payslips-deskfree-complete §2.7): company-room
+    # tickle so open /hr/payslips tabs subscribed to ``payroll:{company}``
+    # silently reload (same event contract as payslip_ack mutations).
+    try:
+        frappe.publish_realtime(
+            "payslip_updated",
+            {"period": period.name, "company": period.company},
+            room=f"payroll:{period.company or ''}",
+        )
+    except Exception:
+        pass
     audit_api.log(
         "Payroll Publish",
         doc=period.as_dict(),
@@ -2206,6 +2494,15 @@ def payslip_detail(name: str | None = None) -> dict:
         # Full formula breakdown (the same dict the manager's line-detail
         # popup renders) so employees can audit how their pay was computed.
         out["calculation"] = _line_breakdown(line_doc)
+
+    # Payslips desk-free (plan payslips-deskfree-complete §2.2) — the SPA
+    # renders these instead of guessing: the source review line, the
+    # server-driven auto-confirm deadline, the toolbar action matrix and the
+    # merged Version + Comment + Audit timeline.
+    out["review_line"] = ln[0]["name"] if ln else None
+    out["auto_confirm_deadline"] = _payslip_auto_confirm_deadline(out)
+    out["can"] = _payslip_detail_can(out)
+    out["timeline"] = _payslip_timeline(name)
     return out
 
 
@@ -2220,6 +2517,525 @@ def _assert_payslip_access(employee: str) -> None:
             _("Bạn không có quyền truy cập phiếu lương của nhân viên khác."),
             frappe.PermissionError,
         )
+
+
+# --------------------------------------------------------------------------- #
+# Payslips desk-free complete (plan plans/payslips-deskfree-complete.md)
+# --------------------------------------------------------------------------- #
+PAYSLIP_PRINT_FORMAT = "Phiếu lương VN"
+
+_PAYSLIP_MANAGER_ROLES = {"Payroll User", "Payroll Manager"}
+
+
+def _is_payslip_manager() -> bool:
+    """HR User+ / Payroll roles may browse & email everyone's payslips (WP3/WP4)."""
+    roles = set(emp_utils.get_user_roles() or [])
+    return bool(roles & (emp_utils.HR_USER_ROLES | _PAYSLIP_MANAGER_ROLES))
+
+
+def _parse_payslip_datetime(value) -> datetime.datetime | None:
+    """Lenient parser for the storage formats ``vn_visible_at`` can carry."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _payslip_auto_confirm_deadline(slip: dict) -> str | None:
+    """Server-driven auto-confirm deadline (WP2) — the SPA must render THIS,
+    never a hard-coded 3-day guess (the old PayslipDetailView behaviour)."""
+    if slip.get("vn_ack_status") or not slip.get("vn_employee_visible"):
+        return None
+    visible_at = _parse_payslip_datetime(slip.get("vn_visible_at"))
+    if not visible_at:
+        return None
+    days = 3
+    try:
+        # Lazy import: payslip_ack owns the setting (single source of truth).
+        from gege_hr.gege_hr.api.payslip_ack import _autoconfirm_days
+
+        days = int(_autoconfirm_days() or 3)
+    except Exception:
+        days = 3
+    return (visible_at + datetime.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _slip_user_id(employee: str | None) -> str | None:
+    """The Employee's portal login (email) — the payslip email recipient."""
+    try:
+        return frappe.db.get_value("Employee", employee, "user_id")
+    except Exception:
+        return None
+
+
+def _payslip_detail_can(slip: dict) -> dict:
+    """Server-computed action matrix for the SPA detail toolbar (plan §2.2)."""
+    manager = _is_payslip_manager()
+    visible = bool(slip.get("vn_employee_visible"))
+    return {
+        "pdf": manager or visible,
+        "email": (manager or visible) and bool(_slip_user_id(slip.get("employee"))),
+        "comment": manager or visible,
+        "view_review_line": manager,
+    }
+
+
+def _version_change_summary(data) -> str:
+    """First ≤2 changed fields of a Version ``data`` JSON → ``f: old → new``.
+
+    ``0`` is a legit old/new value (e.g. ``vn_employee_visible`` 0 → 1) — never
+    coerce it to the em-dash ("never or on zero" law).
+    """
+
+    def _fmt(v):
+        return "—" if v is None or v == "" else v
+
+    try:
+        changed = (json.loads(str(data or "{}")) or {}).get("changed") or []
+    except Exception:
+        return ""
+    parts = []
+    for c in changed[:2]:
+        if isinstance(c, (list, tuple)) and len(c) >= 3:
+            parts.append(f"{c[0]}: {_fmt(c[1])} → {_fmt(c[2])}")
+    return " · ".join(parts)
+
+
+def merge_payslip_timeline(comments=None, versions=None, audits=None, limit: int = 50) -> list[dict]:
+    """PURE — merge Comment + Version + VN Audit Event rows newest-first.
+
+    Every item is ``{at, actor, kind, text}`` with ``kind`` ∈ ``comment`` |
+    ``version`` | ``audit`` — the SPA maps kind → icon/label VN
+    (utils/payslipTimeline.js). Unit-testable without a bench.
+    """
+    items: list[dict] = []
+    for c in comments or []:
+        items.append(
+            {
+                "at": str(c.get("creation") or ""),
+                "actor": c.get("owner") or c.get("comment_email") or "",
+                "kind": "comment",
+                "text": str(c.get("content") or "").strip(),
+            }
+        )
+    for v in versions or []:
+        text = _version_change_summary(v.get("data"))
+        if text:
+            items.append(
+                {
+                    "at": str(v.get("creation") or ""),
+                    "actor": v.get("owner") or "",
+                    "kind": "version",
+                    "text": text,
+                }
+            )
+    for a in audits or []:
+        text = str(a.get("description") or a.get("audit_type") or "").strip()
+        if text:
+            items.append(
+                {
+                    "at": str(a.get("creation") or a.get("created_at") or ""),
+                    "actor": a.get("actor") or a.get("owner") or "",
+                    "kind": "audit",
+                    "text": text,
+                }
+            )
+    items.sort(key=lambda i: i["at"], reverse=True)
+    return [i for i in items if i["text"]][:limit]
+
+
+def _payslip_timeline(name: str, limit: int = 50) -> list[dict]:
+    """Comment + Version + Audit rows of one slip, merged (fail-soft, WP2)."""
+    comments: list = []
+    versions: list = []
+    audits: list = []
+    try:
+        comments = frappe.get_all(
+            "Comment",
+            filters={"reference_doctype": "Salary Slip", "reference_name": name},
+            fields=["name", "owner", "creation", "content"],
+            order_by="creation desc",
+            limit=limit,
+        )
+    except Exception:
+        comments = []
+    try:
+        versions = frappe.get_all(
+            "Version",
+            filters={"ref_doctype": "Salary Slip", "docname": name},
+            fields=["name", "owner", "creation", "data"],
+            order_by="creation desc",
+            limit=limit,
+        )
+    except Exception:
+        versions = []
+    try:
+        audits = frappe.get_all(
+            "VN Audit Event",
+            filters={"reference_doctype": "Salary Slip", "reference_name": name},
+            fields=["name", "actor", "creation", "audit_type", "description"],
+            order_by="creation desc",
+            limit=limit,
+        )
+    except Exception:
+        # Older benches may not carry every column — retry the minimal
+        # projection so the timeline keeps at least type + time info.
+        try:
+            audits = frappe.get_all(
+                "VN Audit Event",
+                filters={"reference_doctype": "Salary Slip", "reference_name": name},
+                fields=["name", "owner", "creation", "audit_type"],
+                order_by="creation desc",
+                limit=limit,
+            )
+        except Exception:
+            audits = []
+    return merge_payslip_timeline(comments=comments, versions=versions, audits=audits, limit=limit)
+
+
+@frappe.whitelist()
+def download_payslip_pdf(name: str | None = None) -> None:
+    """WP1 — payslip PDF through the standard Frappe print pipeline (the seeded
+    "Phiếu lương VN" format). Owner-visible or manager; fills ``frappe.response``
+    with the PDF bytes exactly like the Desk print button does."""
+    name = (name or "").strip()
+    if not name:
+        frappe.throw(_("Thiếu mã phiếu lương."))
+    slip = frappe.db.get_value(
+        "Salary Slip", name, ["employee", "vn_employee_visible"], as_dict=True
+    )
+    if not slip:
+        frappe.throw(_("Phiếu lương {0} không tồn tại.").format(name))
+    if not _is_payslip_manager():
+        _assert_payslip_access(slip.get("employee"))
+        if not slip.get("vn_employee_visible"):
+            frappe.throw(
+                _("Phiếu lương này chưa được phát hành cho nhân viên."),
+                frappe.PermissionError,
+            )
+    try:
+        from frappe.utils.print_format import download_pdf  # lazy: stub-safe
+
+        download_pdf("Salary Slip", name, format=PAYSLIP_PRINT_FORMAT)
+    except Exception as e:
+        frappe.throw(
+            _("Không tạo được PDF — chạy bench migrate để seed Print Format '{0}'. {1}").format(
+                PAYSLIP_PRINT_FORMAT, str(e)
+            ),
+            frappe.ValidationError,
+        )
+
+
+@frappe.whitelist()
+def payslips_all(
+    q: str | None = None,
+    status: str | None = None,
+    department: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> dict:
+    """WP3 — every employee's payslips for HR/Payroll (manager-only).
+
+    Filters: free-text ``q`` (employee name/code/period — DNA §6.6 D), exact
+    ``status``, ``department`` (Employee join), ``start_date`` between
+    ``from_date``/``to_date``. Summary is computed over the FULL filtered set
+    (DNA §6.6 B) so the SPA tiles stay truthful while paginating.
+    """
+    if not _is_payslip_manager():
+        frappe.throw(
+            _("Bạn không có quyền xem phiếu lương của toàn công ty."),
+            frappe.PermissionError,
+        )
+    filters: dict = {"docstatus": ["<", 2]}
+    if status:
+        filters["status"] = status
+    if from_date or to_date:
+        filters["start_date"] = ["between", [from_date or to_date, to_date or from_date]]
+    try:
+        rows = frappe.db.get_all(
+            "Salary Slip",
+            filters=filters,
+            fields=_PAYSLIP_FIELDS,
+            order_by="start_date desc, name desc",
+            limit_page_length=pagination.MAX_PAGE_SIZE * 10,  # newest-first bound
+        )
+    except Exception:
+        rows = []
+    employees: dict = {}
+    if rows:
+        codes = sorted({r.get("employee") for r in rows if r.get("employee")})
+        try:
+            employees = {
+                r.get("name"): r
+                for r in frappe.db.get_all(
+                    "Employee",
+                    filters={"name": ["in", codes]},
+                    fields=["name", "department", "company"],
+                )
+            }
+        except Exception:
+            employees = {}
+    out_rows: list[dict] = []
+    for r in rows:
+        emp = employees.get(r.get("employee")) or {}
+        row = dict(r)
+        row["department"] = emp.get("department")
+        row["company"] = row.get("company") or emp.get("company")
+        out_rows.append(row)
+    if department:
+        out_rows = [r for r in out_rows if r.get("department") == department]
+    filtered = [r for r in out_rows if _match_row(r, q)]
+    summary = {
+        "total": len(filtered),
+        "total_net": sum(float(r.get("net_pay") or 0) for r in filtered),
+        "awaiting_ack": sum(
+            1 for r in filtered if r.get("vn_employee_visible") and not r.get("vn_ack_status")
+        ),
+        "awaiting_payment": sum(
+            1 for r in filtered if str(r.get("vn_ack_status") or "") == "Awaiting Payment"
+        ),
+    }
+    return pagination.paginate_filtered(filtered, page=page, page_size=page_size, summary=summary)
+
+
+@frappe.whitelist()
+def payslips_all_departments() -> list[dict]:
+    """WP3 — distinct non-group Departments feeding the SPA filter select."""
+    if not _is_payslip_manager():
+        frappe.throw(
+            _("Bạn không có quyền xem phiếu lương của toàn công ty."),
+            frappe.PermissionError,
+        )
+    try:
+        return frappe.db.get_all(
+            "Department",
+            filters={"is_group": 0},
+            fields=["name"],
+            order_by="name asc",
+            limit_page_length=0,
+        )
+    except Exception:
+        return []
+
+
+@frappe.whitelist()
+def add_payslip_comment(name: str | None = None, comment: str | None = None) -> dict:
+    """WP2 — a standard Frappe Comment row on the slip (employee ↔ HR thread).
+
+    Owner-visible or manager; rate-limited to 1 comment / 10 s / user / slip
+    (plan §7 spam guard); audited best-effort.
+    """
+    name = (name or "").strip()
+    text = (comment or "").strip()
+    if not name:
+        frappe.throw(_("Thiếu mã phiếu lương."))
+    if not text:
+        frappe.throw(_("Nội dung bình luận không được để trống."))
+    if len(text) > 2000:
+        frappe.throw(_("Bình luận quá dài (tối đa 2000 ký tự)."))
+    slip = frappe.db.get_value(
+        "Salary Slip", name, ["employee", "start_date", "vn_employee_visible"], as_dict=True
+    )
+    if not slip:
+        frappe.throw(_("Phiếu lương {0} không tồn tại.").format(name))
+    if not _is_payslip_manager():
+        _assert_payslip_access(slip.get("employee"))
+        if not slip.get("vn_employee_visible"):
+            frappe.throw(
+                _("Phiếu lương này chưa được phát hành cho nhân viên."),
+                frappe.PermissionError,
+            )
+    try:
+        last = frappe.get_all(
+            "Comment",
+            filters={
+                "reference_doctype": "Salary Slip",
+                "reference_name": name,
+                "owner": frappe.session.user,
+            },
+            fields=["creation"],
+            order_by="creation desc",
+            limit=1,
+        )
+    except Exception:
+        last = []
+    if last:
+        prev = _parse_payslip_datetime(last[0].get("creation"))
+        if prev and (datetime.datetime.now() - prev).total_seconds() < 10:
+            frappe.throw(_("Bạn đang gửi bình luận quá nhanh — vui lòng đợi ít giây."))
+    row = frappe.get_doc(
+        {
+            "doctype": "Comment",
+            "comment_type": "Comment",
+            "reference_doctype": "Salary Slip",
+            "reference_name": name,
+            "comment_email": frappe.session.user,
+            "content": text,
+        }
+    ).insert(ignore_permissions=True)
+    try:
+        audit_api.log(
+            "Payslip Comment",
+            doc={"doctype": "Salary Slip", "name": name},
+            work_date=slip.get("start_date"),
+            description=text[:140],
+            old_value="",
+            new_value="Comment",
+        )
+    except Exception:
+        pass  # best-effort audit — never aborts the comment
+    try:
+        count = frappe.db.count("Comment", {"reference_doctype": "Salary Slip", "reference_name": name})
+    except Exception:
+        count = None
+    return {"name": name, "comment_name": getattr(row, "name", None), "comment_count": count}
+
+
+@frappe.whitelist()
+def email_payslip(name: str | None = None, recipient: str | None = None) -> dict:
+    """WP4 — email ONE payslip (PDF attached via ``frappe.attach_print``).
+
+    An employee may only send to their own portal email; a manager may also
+    pass an explicit ``recipient`` (resend support). The send is enqueued so
+    the SPA gets an instant "queued" response.
+    """
+    name = (name or "").strip()
+    if not name:
+        frappe.throw(_("Thiếu mã phiếu lương."))
+    slip = frappe.db.get_value(
+        "Salary Slip",
+        name,
+        ["employee", "employee_name", "start_date", "end_date", "vn_employee_visible"],
+        as_dict=True,
+    )
+    if not slip:
+        frappe.throw(_("Phiếu lương {0} không tồn tại.").format(name))
+    manager = _is_payslip_manager()
+    if not manager:
+        _assert_payslip_access(slip.get("employee"))
+        if not slip.get("vn_employee_visible"):
+            frappe.throw(_("Phiếu lương này chưa được phát hành cho nhân viên."))
+        recipient = None  # an employee can only email themselves
+    to = (recipient or "").strip() or _slip_user_id(slip.get("employee"))
+    if not to or "@" not in str(to):
+        frappe.throw(_("Nhân viên chưa có email hợp lệ — không thể gửi phiếu lương."))
+    frappe.enqueue(
+        "gege_hr.gege_hr.api.payroll._send_payslip_email",
+        queue="short",
+        name=name,
+        recipients=[to],
+    )
+    return {
+        "name": name,
+        "recipients": [to],
+        "queued": True,
+        "message": _("Đã đưa email phiếu lương vào hàng gửi."),
+    }
+
+
+def _send_payslip_email(name: str, recipients: list[str]) -> None:
+    """Enqueue worker — one payslip email with the seeded Print Format PDF."""
+    slip = (
+        frappe.db.get_value(
+            "Salary Slip",
+            name,
+            ["employee_name", "start_date", "end_date", "net_pay"],
+            as_dict=True,
+        )
+        or {}
+    )
+    frappe.sendmail(
+        recipients=recipients,
+        subject=_("Phiếu lương kỳ {0} — {1}").format(
+            slip.get("start_date") or "", slip.get("employee_name") or ""
+        ),
+        message=(
+            "<p>Xin chào {0},</p>"
+            "<p>Phiếu lương kỳ <b>{1} → {2}</b> của bạn được đính kèm dưới dạng PDF.</p>"
+            "<p>Thực lĩnh: <b>{3}</b></p>".format(
+                slip.get("employee_name") or "",
+                slip.get("start_date") or "",
+                slip.get("end_date") or "",
+                slip.get("net_pay") or 0,
+            )
+        ),
+        attachments=[frappe.attach_print("Salary Slip", name, print_format=PAYSLIP_PRINT_FORMAT)],
+        reference_doctype="Salary Slip",
+        reference_name=name,
+    )
+
+
+@frappe.whitelist()
+def bulk_email_payslips(period: str | None = None) -> dict:
+    """WP4 — email every published slip of a review period (HR/Payroll Manager).
+
+    Partial-safe: slips missing the employee's portal email (or not yet
+    published) are returned in ``skipped`` with a Vietnamese reason.
+    """
+    # Gate per plan §2.6: HR Manager / Payroll Manager / System Manager —
+    # slightly wider than ``_assert_closer`` (a Payroll Manager without the
+    # HR Manager role must still be able to resend a whole period).
+    roles = set(emp_utils.get_user_roles() or [])
+    if not (roles & (emp_utils.HR_MANAGER_ROLES | {"Payroll Manager"})):
+        frappe.throw(
+            _("Chỉ HR Manager / Payroll Manager mới được gửi email cả kỳ lương."),
+            frappe.PermissionError,
+        )
+    period = (period or "").strip()
+    if not period:
+        frappe.throw(_("Thiếu mã kỳ lương."))
+    _get_period(period)  # existence check
+    try:
+        lines = (
+            frappe.get_all(
+                "VN Payroll Review Line",
+                filters={"payroll_review_period": period},
+                fields=["salary_slip"],
+            )
+            or []
+        )
+    except Exception:
+        lines = []
+    queued: list[str] = []
+    skipped: list[dict] = []
+    seen: set[str] = set()
+    for r in lines:
+        slip_name = r.get("salary_slip")
+        if not slip_name or slip_name in seen:
+            continue
+        seen.add(slip_name)
+        try:
+            employee = frappe.db.get_value("Salary Slip", slip_name, "employee")
+            visible = frappe.db.get_value("Salary Slip", slip_name, "vn_employee_visible")
+            user_id = _slip_user_id(employee)
+        except Exception:
+            skipped.append({"name": slip_name, "reason": "Không đọc được phiếu lương"})
+            continue
+        if not visible:
+            skipped.append({"name": slip_name, "reason": "Chưa phát hành cho nhân viên"})
+            continue
+        if not user_id or "@" not in str(user_id or ""):
+            skipped.append({"name": slip_name, "reason": "Nhân viên chưa có email đăng nhập"})
+            continue
+        frappe.enqueue(
+            "gege_hr.gege_hr.api.payroll._send_payslip_email",
+            queue="short",
+            name=slip_name,
+            recipients=[user_id],
+        )
+        queued.append(slip_name)
+    return {
+        "queued": queued,
+        "skipped": skipped,
+        "message": _("Đã đưa {0} email vào hàng gửi.").format(len(queued)),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -2277,6 +3093,11 @@ def get_payroll_settings() -> dict:
         "grace_hours": _cm("vn_cm_grace_hours", int, int(CM_DEFAULTS["grace_hours"])),
         "window_days": _cm("vn_cm_window_days", int, int(CM_DEFAULTS["window_days"])),
         "buffer_minutes": _cm("vn_cm_buffer_minutes", int, int(CM_DEFAULTS["buffer_minutes"])),
+        # Desk-free COMPLETE (B1/B6/C4) — 0 stays 0 ("never or" law).
+        "email_enabled": bool(_cm("vn_cm_email_enabled", int, 0)),
+        "auto_assign_enabled": bool(_cm("vn_cm_auto_assign_enabled", int, 0)),
+        "max_evidence_files": _cm("vn_cm_max_evidence_files", int, 5),
+        "max_evidence_mb": _cm("vn_cm_max_evidence_mb", float, 10.0),
     }
     # Adjustment presets ("Mẫu điều chỉnh" tab → review popup dropdown).
     presets = _load_adjustment_presets()
@@ -2312,12 +3133,23 @@ _CHECKOUT_MISS_FIELDS = {
     "grace_hours": "vn_cm_grace_hours",
     "window_days": "vn_cm_window_days",
     "buffer_minutes": "vn_cm_buffer_minutes",
+    # Desk-free COMPLETE (B1/B6/C4).
+    "email_enabled": "vn_cm_email_enabled",
+    "auto_assign_enabled": "vn_cm_auto_assign_enabled",
+    "max_evidence_files": "vn_cm_max_evidence_files",
+    "max_evidence_mb": "vn_cm_max_evidence_mb",
 }
 _CHECKOUT_MISS_INT_FIELDS = {
     "vn_cm_free_first_n",
     "vn_cm_grace_hours",
     "vn_cm_window_days",
     "vn_cm_buffer_minutes",
+    "vn_cm_max_evidence_files",
+}
+_CHECKOUT_MISS_BOOL_FIELDS = {
+    "vn_cm_enabled",
+    "vn_cm_email_enabled",
+    "vn_cm_auto_assign_enabled",
 }
 
 
@@ -2340,7 +3172,7 @@ def _apply_checkout_miss(setting, cm) -> None:
         if key not in cm or cm[key] is None:
             continue
         value = cm[key]
-        if key == "enabled":
+        if field in _CHECKOUT_MISS_BOOL_FIELDS:
             setting.set(field, 1 if _cm_to_bool(value) else 0)
             continue
         try:
@@ -2402,9 +3234,18 @@ def save_payroll_settings(**kwargs) -> dict:
             clean.append({"adjustment_type": adj_type, "description": description, "amount": amount})
         setting.vn_adjustment_presets = json.dumps(clean, ensure_ascii=False)
     # Checkout-miss penalty config (vn_cm_*).
-    _apply_checkout_miss(setting, kwargs.get("checkout_miss"))
+    cm_payload = kwargs.get("checkout_miss")
+    _apply_checkout_miss(setting, cm_payload)
     setting.flags.ignore_permissions = True
     setting.save(ignore_permissions=True)
+    # C4 — flip the seeded assignment rule with the toggle (best-effort).
+    if isinstance(cm_payload, dict) and "auto_assign_enabled" in cm_payload:
+        try:
+            from gege_hr.gege_hr.setup_checkout_miss_deskfree import sync_assignment_rule_enabled
+
+            sync_assignment_rule_enabled()
+        except Exception:
+            pass
 
     # 2. Department hourly rates.
     dept_rates = kwargs.get("department_rates")

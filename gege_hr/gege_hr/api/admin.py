@@ -27,6 +27,7 @@ live here rather than in ``utils/`` because they only make sense behind a
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 
 import frappe
@@ -166,6 +167,16 @@ def _audit_admin(
     )
 
 
+def _notify_schedule_updated_admin(employee: str | None) -> None:
+    """Best-effort realtime ping — open /hr/schedule tabs refresh themselves
+    (event ``gege_hr:schedule_updated``; mirrors shift._notify_schedule_updated
+    from plans/plan-schedule-desk-free.md §2.9)."""
+    try:
+        frappe.publish_realtime("gege_hr:schedule_updated", {"employee": employee})
+    except Exception:
+        pass
+
+
 # --------------------------------------------------------------------------- #
 # Portal settings (VN HR Portal Setting single-doctype CRUD)
 # --------------------------------------------------------------------------- #
@@ -185,6 +196,10 @@ PORTAL_SETTING_FIELDS = [
     "timezone",
     "enable_employee_self_service",
     "enable_manager_dashboard",
+    # Desk-free B3 (plans/approvals-deskfree-complete §3.6) — follow-up knobs.
+    "vn_approval_digest_enabled",
+    "vn_approval_stale_hours",
+    "vn_approval_escalate_hours",
 ]
 
 # Lookup options for the Link / Select fields so the SPA can render dropdowns
@@ -344,18 +359,30 @@ def create_user(
     password: str | None = None,
     username: str | None = None,
 ) -> dict:
-    """Create a Frappe User and assign portal roles atomically.
+    """Create a Frappe User with its portal roles attached atomically.
 
-    Returns ``{"name", "email", "full_name", "roles"}``.
+    Returns ``{"name", "email", "full_name", "username", "roles",
+    "roles_warning"}``.
 
     Validation:
     * email must not already exist as a User;
     * only :data:`PORTAL_ROLES` are honoured (silently drops anything else);
-    * the new User is created as ``Website User`` (not System User) so it
-      cannot access the desk by default.
-    * if ``password`` is supplied it is stored immediately so the employee
-      can log in right away (min length enforced); otherwise the account is
-      only usable once Frappe's welcome-email password-set link is delivered.
+    * roles are appended BEFORE insert so Frappe core's
+      ``User.check_roles_added()`` never queues its English "no roles
+      enabled" msgprint (that warning used to mask real errors in the SPA —
+      see plans/plan-fix-create-user-roles.md RC1/RC3);
+    * ``Employee`` is ERPNext-locked to users with a linked Employee record
+      (``erpnext...employee.validate_employee_role`` strips it otherwise).
+      When no Employee is linked yet the role is reported back as
+      ``deferred_roles`` instead of being silently dropped, and
+      ``link_user_to_employee`` re-adds it once the Employee exists
+      (FINDING-LC1b);
+    * the new User is created as ``System User`` (Frappe strips non-website
+      roles from Website Users — FINDING-LC1); desk access remains gated by
+      role permissions;
+    * if ``password`` is supplied it is validated up-front (min 8 chars)
+      and stored immediately after insert; otherwise the account is only
+      usable once Frappe's welcome-email password-set link is delivered.
     """
     _require_hr_admin()
     email = (email or "").strip()
@@ -373,19 +400,58 @@ def create_user(
     if frappe.db.exists("User", {"username": username}):
         frappe.throw(_("Tên đăng nhập đã tồn tại: {0}").format(username))
 
+    # Validate the temporary password BEFORE creating anything. The old flow
+    # inserted the User first and deleted it when the password turned out to
+    # be short — besides the create-then-delete churn, the insert had already
+    # queued Frappe core's "Newly created user … has no roles enabled"
+    # msgprint, and that stale warning masked the real password error in the
+    # SPA (plans/plan-fix-create-user-roles.md RC2).
+    pwd = (password or "").strip()
+    if pwd and len(pwd) < 8:
+        frappe.throw(_("Mật khẩu tạm phải có ít nhất 8 ký tự."))
+
+    # Resolve roles up-front: only PORTAL_ROLES are honoured, de-duplicated
+    # (a privilege-escalation guard — mirrors assign_roles()). The Employee
+    # role is special: ERPNext's User-validate hook strips it from users
+    # with no linked Employee record, so assigning it here would be a lie
+    # AND would queue an extra English msgprint. Defer it instead —
+    # link_user_to_employee re-adds the role once the Employee is linked.
+    has_employee = bool(frappe.db.get_value("Employee", {"user_id": email}, "name"))
+    assigned = []
+    deferred_roles = []
+    for role in roles or []:
+        if role not in PORTAL_ROLES or role in assigned or role in deferred_roles:
+            continue
+        if role == "Employee" and not has_employee:
+            deferred_roles.append(role)
+        else:
+            assigned.append(role)
+
     # _require_hr_admin() above is the app-level authorization gate. The
     # core Frappe ``User`` DocType is not granted to HR Manager until
     # ``setup_permissions.grant_hr_permissions`` has run (normally via
     # ``bench migrate``), so the insert/role-add bypass DocType permissions
     # — the same pattern used by ``catalog_master``. Only portal roles are
     # ever added, so this cannot escalate privileges.
+    #
+    # Roles are appended BEFORE insert so the User is created atomically
+    # with its roles: Frappe core's User.check_roles_added() then stays
+    # silent (it warns for new System Users whose roles table is empty) and
+    # no second save is needed. NOTE: User.add_roles() does not accept
+    # ignore_permissions in this Frappe version, so we append to the child
+    # table directly.
     user = frappe.get_doc(
         {
             "doctype": "User",
             "email": email,
             "username": username,
-            "first_name": first_name or full_name.split()[0],
-            "last_name": last_name,
+            # Vietnamese names: keep the WHOLE "Họ và tên" in first_name — the
+            # SPA's create modal only collects full_name, and the old
+            # ``split()[0]`` fallback truncated "Lại Minh Hiếu" to just "Lại"
+            # in the User's Tên field. Frappe recomputes full_name as
+            # first_name + last_name, so the display name is preserved.
+            "first_name": (first_name or "").strip() or full_name,
+            "last_name": (last_name or "").strip() or None,
             "full_name": full_name,
             "send_welcome_email": 1 if send_welcome_email else 0,
             "enabled": 1,
@@ -398,6 +464,8 @@ def create_user(
             "user_type": "System User",
         }
     )
+    for role in assigned:
+        user.append("roles", {"role": role})
     user.insert(ignore_permissions=True)
 
     # Set the password if HR provided a temporary one. This writes into
@@ -406,24 +474,28 @@ def create_user(
     # outbound mail server, which previously left accounts unusable.
     from frappe.utils.password import update_password
 
-    if password:
-        pwd = (password or "").strip()
-        if len(pwd) < 8:
-            frappe.delete_doc("User", user.name, ignore_permissions=True, force=True)
-            frappe.throw(_("Mật khẩu tạm phải có ít nhất 8 ký tự."))
+    if pwd:
         update_password(user.name, pwd)
 
-    assigned = []
-    for role in roles or []:
-        if role in PORTAL_ROLES:
-            # Mirror assign_roles(): append to the "roles" child table and save
-            # with ignore_permissions (the gate is _require_hr_admin above).
-            # NOTE: User.add_roles() does not accept ignore_permissions in this
-            # Frappe version, so we avoid it here.
-            user.append("roles", {"role": role})
-            assigned.append(role)
-    if assigned:
-        user.save(ignore_permissions=True)
+    # Proactive Vietnamese warnings — replace the English messages Frappe
+    # core / ERPNext used to queue ("no roles enabled", "Removed Employee
+    # role as there is no mapped employee"). Purely informational: the SPA
+    # surfaces them via the response flags, never as blocking errors.
+    if deferred_roles:
+        frappe.msgprint(
+            _(
+                "Vai trò Employee sẽ được gán tự động sau khi tài khoản được liên kết với nhân viên (mục Nhân viên)."
+            ),
+            indicator="blue",
+        )
+    roles_warning = not assigned and not deferred_roles
+    if roles_warning:
+        frappe.msgprint(
+            _("Tài khoản {0} chưa có vai trò nào — sẽ không đăng nhập được hệ thống HR.").format(
+                frappe.bold(email)
+            ),
+            indicator="orange",
+        )
 
     _audit_admin(
         _("Tạo tài khoản người dùng"),
@@ -437,6 +509,8 @@ def create_user(
         "full_name": full_name,
         "username": username,
         "roles": assigned,
+        "deferred_roles": deferred_roles,
+        "roles_warning": roles_warning,
     }
 
 
@@ -677,7 +751,11 @@ def reset_user_password(user: str, new_password: str | None = None, send_email: 
             frappe.throw(_("Mật khẩu mới phải có ít nhất 8 ký tự."))
         from frappe.utils.password import update_password
 
-        update_password(user, pwd)
+        # B0.3 (plan-user-frontend-parity §2.3.3): core only clears sessions
+        # when asked — pass the flag so every OTHER device must log in again
+        # with the new password (Desk behaviour); the acting HR session
+        # survives (core keeps the current session).
+        update_password(user, pwd, logout_all_sessions=True)
         # Re-enable on reset so a previously locked account becomes usable.
         if not target.enabled:
             target.enabled = 1
@@ -1015,6 +1093,29 @@ _EMPLOYEE_EDITABLE_FIELDS = (
     "allow_mobile_checkin",
     "allow_remote_checkin",
     "payroll_group",
+    # ---- Employee-360 parity (plans/plan-employee-frontend-parity.md §2.2,
+    # chốt sau B0.3 — chỉ field CÓ THẬT trên meta runtime của site) ----
+    "salutation",
+    "personal_email",
+    "company_email",
+    "prefered_email",
+    "person_to_be_contacted",
+    "relation",
+    "permanent_address",
+    "current_address",
+    "bank_name",
+    "bank_ac_no",
+    "iban",
+    "holiday_list",
+    "default_shift",
+    "payroll_cost_center",
+    "relieving_date",
+    "reason_for_leaving",
+    "image",
+    "blood_group",
+    "date_of_retirement",
+    "expense_approver",
+    "leave_approver",
 )
 
 
@@ -1040,6 +1141,75 @@ def save_employee(employee: str, **kwargs) -> dict:
             doc.set(field, value)
     doc.save(ignore_permissions=True)
     return doc.as_dict()
+
+
+@frappe.whitelist()
+def delete_employee(employee: str) -> dict:
+    """Hard-delete an Employee from the /hr/employees SPA.
+
+    Returns ``{"name", "deleted": True}``.
+
+    Safety mirrors the DocType hooks (``gege_hr.api.employee_lifecycle``):
+    * employees with attendance data (Checkin / Shift Assignment / Shift
+      Instance / Work Session / Checkout Miss) are REFUSED by
+      ``guard_employee_delete`` — its Vietnamese message (use the "Nghỉ việc"
+      flow instead) is surfaced verbatim to the SPA;
+    * other blocked links raise a friendly Vietnamese error;
+    * the acting HR admin is audited.
+    """
+    _require_hr_admin()
+    employee = (employee or "").strip()
+    if not employee or not frappe.db.exists("Employee", employee):
+        frappe.throw(_("Nhân viên không tồn tại."))
+    company = _company_for_employee(employee)
+    # Pre-clean ephemeral AUTO-GENERATED rows (none of these are attendance
+    # or payroll HISTORY — the guard below still protects real data):
+    # * VN Payroll Review Line TRỐNG (net_pay <= 0) — upserted for EVERY
+    #   employee whenever a payroll period is calculated, even ones with zero
+    #   attendance (e2e_ops.lc_drop has to clean the same rows). Lines with
+    #   net_pay > 0 are real salary → kept, LinkExists blocks (unit DEL-6).
+    # * VN Notification / VN Audit Event — system-generated per employee.
+    # * User Permission — auto-created when Employee.user_id is set.
+    for doctype, filters in (
+        ("VN Payroll Review Line", {"employee": employee, "net_pay": ["<=", 0]}),
+        ("VN Notification", {"employee": employee}),
+        ("VN Audit Event", {"employee": employee}),
+    ):
+        try:
+            for row in frappe.get_all(doctype, filters=filters, fields=["name"]):
+                try:
+                    frappe.delete_doc(doctype, row.name, force=True, ignore_permissions=True)
+                except Exception:
+                    frappe.log_error(title=f"delete_employee: drop {doctype} {row.name} failed")
+        except Exception:
+            # Doctype missing on partial installs — nothing to clean.
+            pass
+    try:
+        frappe.db.delete("User Permission", {"allow": "Employee", "for_value": employee})
+    except Exception:
+        pass
+    try:
+        frappe.delete_doc("Employee", employee, ignore_permissions=True)
+    except frappe.LinkExistsError:
+        # NOTE: must come BEFORE ValidationError — LinkExistsError subclasses
+        # ValidationError in Frappe, so the other order would shadow this.
+        frappe.throw(
+            _(
+                "Không thể xoá nhân viên {0}: đang còn dữ liệu liên kết khác (lương, ngân hàng, audit…). "
+                "Hãy dùng luồng 'Nghỉ việc' (trạng thái Left) hoặc xoá dữ liệu liên kết trước."
+            ).format(frappe.bold(employee))
+        )
+    except frappe.ValidationError:
+        # guard_employee_delete — message is already Vietnamese + actionable.
+        raise
+    _audit_admin(
+        _("Xoá nhân viên"),
+        reference_doctype="Employee",
+        reference_name=employee,
+        company=company,
+        employee=employee,
+    )
+    return {"name": employee, "deleted": True}
 
 
 _USER_LIST_FIELDS = ["name", "email", "full_name", "enabled", "user_type", "last_active"]
@@ -1089,6 +1259,9 @@ def _attach_linked_employees(rows: list[dict]) -> None:
 def list_users(
     search: str | None = None,
     enabled: str | None = None,
+    role: str | None = None,
+    user_type: str | None = None,
+    has_employee: str | None = None,
     limit: int = 100,
     page: int = 1,
     page_size: int = 0,
@@ -1097,9 +1270,12 @@ def list_users(
 
     ``search`` OR-matches ``full_name`` / ``email`` (HR-BL-01) and ``enabled``
     narrows by account state (``"1"``/``"true"`` → active, else locked).
-    System accounts (Guest / Administrator) are excluded **server-side** so the
-    reported ``total`` matches the rows the SPA used to hide client-side. Both
-    filters are applied server-side (DNA §6.6 D).
+    P3 parity filters (plan-user-frontend-parity §2.7): ``role`` (accounts
+    having that Has Role row), ``user_type`` and ``has_employee``
+    (``"linked"`` / ``"unlinked"``). System accounts (Guest / Administrator)
+    are excluded **server-side** so the reported ``total`` matches the rows the
+    SPA used to hide client-side. Every filter is applied server-side
+    (DNA §6.6 D).
 
     Pagination is **opt-in** (DNA §6.6 A) — see :func:`list_employees`.
     """
@@ -1107,6 +1283,21 @@ def list_users(
     filters = [["name", "not in", _SYSTEM_USERS]]
     if enabled not in (None, ""):
         filters.append(["enabled", "=", 1 if str(enabled) in ("1", "true", "True") else 0])
+    _role = (role or "").strip()
+    if _role:
+        with_role = frappe.get_all("Has Role", filters={"role": _role, "parenttype": "User"}, pluck="parent")
+        # "__none__" keeps the "in" filter well-formed when no user has the role.
+        filters.append(["name", "in", with_role or ["__none__"]])
+    _utype = (user_type or "").strip()
+    if _utype:
+        filters.append(["user_type", "=", _utype])
+    _emp = (has_employee or "").strip()
+    if _emp in ("linked", "unlinked"):
+        linked = frappe.get_all("Employee", filters={"user_id": ["is", "set"]}, pluck="user_id")
+        if _emp == "linked":
+            filters.append(["name", "in", linked or ["__none__"]])
+        else:
+            filters.append(["name", "not in", linked])
     or_filters = None
     _q = (search or "").strip()
     if _q:
@@ -1119,14 +1310,30 @@ def list_users(
     fields = _safe_fields("User", _USER_LIST_FIELDS)
 
     if page_size:
-        summary = _user_summary(
-            pagination.all_rows(
-                "User",
-                fields=_USER_SUMMARY_FIELDS,
-                filters=filters or None,
-                or_filters=or_filters or None,
-            )
+        light = pagination.all_rows(
+            "User",
+            fields=_USER_SUMMARY_FIELDS,
+            filters=filters or None,
+            or_filters=or_filters or None,
         )
+        summary = _user_summary(light)
+        # P3: "no_role" bucket — accounts without a single Has Role row (dead
+        # accounts that can never log in). Computed over the same filtered set
+        # as the other summary tiles; lookup failure degrades silently.
+        names = [r.get("name") for r in light or [] if r.get("name")]
+        if names:
+            try:
+                with_any_role = {
+                    u
+                    for u in frappe.get_all(
+                        "Has Role",
+                        filters={"parent": ["in", names], "parenttype": "User"},
+                        pluck="parent",
+                    )
+                }
+                summary["no_role"] = sum(1 for n in names if n not in with_any_role)
+            except Exception:
+                frappe.log_error(title="admin.list_users no_role summary failed")
         page = max(1, pagination.as_int(page, 1))
         page_size = max(1, pagination.as_int(page_size, 20))
         start = (page - 1) * page_size
@@ -1228,6 +1435,50 @@ def _has_work_location_field() -> bool:
         return False
 
 
+def _apply_work_location_fallback(rows: list[dict]) -> list[dict]:
+    """Resolve each row's display ``work_location`` like the check-in engine does.
+
+    Mirrors :func:`gege_hr.gege_hr.api.attendance._shift_location_for_day`:
+    ``Shift Assignment.vn_work_location`` (per-shift override) wins, else fall
+    back to ``Employee.default_work_location`` (set on /hr/employees). Also
+    stamps ``work_location_source`` ("shift" / "employee" / "") so the SPA
+    drawer can label inherited locations. All lookups are guarded — both are
+    Custom Fields that only exist after migrate.
+    """
+    if not rows:
+        return rows
+
+    def _own(row):
+        return (row.get("vn_work_location") or "").strip()
+
+    defaults: dict[str, str] = {}
+    try:
+        if frappe.get_meta("Employee").has_field("default_work_location"):
+            emps = list({r.get("employee") for r in rows if r.get("employee")})
+            if emps:
+                defaults = {
+                    e.get("name"): (e.get("default_work_location") or "").strip()
+                    for e in frappe.db.get_all(
+                        "Employee",
+                        filters={"name": ["in", emps]},
+                        fields=["name", "default_work_location"],
+                    )
+                }
+    except Exception:
+        defaults = {}
+
+    for r in rows:
+        own = _own(r)
+        if own:
+            r["work_location"] = own
+            r["work_location_source"] = "shift"
+        else:
+            inherited = defaults.get(r.get("employee")) or ""
+            r["work_location"] = inherited
+            r["work_location_source"] = "employee" if inherited else ""
+    return rows
+
+
 def _shifts_have_overlapping_timings(shift_1: str, shift_2: str) -> bool:
     """Mirror ``hrms...shift_assignment.has_overlapping_timings`` (parity G5).
 
@@ -1242,6 +1493,114 @@ def _shifts_have_overlapping_timings(shift_1: str, shift_2: str) -> bool:
         if d.end_time <= d.start_time:  # overnight shift → roll end to next day
             d.end_time = d.end_time + timedelta(days=1)
     return s1.end_time > s2.start_time and s1.start_time < s2.end_time
+
+
+def _shift_conflicts(
+    employee: str,
+    shift_type: str,
+    start,
+    end,
+    exclude_name: str | None = None,
+) -> list:
+    """Timing-aware overlap query (parity G5) — shared by create / amend and the
+    schedule conflict-preview endpoint (plans/plan-schedule-desk-free.md §2.5).
+
+    Matches native Shift Assignment semantics: honour HR Settings "Allow Multiple
+    Shift Assignments for Same Date" and only report rows whose clock timings
+    actually overlap (morning + evening = OK).
+    """
+    allow_multi = False
+    try:
+        allow_multi = bool(frappe.db.get_single_value("HR Settings", "allow_multiple_shift_assignments"))
+    except Exception:
+        allow_multi = False
+    if allow_multi:
+        return []
+    overlap_filters = [
+        ["employee", "=", employee],
+        ["status", "=", "Active"],
+        ["docstatus", "=", 1],
+        ["start_date", "<=", end or "2999-12-31"],
+    ]
+    if exclude_name:
+        overlap_filters.append(["name", "!=", exclude_name])
+    existing = frappe.db.get_all(
+        "Shift Assignment",
+        filters=overlap_filters,
+        or_filters=[["end_date", ">=", start], ["end_date", "is", "not set"]],
+        fields=["name", "shift_type", "start_date", "end_date"],
+    )
+    return [d for d in existing if _shifts_have_overlapping_timings(shift_type, d.shift_type)]
+
+
+def _assert_no_shift_conflicts(
+    employee: str,
+    shift_type: str,
+    start,
+    end,
+    exclude_name: str | None = None,
+) -> None:
+    """Throw on any timing conflict — thin wrapper over :func:`_shift_conflicts`."""
+    conflicts = _shift_conflicts(employee, shift_type, start, end, exclude_name)
+    if conflicts:
+        frappe.throw(
+            _("Nhân viên đã có ca làm việc trùng giờ trong khoảng này: {0}").format(
+                ", ".join(d.name for d in conflicts)
+            )
+        )
+
+
+def _dates_overlap(a_start, a_end, b_start, b_end) -> bool:
+    """Inclusive date-range overlap; ``None``/empty end = open-ended (till 2999)."""
+    a_end = str(a_end or "2999-12-31")[:10]
+    b_end = str(b_end or "2999-12-31")[:10]
+    return str(a_start)[:10] <= b_end and str(b_start)[:10] <= a_end
+
+
+def _work_location_editable() -> bool:
+    """True when ``vn_work_location`` may be changed after submit.
+
+    Requires the custom field to be migrated AND flagged ``allow_on_submit``
+    (native Shift Assignment locks every field except end_date/status otherwise).
+    """
+    if not _has_work_location_field():
+        return False
+    try:
+        df = frappe.get_meta("Shift Assignment").get_field("vn_work_location")
+    except Exception:
+        return False
+    return bool(df is not None and getattr(df, "allow_on_submit", 0))
+
+
+def _shift_assignment_linked_counts(row: dict) -> dict:
+    """Count Employee Checkin / Attendance rows linked to the assignment span.
+
+    Non-throwing twin of :func:`_assert_shift_assignment_cancel_safe` — powers
+    the SPA detail drawer's ``can`` hints (why a close/amend is blocked). Accepts
+    a plain dict row so it works behind both ``get_doc`` and ``get_value``.
+    """
+    start = row.get("start_date")
+    end = row.get("end_date") or start
+
+    def _count(doctype: str, date_field: str) -> int:
+        try:
+            rows = frappe.db.get_all(
+                doctype,
+                filters={
+                    "employee": row.get("employee"),
+                    "shift": row.get("shift_type"),
+                    date_field: ["between", [start, end]],
+                },
+                pluck="name",
+            )
+            return len(rows or [])
+        except Exception:
+            return 0
+
+    return {
+        "checkin_count": _count("Employee Checkin", "time"),
+        "attendance_count": _count("Attendance", "attendance_date"),
+    }
 
 
 def _assert_shift_assignment_cancel_safe(doc) -> None:
@@ -1277,6 +1636,346 @@ def _assert_shift_assignment_cancel_safe(doc) -> None:
         frappe.throw(
             _("Không thể kết thúc ca: đã có bản chấm công {0} liên kết.").format(linked_attendance[0])
         )
+
+
+# --------------------------------------------------------------------------- #
+# Shift Type admin — Frappe-parity list/detail/rename/duplicate
+# (plans/hr-shifts-frontend-parity.md §2). Lets the HR Manager run the whole
+# Shift Type lifecycle from /hr/shifts without the Desk: server-side search +
+# trait filter + the pagination envelope, a detail payload with link-usage
+# counts (delete guard) and a ``can`` matrix, plus the two canonical Desk doc
+# actions — Rename via ``frappe.rename_doc`` (cascades every Link field) and
+# Duplicate (field-whitelist copy).
+# --------------------------------------------------------------------------- #
+
+SHIFT_TYPE_VN_FIELDS = [
+    "vn_is_overnight_shift",
+    "vn_shift_duration_hours",
+    "vn_earliest_checkin_minutes",
+    "vn_latest_checkin_minutes",
+    "vn_earliest_checkout_minutes",
+    "vn_latest_checkout_minutes",
+    "vn_max_checkout_after_end_minutes",
+    "vn_allow_overtime_after_shift",
+    "vn_allow_overtime_before_shift",
+    "vn_max_overtime_hours",
+    "vn_max_total_work_hours",
+]
+
+
+def _shift_type_fields() -> list[str]:
+    """Base Shift Type fields + the gege VN custom fields (guarded pre-migrate)."""
+    fields = ["name", "start_time", "end_time", "holiday_list", "color"]
+    try:
+        meta = frappe.get_meta("Shift Type")
+    except Exception:
+        meta = None
+    for f in SHIFT_TYPE_VN_FIELDS:
+        if meta is None or meta.has_field(f):
+            fields.append(f)
+    return fields
+
+
+def _shift_type_usage_counts(names: list[str]) -> dict[str, int]:
+    """Active-assignment count per Shift Type (one grouped query) — the
+    "Đang dùng" column on /hr/shifts. Guarded so a fresh bench never 500s."""
+    if not names:
+        return {}
+    try:
+        rows = frappe.db.get_all(
+            "Shift Assignment",
+            filters={"shift_type": ["in", list(names)], "status": "Active", "docstatus": 1},
+            fields=["shift_type", "count(name) as total"],
+            group_by="shift_type",
+        )
+        return {r.shift_type: int(r.total or 0) for r in rows}
+    except Exception:
+        return {}
+
+
+def _shift_type_summary(light_rows) -> dict:
+    """Trait-bucket counts over the FULL filtered set (SPA summary tiles)."""
+    overnight = ot = 0
+    for r in light_rows or []:
+        if r.get("vn_is_overnight_shift"):
+            overnight += 1
+        if r.get("vn_allow_overtime_before_shift") or r.get("vn_allow_overtime_after_shift"):
+            ot += 1
+    return {"total": len(light_rows or []), "overnight": overnight, "ot": ot}
+
+
+def _shift_type_linked_counts(name: str) -> dict:
+    """Count docs linking to this Shift Type — powers the SPA delete guard.
+
+    Mirrors :func:`_shift_assignment_linked_counts`: guarded so a missing
+    custom doctype (fresh bench, pre-migrate) never 500s; the SPA drawer uses
+    these counts to explain WHY a delete is blocked before Frappe raises
+    ``LinkExistsError``.
+    """
+
+    def _count(doctype: str, filters: dict) -> int:
+        try:
+            return int(frappe.db.count(doctype, filters) or 0)
+        except Exception:
+            return 0
+
+    return {
+        "assignments_total": _count("Shift Assignment", {"shift_type": name}),
+        "assignments_active": _count("Shift Assignment", {"shift_type": name, "status": "Active"}),
+        "employees_default": _count("Employee", {"default_shift": name}),
+        "shift_instances": _count("VN Employee Shift Instance", {"shift_type": name}),
+    }
+
+
+@frappe.whitelist()
+def list_shift_types(
+    search: str | None = None,
+    trait: str | None = None,
+    page: int = 1,
+    page_size: int | None = None,
+) -> dict | list:
+    """Server-side Shift Type list (Frappe list-view parity — clears HR-BL-SHIFT).
+
+    ``search`` OR-matches the shift name; ``trait`` ∈ overnight/ot/normal maps
+    the SPA gear filter. With a ``page_size`` the standard envelope
+    ``{data, total, summary}`` is returned (summary over the full filtered
+    set); without it a bare list keeps legacy callers untouched.
+    """
+    _require_hr_admin()
+    filters: list = []
+    or_filters: list = []
+    q = (search or "").strip()
+    if q:
+        like = f"%{pagination.escape_like(q)}%"
+        or_filters.append(["name", "like", like])
+    trait = (trait or "").strip().lower()
+    if trait == "overnight":
+        filters.append(["vn_is_overnight_shift", "=", 1])
+    elif trait == "ot":
+        or_filters += [
+            ["vn_allow_overtime_before_shift", "=", 1],
+            ["vn_allow_overtime_after_shift", "=", 1],
+        ]
+    elif trait == "normal":
+        filters += [
+            ["vn_is_overnight_shift", "=", 0],
+            ["vn_allow_overtime_before_shift", "=", 0],
+            ["vn_allow_overtime_after_shift", "=", 0],
+        ]
+
+    fields = _shift_type_fields()
+    if page_size:
+        # Summary light-rows: only the trait fields that actually exist
+        # (pre-migrate bench without the VN custom fields must not 500).
+        summary_fields = [
+            f
+            for f in [
+                "name",
+                "vn_is_overnight_shift",
+                "vn_allow_overtime_before_shift",
+                "vn_allow_overtime_after_shift",
+            ]
+            if f in fields
+        ]
+        summary = _shift_type_summary(
+            pagination.all_rows(
+                "Shift Type",
+                fields=summary_fields,
+                filters=filters,
+                or_filters=or_filters,
+            )
+        )
+        result = pagination.page_slice(
+            "Shift Type",
+            fields=fields,
+            filters=filters,
+            or_filters=or_filters,
+            order_by="name asc",
+            page=page,
+            page_size=page_size,
+        )
+        # "Đang dùng" enrichment — one grouped count over the current page.
+        usage = _shift_type_usage_counts([r.get("name") for r in result["data"]])
+        for row in result["data"]:
+            row["assignments_active"] = usage.get(row.get("name"), 0)
+        result["summary"] = summary
+        return result
+    return (
+        frappe.get_all(
+            "Shift Type",
+            filters=filters,
+            or_filters=or_filters,
+            fields=fields,
+            order_by="name asc",
+        )
+        or []
+    )
+
+
+@frappe.whitelist()
+def get_shift_type(name: str) -> dict:
+    """Full Shift Type detail for the SPA modal: doc + ``linked`` usage + ``can``.
+
+    ``can.delete`` is a UI hint only — Frappe's LinkExists check remains the
+    source of truth on the actual delete call.
+    """
+    _require_hr_admin()
+    name = (name or "").strip()
+    row = frappe.db.get_value("Shift Type", name, _shift_type_fields(), as_dict=True)
+    if row is None:
+        frappe.throw(_("Ca làm việc không tồn tại."))
+    row = dict(row)
+    linked = _shift_type_linked_counts(name)
+    row["linked"] = linked
+    row["can"] = {
+        "rename": True,
+        "duplicate": True,
+        "delete": not any(linked.values()),
+    }
+    return row
+
+
+def _ensure_shift_type_allow_rename() -> None:
+    """One-time Property Setter enabling Desk rename for Shift Type.
+
+    HRMS ships ``Shift Type`` with ``allow_rename=0``, so ``frappe.rename_doc``
+    raises "not allowed to be renamed". A Property Setter is the Frappe-native,
+    data-level customisation (survives app updates, vendor app untouched) —
+    the same mechanism the Desk "Customise Form" would write.
+    """
+    try:
+        exists = frappe.db.exists("Property Setter", {"doc_type": "Shift Type", "property": "allow_rename"})
+        if not exists:
+            frappe.make_property_setter(
+                {
+                    "doctype": "Shift Type",
+                    "doctype_or_field": "DocType",
+                    "fieldname": "",
+                    "property": "allow_rename",
+                    "value": "1",
+                    "property_type": "Check",
+                },
+                validate_fields_for_doctype=False,
+            )
+        else:
+            frappe.clear_cache(doctype="Shift Type")
+    except Exception:
+        frappe.log_error(title="admin.ensure_shift_type_allow_rename failed")
+
+
+@frappe.whitelist()
+def rename_shift_type(name: str, new_name: str) -> dict:
+    """Rename a Shift Type via ``frappe.rename_doc`` (Desk "Rename" parity).
+
+    The Shift Type's name IS its label across the SPA, and ``rename_doc``
+    cascades the rename into every Link field (Shift Assignment.shift_type,
+    Employee.default_shift, VN Employee Shift Instance.shift_type, …) so all
+    views stay consistent without manual patches.
+    """
+    _require_hr_admin()
+    name = (name or "").strip()
+    new_name = (new_name or "").strip()
+    if not name or not frappe.db.exists("Shift Type", name):
+        frappe.throw(_("Ca làm việc không tồn tại."))
+    if not new_name:
+        frappe.throw(_("Tên ca mới không được để trống."))
+    if new_name == name:
+        return {"name": name}
+    if frappe.db.exists("Shift Type", new_name):
+        frappe.throw(_("Tên ca đã tồn tại: {0}").format(new_name))
+    # HRMS allow_rename=0 guard — flip it once via a Property Setter, then the
+    # canonical rename_doc path handles the Link-field cascade.
+    if not frappe.get_meta("Shift Type").allow_rename:
+        _ensure_shift_type_allow_rename()
+    frappe.rename_doc("Shift Type", name, new_name)
+    _audit_admin(
+        _("Đổi tên ca làm việc {0} → {1}").format(name, new_name),
+        reference_doctype="Shift Type",
+        reference_name=new_name,
+        new_value={"old_name": name, "new_name": new_name},
+    )
+    return {"name": new_name}
+
+
+@frappe.whitelist()
+def shift_type_versions(name: str) -> list[dict]:
+    """Frappe ``Version`` history for one Shift Type (Desk Activity parity).
+
+    Each row: {name, creation, owner, fields[]} where ``fields`` lists the
+    changed fieldnames parsed from the Version's ``data`` JSON (capped at 20
+    most-recent versions). Read via ``frappe.db`` so HR Manager never needs a
+    direct Version doctype role.
+    """
+    _require_hr_admin()
+    name = (name or "").strip()
+    if not name or not frappe.db.exists("Shift Type", name):
+        frappe.throw(_("Ca làm việc không tồn tại."))
+    try:
+        versions = (
+            frappe.db.get_all(
+                "Version",
+                filters={"ref_doctype": "Shift Type", "docname": name},
+                fields=["name", "creation", "owner", "data"],
+                order_by="creation desc",
+                limit=20,
+            )
+            or []
+        )
+    except Exception:
+        versions = []
+    out: list[dict] = []
+    for v in versions:
+        fields: list[str] = []
+        try:
+            changed = (json.loads(v.data or "{}") or {}).get("changed") or []
+            fields = [str(c[0]) for c in changed if isinstance(c, (list, tuple)) and c]
+        except Exception:
+            fields = []
+        out.append({"name": v.name, "creation": v.creation, "owner": v.owner, "fields": fields})
+    return out
+
+
+@frappe.whitelist()
+def duplicate_shift_type(name: str, new_name: str | None = None) -> dict:
+    """Duplicate a Shift Type (Desk "Duplicate" parity).
+
+    Copies the whitelisted clock + VN custom fields into a new doc (running
+    the full validate hooks, incl. the native-window sync). A blank
+    ``new_name`` auto-suffixes ``(bản sao)`` / ``(bản sao) 2`` …
+    """
+    _require_hr_admin()
+    name = (name or "").strip()
+    src = frappe.db.get_value("Shift Type", name, _shift_type_fields(), as_dict=True)
+    if src is None:
+        frappe.throw(_("Ca làm việc không tồn tại."))
+    target = (new_name or "").strip()
+    if not target:
+        target = f"{name} (bản sao)"
+        n = 2
+        while frappe.db.exists("Shift Type", target):
+            target = f"{name} (bản sao) {n}"
+            n += 1
+    elif frappe.db.exists("Shift Type", target):
+        frappe.throw(_("Tên ca đã tồn tại: {0}").format(target))
+
+    # NOTE: this site's Shift Type uses ``autoname: prompt`` — the REST create
+    # path the SPA already relies on sends the name explicitly, so the copy
+    # must too or insert raises "Please set the document name".
+    payload = {"doctype": "Shift Type", "shift_type": target, "name": target}
+    for f in _shift_type_fields():
+        if f == "name":
+            continue
+        v = src.get(f)
+        if v is not None:
+            payload[f] = v
+    doc = frappe.get_doc(payload).insert()
+    _audit_admin(
+        _("Nhân bản ca làm việc {0} → {1}").format(name, doc.name),
+        reference_doctype="Shift Type",
+        reference_name=doc.name,
+        new_value={"duplicated_from": name},
+    )
+    return {"name": doc.name}
 
 
 @frappe.whitelist()
@@ -1398,7 +2097,7 @@ def list_shift_assignments(
             frappe.log_error(title="admin.list_shift_assignments failed")
             rows = []
         return {
-            "data": [_shift_assignment_row(r) for r in rows],
+            "data": _apply_work_location_fallback([_shift_assignment_row(r) for r in rows]),
             "total": summary["total"],
             "summary": summary,
         }
@@ -1417,7 +2116,7 @@ def list_shift_assignments(
         )
     except Exception:
         rows = []
-    return [_shift_assignment_row(r) for r in rows]
+    return _apply_work_location_fallback([_shift_assignment_row(r) for r in rows])
 
 
 @frappe.whitelist()
@@ -1445,12 +2144,24 @@ def get_shift_assignment_options() -> dict:
         {"value": "Expired", "label": "Hết hạn"},
         {"value": "Cancelled", "label": "Đã huỷ"},
     ]
+    # Employees that already hold an Active submitted assignment — powers the
+    # SPA create-modal "chỉ nhân viên chưa gán ca" toggle (full set, NOT limited
+    # to the currently loaded list page).
+    try:
+        assigned = frappe.get_all(
+            "Shift Assignment",
+            filters={"docstatus": 1, "status": "Active"},
+            pluck="employee",
+        )
+    except Exception:
+        assigned = []
     return {
         "statuses": statuses,
         "shift_types": _opts("Shift Type"),
         "departments": _opts("Department"),
         "companies": _opts("Company"),
         "work_locations": _opts("VN Work Location") if has_loc else [],
+        "assigned_employees": sorted({a for a in (assigned or []) if a}),
     }
 
 
@@ -1496,34 +2207,8 @@ def create_shift_assignment(
     end = getdate(end_date) if end_date else None
     start = getdate(start_date)
 
-    # Overlap detection (parity G5) — matches native Shift Assignment semantics:
-    # honour HR Settings "Allow Multiple Shift Assignments for Same Date" and only
-    # block when the clock timings actually overlap (morning + evening = OK).
-    allow_multi = False
-    try:
-        allow_multi = bool(frappe.db.get_single_value("HR Settings", "allow_multiple_shift_assignments"))
-    except Exception:
-        allow_multi = False
-    if not allow_multi:
-        overlap_filters = [
-            ["employee", "=", employee],
-            ["status", "=", "Active"],
-            ["docstatus", "=", 1],
-            ["start_date", "<=", end or "2999-12-31"],
-        ]
-        existing = frappe.db.get_all(
-            "Shift Assignment",
-            filters=overlap_filters,
-            or_filters=[["end_date", ">=", start], ["end_date", "is", "not set"]],
-            fields=["name", "shift_type", "start_date", "end_date"],
-        )
-        conflicts = [d for d in existing if _shifts_have_overlapping_timings(shift_type, d.shift_type)]
-        if conflicts:
-            frappe.throw(
-                _("Nhân viên đã có ca làm việc trùng giờ trong khoảng này: {0}").format(
-                    ", ".join(d.name for d in conflicts)
-                )
-            )
+    # Overlap detection (parity G5) — shared helper keeps create/amend in sync.
+    _assert_no_shift_conflicts(employee, shift_type, start, end)
 
     payload = {
         "doctype": "Shift Assignment",
@@ -1555,6 +2240,7 @@ def create_shift_assignment(
             "work_location": work_location or None,
         },
     )
+    _notify_schedule_updated_admin(employee)
     return {"name": doc.name, "work_location": work_location or None}
 
 
@@ -1586,6 +2272,246 @@ def end_shift_assignment(name: str, end_date: str) -> dict:
         company=company,
         employee=doc.employee,
         new_value={"end_date": str(getdate(end_date))},
+    )
+    _notify_schedule_updated_admin(doc.employee)
+    return {"name": name}
+
+
+@frappe.whitelist()
+def get_shift_assignment(name: str) -> dict:
+    """Full Shift Assignment detail for the SPA drawer.
+
+    Returns the doc fields plus ``linked`` (checkin/attendance counts within the
+    span) and a server-computed ``can`` action matrix so the SPA never has to
+    second-guess Frappe's submittable-doc rules:
+    ``edit_end_date`` (docstatus 1), ``cancel`` (1 + no linked rows),
+    ``amend`` (1|2), ``delete`` (0|2).
+    """
+    _require_hr_admin()
+    name = (name or "").strip()
+    if not name or not frappe.db.exists("Shift Assignment", name):
+        frappe.throw(_("Ca làm việc không tồn tại."))
+    fields = [
+        "name",
+        "employee",
+        "employee_name",
+        "shift_type",
+        "start_date",
+        "end_date",
+        "status",
+        "docstatus",
+        "company",
+        "department",
+        "shift_request",
+        "amended_from",
+        "owner",
+        "modified",
+        "modified_by",
+    ]
+    if _has_work_location_field():
+        fields.append("vn_work_location")
+    try:
+        row = dict(frappe.db.get_value("Shift Assignment", name, fields, as_dict=True) or {})
+    except Exception:
+        row = {}
+    row = _shift_assignment_row(row)
+    row = _apply_work_location_fallback([row])[0]
+    row["docstatus"] = int(row.get("docstatus") or 0)
+    linked = _shift_assignment_linked_counts(row)
+    row["linked"] = linked
+    row["can"] = {
+        "edit_end_date": row["docstatus"] == 1,
+        "cancel": row["docstatus"] == 1 and not (linked["checkin_count"] or linked["attendance_count"]),
+        "amend": row["docstatus"] in (1, 2),
+        "delete": row["docstatus"] in (0, 2),
+    }
+    row["work_location_editable"] = _work_location_editable()
+    return row
+
+
+@frappe.whitelist()
+def update_shift_assignment(
+    name: str,
+    end_date: str | None = None,
+    status: str | None = None,
+    work_location: str | None = None,
+) -> dict:
+    """Update the allow_on_submit fields (end_date / status / work_location).
+
+    These are the ONLY edits Frappe permits on a submitted Shift Assignment —
+    anything else must go through :func:`amend_shift_assignment`. ``doc.save()``
+    triggers the native ``on_update_after_submit`` hook which re-validates
+    overlapping shifts, so extending a span stays conflict-safe.
+    """
+    _require_hr_admin()
+    name = (name or "").strip()
+    if not name or not frappe.db.exists("Shift Assignment", name):
+        frappe.throw(_("Ca làm việc không tồn tại."))
+    doc = frappe.get_doc("Shift Assignment", name)
+    if doc.docstatus != 1:
+        frappe.throw(_("Chỉ ca đã xác nhận mới cập nhật được."))
+    changed: dict = {}
+    end_s = str(end_date or "").strip()
+    if end_s:
+        new_end = getdate(end_s)
+        if new_end < getdate(doc.start_date):
+            frappe.throw(_("Ngày kết thúc phải sau hoặc bằng ngày bắt đầu."))
+        doc.end_date = new_end
+        changed["end_date"] = str(new_end)
+    if status is not None and str(status).strip():
+        s = str(status).strip()
+        if s not in ("Active", "Inactive"):
+            frappe.throw(_("Trạng thái không hợp lệ (chỉ Active/Inactive)."))
+        doc.status = s
+        changed["status"] = s
+    if work_location is not None:
+        wl = str(work_location or "").strip()
+        if wl:
+            if not _work_location_editable():
+                frappe.throw(_("Địa điểm làm việc không thể sửa sau khi xác nhận."))
+            if not frappe.db.exists("VN Work Location", wl):
+                frappe.throw(_("Địa điểm làm việc không tồn tại."))
+        if _work_location_editable():
+            doc.vn_work_location = wl or None
+            changed["work_location"] = wl or None
+    if not changed:
+        frappe.throw(_("Không có thay đổi nào để cập nhật."))
+    doc.save()  # native on_update_after_submit re-validates overlap
+    _audit_admin(
+        _("Cập nhật ca làm việc"),
+        reference_doctype="Shift Assignment",
+        reference_name=name,
+        company=doc.company or _company_for_employee(doc.employee),
+        employee=doc.employee,
+        new_value=changed,
+    )
+    return {"name": name, **changed}
+
+
+@frappe.whitelist()
+def amend_shift_assignment(
+    name: str,
+    shift_type: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    work_location: str | None = None,
+    status: str = "Active",
+) -> dict:
+    """Amend a Shift Assignment — the Frappe-standard "edit" for submittables.
+
+    Frappe forbids changing shift_type / start_date / employee after submit, so
+    the canonical flow is: cut the old span to ``new_start - 1`` day (past
+    history intact), cancel it (blocked by linked Checkin/Attendance — surfaced
+    as a friendly error), then insert + submit a fresh doc with ``amended_from``
+    set. From an already-cancelled doc it simply creates the amended copy.
+    """
+    _require_hr_admin()
+    name = (name or "").strip()
+    if not name or not frappe.db.exists("Shift Assignment", name):
+        frappe.throw(_("Ca làm việc không tồn tại."))
+    old = frappe.get_doc("Shift Assignment", name)
+    if old.docstatus == 0:
+        frappe.throw(_("Bản nháp chưa xác nhận — hãy huỷ hoặc xác nhận trước khi sửa."))
+    new_shift = (shift_type or getattr(old, "shift_type", "") or "").strip()
+    start_s = str(start_date or "").strip() or str(getattr(old, "start_date", "") or "")
+    if not new_shift or not frappe.db.exists("Shift Type", new_shift):
+        frappe.throw(_("Ca làm việc không tồn tại."))
+    if not start_s:
+        frappe.throw(_("Ngày bắt đầu là bắt buộc."))
+    new_start = getdate(start_s)
+    # end_date semantics: None → inherit the ORIGINAL span; "" → open-ended.
+    if end_date is None:
+        end_s = str(getattr(old, "end_date", "") or "")
+    else:
+        end_s = str(end_date).strip()
+    new_end = getdate(end_s) if end_s else None
+    if new_end and new_end < new_start:
+        if end_date is None:
+            # Inherited the original span's end but the new start moved past it —
+            # treat the amendment as open-ended instead of forcing an error.
+            new_end = None
+        else:
+            frappe.throw(_("Ngày kết thúc phải sau hoặc bằng ngày bắt đầu."))
+
+    wl = str(work_location or "").strip()
+    if wl and not frappe.db.exists("VN Work Location", wl):
+        frappe.throw(_("Địa điểm làm việc không tồn tại."))
+
+    if old.docstatus == 1:
+        # Cut the old span the day before the new start (keeps past history),
+        # then cancel — the native convention that frees the employee.
+        # Lazy import: other stub-frappe test harnesses ship a frappe.utils
+        # without add_days, and a module-level import would break their setup.
+        from frappe.utils import add_days
+
+        cut_end = add_days(new_start, -1)
+        if cut_end >= getdate(old.start_date):
+            old.end_date = cut_end
+            old.save()
+        _assert_shift_assignment_cancel_safe(old)
+        old.cancel()
+
+    _assert_no_shift_conflicts(old.employee, new_shift, new_start, new_end, exclude_name=name)
+    payload = {
+        "doctype": "Shift Assignment",
+        "employee": old.employee,
+        "shift_type": new_shift,
+        "start_date": new_start,
+        "end_date": new_end,
+        "status": (status or "Active").strip() or "Active",
+        "company": getattr(old, "company", None) or _company_for_employee(old.employee),
+        "amended_from": name,
+    }
+    if _has_work_location_field():
+        if work_location is None:
+            payload["vn_work_location"] = getattr(old, "vn_work_location", None) or None
+        else:
+            payload["vn_work_location"] = wl or None
+    doc = frappe.get_doc(payload)
+    doc.insert()
+    doc.submit()
+    _audit_admin(
+        _("Đổi ca làm việc {0} → {1}").format(name, doc.name),
+        reference_doctype="Shift Assignment",
+        reference_name=doc.name,
+        company=payload["company"],
+        employee=old.employee,
+        new_value={
+            "amended_from": name,
+            "shift_type": new_shift,
+            "start_date": str(new_start),
+            "end_date": str(new_end) if new_end else None,
+        },
+    )
+    return {"name": doc.name, "amended_from": name}
+
+
+@frappe.whitelist()
+def delete_shift_assignment(name: str) -> dict:
+    """Permanently delete a Shift Assignment — Frappe only allows docstatus 0/2.
+
+    Submitted (docstatus 1) docs must be cancelled first; the SPA greys the
+    delete action out for them (``can.delete`` from get_shift_assignment).
+    """
+    _require_hr_admin()
+    name = (name or "").strip()
+    if not name or not frappe.db.exists("Shift Assignment", name):
+        frappe.throw(_("Ca làm việc không tồn tại."))
+    doc = frappe.get_doc("Shift Assignment", name)
+    if doc.docstatus not in (0, 2):
+        frappe.throw(_("Chỉ ca đã huỷ mới xoá được. Hãy huỷ ca trước."))
+    employee = doc.employee
+    company = doc.company or _company_for_employee(doc.employee)
+    try:
+        frappe.delete_doc("Shift Assignment", name)
+    except Exception as exc:
+        frappe.throw(_("Không xoá được ca làm việc: {0}").format(str(exc)))
+    _audit_admin(
+        _("Xoá ca làm việc"),
+        reference_doctype="Shift Assignment",
+        reference_name=name,
+        company=company,
+        employee=employee,
     )
     return {"name": name}
 
@@ -1640,6 +2566,258 @@ def bulk_create_shift_assignments(
         except Exception as exc:
             failed.append({"employee": emp, "reason": str(exc)})
     return {"created": created, "failed": failed}
+
+
+@frappe.whitelist()
+def bulk_end_shift_assignments(names, end_date: str) -> dict:
+    """Close many assignments with one chosen end date (partial-safe).
+
+    Each name goes through :func:`end_shift_assignment`, so linked Checkin /
+    Attendance blocks are reported per-row instead of aborting the batch.
+    """
+    import json
+
+    _require_hr_admin()
+    if isinstance(names, str):
+        try:
+            names = json.loads(names)
+        except Exception:
+            names = [names]
+    names = [n for n in (names or []) if n]
+    if not names:
+        frappe.throw(_("Chọn ít nhất một ca."))
+    if not end_date:
+        frappe.throw(_("Ngày kết thúc là bắt buộc."))
+    ended, failed = [], []
+    for n in names:
+        try:
+            end_shift_assignment(n, end_date)
+            ended.append(n)
+        except Exception as exc:
+            failed.append({"name": n, "reason": str(exc)})
+    return {"ended": ended, "failed": failed}
+
+
+@frappe.whitelist()
+def bulk_set_shift_assignment_status(names, status: str) -> dict:
+    """Toggle Active/Inactive for many assignments (partial-safe).
+
+    Mirrors :func:`bulk_end_shift_assignments` — per-row failures (e.g. draft
+    docs, permission quirks) come back in ``failed`` without aborting the rest.
+    """
+    import json
+
+    _require_hr_admin()
+    status = (status or "").strip()
+    if status not in ("Active", "Inactive"):
+        frappe.throw(_("Trạng thái không hợp lệ (chỉ Active/Inactive)."))
+    if isinstance(names, str):
+        try:
+            names = json.loads(names)
+        except Exception:
+            names = [names]
+    names = [n for n in (names or []) if n]
+    if not names:
+        frappe.throw(_("Chọn ít nhất một ca."))
+    updated, failed = [], []
+    for n in names:
+        try:
+            set_shift_assignment_status(n, status)
+            updated.append(n)
+        except Exception as exc:
+            failed.append({"name": n, "reason": str(exc)})
+    return {"updated": updated, "failed": failed}
+
+
+# --------------------------------------------------------------------------- #
+# /hr/schedule desk-free helpers (plans/plan-schedule-desk-free.md §2.5 / §2.6)
+# --------------------------------------------------------------------------- #
+@frappe.whitelist()
+def check_schedule_conflicts(
+    employee: str,
+    shift_type: str,
+    from_date: str,
+    to_date: str | None = None,
+) -> list[dict]:
+    """Preview every conflict for a proposed shift span before assigning.
+
+    Combines: (a) Active Shift Assignments with overlapping clock timings
+    (:func:`_shift_conflicts`), (b) approved Leave Applications overlapping the
+    span, (c) the employee's other Draft Shift Requests overlapping the span.
+    Purely informational — the write endpoints remain the enforcing layer.
+    """
+    _require_hr_admin()
+    employee = (employee or "").strip()
+    shift_type = (shift_type or "").strip()
+    from_date = (from_date or "").strip()
+    if not employee or not frappe.db.exists("Employee", employee):
+        frappe.throw(_("Nhân viên không tồn tại."))
+    if not shift_type or not frappe.db.exists("Shift Type", shift_type):
+        frappe.throw(_("Ca làm việc không tồn tại."))
+    if not from_date:
+        frappe.throw(_("Ngày bắt đầu là bắt buộc."))
+    start = getdate(from_date)
+    end = getdate(to_date) if to_date else None
+
+    out: list[dict] = []
+    for d in _shift_conflicts(employee, shift_type, start, end):
+        out.append(
+            {
+                "type": "shift_assignment",
+                "name": d.name,
+                "shift_type": d.shift_type,
+                "from_date": str(d.start_date),
+                "to_date": str(d.end_date) if d.end_date else None,
+            }
+        )
+    try:
+        leaves = frappe.db.get_all(
+            "Leave Application",
+            filters=[
+                ["employee", "=", employee],
+                ["docstatus", "=", 1],
+                ["status", "=", "Approved"],
+            ],
+            fields=["name", "leave_type", "from_date", "to_date"],
+        )
+        for lv in leaves:
+            if _dates_overlap(lv.from_date, lv.to_date, start, end):
+                out.append(
+                    {
+                        "type": "leave_application",
+                        "name": lv.name,
+                        "leave_type": lv.leave_type,
+                        "from_date": str(lv.from_date),
+                        "to_date": str(lv.to_date),
+                    }
+                )
+    except Exception:
+        pass
+    try:
+        reqs = frappe.db.get_all(
+            "Shift Request",
+            filters=[["employee", "=", employee], ["docstatus", "=", 0], ["status", "=", "Draft"]],
+            fields=["name", "shift_type", "from_date", "to_date"],
+        )
+        for r in reqs:
+            if _dates_overlap(r.from_date, r.to_date, start, end):
+                out.append(
+                    {
+                        "type": "shift_request",
+                        "name": r.name,
+                        "shift_type": r.shift_type,
+                        "from_date": str(r.from_date),
+                        "to_date": str(r.to_date) if r.to_date else None,
+                    }
+                )
+    except Exception:
+        pass
+    return out
+
+
+@frappe.whitelist()
+def override_day_shift_assignment(
+    employee: str,
+    date: str,
+    shift_type: str,
+    work_location: str | None = None,
+) -> dict:
+    """One-day shift override straight from the calendar.
+
+    Frappe forbids editing ``shift_type`` on a submitted Shift Assignment, so a
+    single-day change is modelled as: cut the covering assignment to ``day - 1``
+    (an allow_on_submit edit — head history stays intact), insert the 1-day new
+    shift at ``day``, and re-create the remainder (``day + 1`` → original end,
+    same shift as before). When ``day == start`` of the covering assignment
+    there is no head, so the original is cancelled outright. A day with no
+    covering assignment simply gets the 1-day shift. The day's VN Employee
+    Shift Instance is materialised immediately (no scheduler wait).
+    """
+    _require_hr_admin()
+    employee = (employee or "").strip()
+    date = (date or "").strip()
+    shift_type = (shift_type or "").strip()
+    if not employee or not frappe.db.exists("Employee", employee):
+        frappe.throw(_("Nhân viên không tồn tại."))
+    if not shift_type or not frappe.db.exists("Shift Type", shift_type):
+        frappe.throw(_("Ca làm việc không tồn tại."))
+    if not date:
+        frappe.throw(_("Ngày là bắt buộc."))
+    day = getdate(date)
+    wl = (work_location or "").strip() if work_location else ""
+
+    # Lazy import — some stub harnesses ship frappe.utils without add_days.
+    from frappe.utils import add_days
+
+    covering = [
+        d
+        for d in frappe.db.get_all(
+            "Shift Assignment",
+            filters=[["employee", "=", employee], ["status", "=", "Active"], ["docstatus", "=", 1]],
+            fields=["name", "shift_type", "start_date", "end_date"],
+        )
+        if _dates_overlap(d.start_date, d.end_date, day, day)
+    ]
+    created: list[str] = []
+    adjusted: list[str] = []
+    cancelled: list[str] = []
+    orig = covering[0] if covering else None
+    cancelled_orig = False
+    if orig is not None:
+        doc = frappe.get_doc("Shift Assignment", orig.name)
+        if day > getdate(orig.start_date):
+            # Keep the head: start → day-1 (allow_on_submit edit, overlap-safe).
+            doc.end_date = add_days(day, -1)
+            doc.save()
+            adjusted.append(orig.name)
+        else:
+            # day == start → no head part: cancel the original outright.
+            _assert_shift_assignment_cancel_safe(doc)
+            doc.cancel()
+            cancelled.append(orig.name)
+            cancelled_orig = True
+        orig_end = getattr(orig, "end_date", None)
+        if not cancelled_orig and (not orig_end or day < getdate(orig_end)):
+            tail = create_shift_assignment(
+                employee=employee,
+                shift_type=orig.shift_type,
+                start_date=add_days(day, 1).isoformat(),
+                end_date=str(orig_end) if orig_end else None,
+            )
+            created.append(tail.get("name") if isinstance(tail, dict) else tail)
+    one_day = create_shift_assignment(
+        employee=employee,
+        shift_type=shift_type,
+        start_date=day.isoformat(),
+        end_date=day.isoformat(),
+        work_location=wl or None,
+    )
+    created.append(one_day.get("name") if isinstance(one_day, dict) else one_day)
+
+    # Materialise the day's shift instance now (don't wait for the scheduler).
+    try:
+        from gege_hr.gege_hr.api.shift import _materialise_shift_instances
+
+        _materialise_shift_instances(from_date=day, to_date=day, employee=employee)
+    except Exception:
+        pass
+
+    _audit_admin(
+        _("Đổi ca ngày {0} của {1} sang {2}").format(day, employee, shift_type),
+        reference_doctype="Shift Assignment",
+        reference_name=created[-1],
+        company=_company_for_employee(employee),
+        employee=employee,
+        new_value={
+            "date": str(day),
+            "shift_type": shift_type,
+            "adjusted": adjusted,
+            "cancelled": cancelled,
+            "created": created,
+        },
+    )
+    _notify_schedule_updated_admin(employee)
+    return {"created": created, "adjusted": adjusted, "cancelled": cancelled}
 
 
 # --------------------------------------------------------------------------- #
@@ -1804,6 +2982,7 @@ def approve_shift_request(name: str) -> dict:
         employee=req.employee,
         new_value={"shift_assignment": sa_name},
     )
+    _notify_schedule_updated_admin(req.employee)
     return {"name": name, "shift_assignment": sa_name}
 
 
@@ -1825,6 +3004,7 @@ def reject_shift_request(name: str, reason: str | None = None) -> dict:
         employee=req.employee,
         new_value={"reason": reason or ""},
     )
+    _notify_schedule_updated_admin(req.employee)
     return {"name": name}
 
 

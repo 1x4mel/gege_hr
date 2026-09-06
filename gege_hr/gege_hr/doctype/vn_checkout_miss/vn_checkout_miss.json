@@ -28,17 +28,21 @@
   {"fieldname": "grace_deadline", "fieldtype": "Datetime", "label": "Grace Deadline", "read_only": 1},
   {"fieldname": "resolved_by", "fieldtype": "Link", "label": "Resolved By", "options": "User", "read_only": 1},
   {"fieldname": "resolved_on", "fieldtype": "Datetime", "label": "Resolved On", "read_only": 1},
-  {"fieldname": "note", "fieldtype": "Small Text", "label": "HR Note"}
+  {"fieldname": "note", "fieldtype": "Small Text", "label": "HR Note"},
+  {"fieldname": "appeal_break", "fieldtype": "Section Break", "label": "Appeal"},
+  {"fieldname": "appeal_text", "fieldtype": "Text", "label": "Appeal Text", "read_only": 1},
+  {"fieldname": "appeal_count", "default": "0", "fieldtype": "Int", "label": "Appeal Count", "read_only": 1},
+  {"fieldname": "appealed_on", "fieldtype": "Datetime", "label": "Appealed On", "read_only": 1}
  ],
  "links": [],
  "module": "gege_hr",
  "name": "VN Checkout Miss",
  "owner": "Administrator",
  "permissions": [
-  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
-  {"create": 1, "delete": 1, "read": 1, "role": "Payroll Manager", "write": 1},
-  {"read": 1, "role": "HR User"},
-  {"read": 1, "role": "Employee", "if_owner": 1}
+  {"create": 1, "delete": 1, "print": 1, "read": 1, "role": "HR Manager", "share": 1, "write": 1},
+  {"create": 1, "delete": 1, "print": 1, "read": 1, "role": "Payroll Manager", "share": 1, "write": 1},
+  {"print": 1, "read": 1, "role": "HR User"},
+  {"print": 1, "read": 1, "role": "Employee", "if_owner": 1}
  ],
  "search_fields": "employee,work_date,status",
  "sort_field": "work_date",

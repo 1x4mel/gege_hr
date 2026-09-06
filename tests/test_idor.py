@@ -44,17 +44,26 @@ class _ValidationError(Exception):
 
 
 class _FakeDoc:
-    """A document stub that records every mutation a denied call must avoid."""
+    """A document stub that records every mutation a denied call must avoid.
+
+    plan-handover-deskfree B7: the lifecycle now drives the submittable flow —
+    the stub therefore models ``docstatus`` 0 → 1 (``submit``) → 2 (``cancel``)
+    plus ``reload`` (race-guard) and ``as_dict`` (audit snapshot).
+    """
 
     def __init__(self, name="NEW-0001", **fields):
         self.name = name
         self.status = "Pending"
         self.from_employee = None
         self.to_employee = None
+        self.docstatus = 0
         for k, v in fields.items():
             setattr(self, k, v)
         self.saved = False
         self.inserted = False
+        self.submitted = False
+        self.cancelled = False
+        self.reloads = 0
         self.flags = types.SimpleNamespace()
 
     def get(self, key, default=None):
@@ -67,6 +76,23 @@ class _FakeDoc:
     def save(self, ignore_permissions=False):
         self.saved = True
         return self
+
+    def submit(self):
+        self.submitted = True
+        self.docstatus = 1
+        return self
+
+    def cancel(self):
+        self.cancelled = True
+        self.docstatus = 2
+        return self
+
+    def reload(self):
+        self.reloads += 1
+        return self
+
+    def as_dict(self):
+        return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
 
 
 class _Harness:
@@ -92,7 +118,19 @@ class _Harness:
         self.loaded.append(args)
         return self.doc
 
-    def get_all(self, doctype, filters=None, fields=None, order_by=None, limit_page_length=None):
+    def get_all(
+        self,
+        doctype,
+        filters=None,
+        fields=None,
+        order_by=None,
+        limit_page_length=None,
+        or_filters=None,
+        limit=None,
+        start=None,
+        **_kw,
+    ):
+        # plan-leave-deskfree D4: my_applications v2 passes or_filters/limit/start.
         self.list_calls.append({"doctype": doctype, "filters": filters})
         return [dict(r) for r in self.list_rows]
 
@@ -163,6 +201,9 @@ def idor(monkeypatch):
     # The create / update paths fire a best-effort notification; neutralise it
     # so the test never depends on the VN Notification table.
     monkeypatch.setattr(handover.notify, "push_notification", lambda *a, **k: None)
+    # plan-handover-deskfree: the write paths now audit-log — keep them
+    # side-effect free here.
+    monkeypatch.setattr(handover.audit_api, "log", lambda *a, **k: None)
     monkeypatch.setattr(leave_extra.notify, "push_notification", lambda *a, **k: None)
     monkeypatch.setattr(employee_services.notify, "push_notification", lambda *a, **k: None)
 
@@ -188,9 +229,17 @@ def idor(monkeypatch):
     # frappe.get_roles + frappe.db.get_value("Employee", {"user_id": ...}) —
     # wire the same persona state into the stub so the swap is visible there.
     stub.get_roles = _roles
-    harness.get_value = lambda doctype, *a, **k: (
-        state["employee"] if doctype == "Employee" and a and isinstance(a[0], dict) else None
-    )
+
+    def _get_value(doctype, *a, **k):
+        if doctype == "Employee" and a and isinstance(a[0], dict):
+            return state["employee"]
+        if doctype == "Leave Application":
+            return {"docstatus": 1, "status": "Approved", "employee": "SELF"}
+        if doctype == "Employee":
+            return "Active"
+        return None
+
+    harness.get_value = _get_value
 
     return types.SimpleNamespace(
         leave=leave,
@@ -253,9 +302,10 @@ def test_my_applications_denies_cross_employee_with_no_side_effects(idor):
 def test_my_applications_allows_self(idor):
     """Reading one's own applications proceeds (guard passes)."""
     idor.persona(roles=["Employee"], employee="SELF")
-    # Returns whatever the stub serves (here []); the point is it does not throw.
+    # Returns whatever the stub serves (here the v2 envelope, plan-leave-deskfree
+    # D4); the point is it does not throw.
     out = idor.leave.my_applications(employee="SELF")
-    assert isinstance(out, list)
+    assert isinstance(out, dict) and out.get("total") == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -344,7 +394,10 @@ def test_update_handover_status_receiver_allowed(idor):
     idor.harness.doc = _FakeDoc(name="HT-0001", from_employee="A", to_employee="SELF", status="Pending")
     res = idor.handover.update_handover_status("HT-0001", "Completed")
     assert res["status"] == "Completed"
-    assert idor.harness.doc.saved
+    # plan-handover-deskfree H1: completing now SUBMITS (locks) the doc
+    # instead of a plain save — the persistence mechanism changed on purpose.
+    assert idor.harness.doc.submitted
+    assert idor.harness.doc.docstatus == 1
 
 
 def test_update_handover_status_hr_user_treated_as_manager(idor):
@@ -396,7 +449,9 @@ def test_my_handovers_always_self_scoped(idor):
     # function must pin ``to_employee`` to the caller, never to a peer.
     out = idor.handover.my_handovers()
     assert idor.harness.list_calls, "expected a list query"
-    filters = idor.harness.list_calls[-1]["filters"]
+    # The handover query is the FIRST call — later calls are the batched
+    # Employee name enrichment (plan-handover-deskfree §3.7).
+    filters = idor.harness.list_calls[0]["filters"]
     # DNA §6.6 B: list-filter form (a dict can't hold a date range on one
     # field) — the scoping clause must still pin to_employee to the caller.
     assert ["to_employee", "=", "SELF"] in filters
@@ -443,6 +498,12 @@ def test_manager_my_bypasses_self_scope(idor):  # ID-04
         lambda m: m.employee_services.resolve_grievance(name="X"),
         lambda m: m.employee_services.approve_travel_request(name="X"),
         lambda m: m.employee_services.reject_travel_request(name="X"),
+        # services-deskfree P1 — manager-only lifecycle (§2.5/§2.6).
+        lambda m: m.employee_services.investigate_grievance(name="X", cause="c"),
+        lambda m: m.employee_services.invalidate_grievance(name="X"),
+        lambda m: m.employee_services.cancel_travel_request(name="X", reason="r"),
+        lambda m: m.employee_services.bulk_travel_action(["X"], action="approve"),
+        lambda m: m.employee_services.service_summary(),
     ],
 )
 def test_actions_deny_plain_employee(idor, fn):  # ID-05
@@ -474,3 +535,230 @@ def test_hr_user_manager_set_allowed(idor):  # ID-07
     idor.leave_extra.all_leave_encashments()  # must not raise
     idor.employee_services.all_travel_requests()  # must not raise
     idor.employee_services.resolve_grievance(name="X")  # manager gate passes
+
+
+# --------------------------------------------------------------------------- #
+# plan leave-extra-deskfree-complete — new detail/lifecycle endpoints IDOR
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "fn",
+    [
+        lambda m: m.leave_extra.get_leave_encashment(name="X"),
+        lambda m: m.leave_extra.get_comp_off(name="X"),
+        lambda m: m.leave_extra.update_leave_encashment(name="X"),
+        lambda m: m.leave_extra.update_comp_off(name="X"),
+        lambda m: m.leave_extra.withdraw_leave_encashment(name="X"),
+        lambda m: m.leave_extra.withdraw_comp_off(name="X"),
+        lambda m: m.leave_extra.delete_leave_extra_draft(doctype="Leave Encashment", name="X"),
+    ],
+)
+def test_leave_extra_lifecycle_denies_other_employee(idor, fn):
+    """A plain Employee may not read/edit/withdraw/delete someone else's row."""
+    idor.persona(roles=["Employee"], employee="SELF")
+    idor.harness.doc.employee = "OTHER"
+    with pytest.raises(Exception):
+        fn(idor)
+
+
+def test_leave_extra_lifecycle_allows_owner(idor):
+    """The owner's own row passes the self-scope gate (read + withdraw)."""
+    idor.persona(roles=["Employee"], employee="SELF")
+    idor.harness.doc.employee = "SELF"
+    idor.leave_extra.get_leave_encashment(name="X")  # must not raise
+    idor.leave_extra.withdraw_leave_encashment(name="X")  # must not raise
+
+
+# --------------------------------------------------------------------------- #
+# plan services-deskfree-complete — new detail/lifecycle endpoints IDOR (F8)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "fn",
+    [
+        lambda m: m.employee_services.get_grievance(name="X"),
+        lambda m: m.employee_services.get_travel_request(name="X"),
+        lambda m: m.employee_services.update_grievance(name="X", subject="Đổi"),
+        lambda m: m.employee_services.update_travel_request(name="X", purpose_of_travel="Đổi"),
+        lambda m: m.employee_services.withdraw_grievance(name="X"),
+        lambda m: m.employee_services.withdraw_travel_request(name="X"),
+        lambda m: m.employee_services.delete_service_draft(doctype="Employee Grievance", name="X"),
+        lambda m: m.employee_services.delete_service_draft(doctype="Travel Request", name="X"),
+        # services-deskfree P1 — owner-gated lifecycle (§2.5/§2.9).
+        lambda m: m.employee_services.reopen_grievance(name="X", note="n"),
+        lambda m: m.employee_services.add_service_comment(doctype="Employee Grievance", name="X", text="t"),
+        lambda m: m.employee_services.upload_service_attachment(doctype="Employee Grievance", name="X"),
+    ],
+)
+def test_services_lifecycle_denies_other_employee(idor, fn):
+    """A plain Employee may not read/edit/withdraw/delete someone else's row."""
+    idor.persona(roles=["Employee"], employee="SELF")
+    idor.harness.doc.raised_by = "OTHER"
+    idor.harness.doc.employee = "OTHER"
+    with pytest.raises(Exception):
+        fn(idor)
+
+
+def test_services_lifecycle_allows_owner(idor):
+    """The owner's own row passes the self-scope gate (grievance + travel read)."""
+    idor.persona(roles=["Employee"], employee="SELF")
+    idor.harness.doc.raised_by = "SELF"
+    idor.harness.doc.employee = "SELF"
+    idor.employee_services.get_grievance(name="X")  # must not raise
+    idor.employee_services.get_travel_request(name="X")  # must not raise
+
+
+# --------------------------------------------------------------------------- #
+# plan-profile-desk-free — self_profile IDOR (§3.1 "IDOR" row)
+#
+# The self-profile surface is session-derived: there is NO ``employee`` param
+# to forge. The deny paths below pin the object-level guards instead — a
+# plain Employee may never cancel someone else's change request, delete a
+# file on someone else's Employee record, or see another user's sessions.
+# --------------------------------------------------------------------------- #
+class _SPDoc:
+    def __init__(self, doctype, name=None, **fields):
+        self.doctype = doctype
+        self.name = name
+        self.status = "Open"
+        for k, v in fields.items():
+            setattr(self, k, v)
+        self.saved = False
+
+    def insert(self, ignore_permissions=False):
+        return self
+
+    def save(self, ignore_permissions=False):
+        self.saved = True
+        return self
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+
+class _SPHarness:
+    def __init__(self):
+        self.employee_for_user = "SELF"
+        self.docs = {}
+        self.rows = {}
+        self.saved = []
+        self.deleted = []
+
+    def get_value(self, doctype, key, field=None, as_dict=False):
+        if doctype == "Employee" and isinstance(key, dict):
+            return self.employee_for_user
+        if isinstance(key, str):
+            doc = self.docs.get((doctype, key))
+            if doc is None:
+                return None
+            if isinstance(field, (list, tuple)):
+                row = {f: getattr(doc, f, None) for f in field}
+                return row if as_dict else next(iter(row.values()), None)
+            return getattr(doc, field, None)
+        return None
+
+    def exists(self, doctype, name):
+        return (doctype, name) in self.docs
+
+    def table_exists(self, doctype):
+        return False
+
+
+@pytest.fixture
+def sp_idor(monkeypatch):
+    harness = _SPHarness()
+    stub = types.ModuleType("frappe")
+    stub._ = lambda s: s
+    stub.whitelist = lambda fn=None, **kw: fn if fn is not None else (lambda f: f)
+    stub.PermissionError = _PermissionDenied
+    stub.ValidationError = _ValidationError
+
+    def _throw(msg, exc=None):
+        raise (exc or Exception)(str(msg))
+
+    stub.throw = _throw
+    stub.log_error = lambda *a, **k: None
+    stub.get_roles = lambda user: []
+    stub.publish_realtime = lambda *a, **k: None
+    stub.db = harness
+    stub.session = types.SimpleNamespace(user="caller@gege.demo", sid="sid-caller-1")
+    stub.get_doc = lambda doctype, name: harness.docs.get((doctype, name))
+    stub.delete_doc = lambda doctype, name, **k: harness.deleted.append((doctype, name))
+
+    def _new_doc(doctype):
+        doc = _SPDoc(doctype)
+        doc.name = f"{doctype.replace(' ', '-')}-NEW"
+        harness.docs[(doctype, doc.name)] = doc
+        return doc
+
+    stub.new_doc = _new_doc
+
+    _META = {
+        "Employee": ["name", "cell_number", "personal_email", "reports_to", "user_id"],
+        "Sessions": ["sid", "user", "lastupdate", "status"],
+        "ToDo": ["name", "owner", "reference_type", "reference_name", "status"],
+        "File": ["name", "owner", "attached_to_doctype", "attached_to_name"],
+    }
+
+    stub.get_meta = lambda doctype: types.SimpleNamespace(
+        fields=[types.SimpleNamespace(fieldname=f) for f in _META.get(doctype, [])]
+    )
+
+    def _get_all(doctype, filters=None, fields=None, **_kw):
+        rows = list(harness.rows.get(doctype, []))
+        if isinstance(filters, dict):
+            rows = [r for r in rows if all(r.get(k) == v for k, v in filters.items())]
+        if fields:
+            return [{f: r.get(f) for f in fields} for r in rows]
+        return rows
+
+    stub.get_all = _get_all
+    monkeypatch.setitem(sys.modules, "frappe", stub)
+    # Seed the session user's own Employee row so the allow-listed path can save.
+    harness.docs[("Employee", "SELF")] = _SPDoc("Employee", "SELF", user_id="caller@gege.demo")
+    importlib.reload(importlib.import_module("gege_hr.gege_hr.api.employee_profile"))
+    mod = importlib.reload(importlib.import_module("gege_hr.gege_hr.api.self_profile"))
+    return types.SimpleNamespace(mod=mod, stub=stub, harness=harness)
+
+
+def test_self_profile_contact_cannot_target_foreign_fields(sp_idor):
+    """No ``employee`` param exists; any non-allowlisted key is denied + zero saves."""
+    sp_idor.mod.update_my_contact(values={"cell_number": "0911"})  # allow-list ok, no doc → no save
+    with pytest.raises(_PermissionDenied):
+        sp_idor.mod.update_my_contact(values={"reports_to": "HR-EMP-9"})
+    assert sp_idor.harness.saved == []
+
+
+def test_self_profile_cancel_request_denies_other_employee(sp_idor):
+    """ToDo referencing ANOTHER employee (or owned by another user) → deny."""
+    todo = _SPDoc("ToDo", "TD-1", reference_type="Employee", reference_name="OTHER")
+    todo.owner = "caller@gege.demo"
+    sp_idor.harness.docs[("ToDo", "TD-1")] = todo
+    with pytest.raises(_PermissionDenied):
+        sp_idor.mod.cancel_profile_request("TD-1")
+    assert todo.saved is False
+
+
+def test_self_profile_delete_document_denies_other_employee(sp_idor):
+    """File attached to ANOTHER employee's record → deny, nothing deleted."""
+    file_doc = _SPDoc(
+        "File",
+        "FILE-1",
+        owner="caller@gege.demo",
+        attached_to_doctype="Employee",
+        attached_to_name="OTHER",
+    )
+    sp_idor.harness.docs[("File", "FILE-1")] = file_doc
+    with pytest.raises(_PermissionDenied):
+        sp_idor.mod.delete_my_document("FILE-1")
+    assert sp_idor.harness.deleted == []
+
+
+def test_self_profile_sessions_never_lists_other_users(sp_idor):
+    """Sessions listing filters to the session user only."""
+    sp_idor.harness.rows["Sessions"] = [
+        {"sid": "sid-caller-1", "user": "caller@gege.demo", "status": "Active", "lastupdate": "t1"},
+        {"sid": "sid-other-2", "user": "other@gege.demo", "status": "Active", "lastupdate": "t2"},
+    ]
+    res = sp_idor.mod.my_sessions()
+    assert all(s["sid"] != "sid-other-2"[:8] or s is None for s in res["sessions"])
+    assert res["total"] == 1
+    assert res["sessions"][0]["current"] is True

@@ -6,6 +6,13 @@ portal: an employee lists/submits leave encashment (nghỉ phép đổi tiền) 
 comp-off requests (nghỉ bù); an HR/Manager lists all + approves/rejects. Pure
 helpers split out for unit testing. Mirrors ``api/expense.py``.
 
+Desk-free P0 (plan leave-extra-deskfree-complete): detail endpoints with a
+server-side can-matrix (``get_leave_encashment`` / ``get_comp_off``), create
+context (``leave_extra_context`` — balances + earning components + leave
+period health), draft edit (``update_*``), employee withdraw (``withdraw_*``),
+draft delete (``delete_leave_extra_draft``) and realtime ``leave_extra_updated``
+published from every mutation.
+
 Schema note (plan-test-complete-hr-extra G4/P0bis): the stock HRMS doctypes do
 NOT fit the portal contract — Leave Encashment's native ``status`` Select has
 no "Rejected" option, and Compensatory Leave Request has no ``status`` column
@@ -116,6 +123,182 @@ def append_note(existing: str | None, reason: str | None) -> str:
     if tag in note:
         return note
     return f"{note} | {tag}".strip(" |")
+
+
+def _cancel_linked_additional_salary(doc) -> None:
+    """Pre-cancel the minted Additional Salary (as Administrator, same scoped
+    precedent as approve) and unlink it so Leave Encashment cancel passes the
+    core link check. Best-effort — failures log, the cancel above still runs."""
+    ref = getattr(doc, "additional_salary", None)
+    if not ref:
+        return
+    try:
+        salary = frappe.get_doc("Additional Salary", ref)
+        if salary and int(salary.get("docstatus") or 0) == 1:
+            prev_user = frappe.session.user
+            try:
+                frappe.set_user("Administrator")
+                salary.flags.ignore_permissions = True
+                salary.cancel()
+            finally:
+                frappe.set_user(prev_user)
+        frappe.db.set_value(ENCASHMENT_DOCTYPE, doc.get("name"), "additional_salary", "")
+        doc.additional_salary = ""
+    except Exception:
+        frappe.log_error(title="leave_encashment.cancel additional_salary failed")
+
+
+def append_withdraw_note(existing: str | None, reason: str | None) -> str:
+    """Employee-withdraw note — same join semantics as ``append_note``."""
+    note = (str(existing or "")).strip()
+    why = (str(reason or "")).strip() or "Nhân viên tự rút đơn"
+    tag = f"Rút đơn: {why}"
+    if tag in note:
+        return note
+    return f"{note} | {tag}".strip(" |")
+
+
+# --------------------------------------------------------------------------- #
+# Desk-free P0 helpers (plan leave-extra-deskfree-complete §2.0)
+# --------------------------------------------------------------------------- #
+def _publish_leave_extra(doctype, name, employee=None, status=None) -> None:
+    """Realtime ping for open ``/hr/leave-extra`` tabs. Best-effort — never raises."""
+    try:
+        frappe.publish_realtime(
+            "leave_extra_updated",
+            {"doctype": doctype, "name": name, "employee": employee, "status": status},
+        )
+    except Exception:
+        pass
+
+
+def _safe_row(doctype: str, name, fields: list) -> dict | None:
+    try:
+        rows = frappe.get_all(doctype, filters={"name": name}, fields=fields, limit_page_length=1) or []
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def _linked(doc) -> dict:
+    """Records HRMS mints on submit (F1/F2): Additional Salary (encashment —
+    link field ``additional_salary`` stamped by HRMS ``on_submit``) and Leave
+    Allocation (comp-off — link field ``leave_allocation``)."""
+    out: dict = {}
+    if getattr(doc, "doctype", None) == ENCASHMENT_DOCTYPE:
+        ref = doc.get("additional_salary")
+        if ref:
+            out["additional_salary"] = _safe_row(
+                "Additional Salary", ref, ["name", "status", "docstatus", "amount"]
+            )
+    else:
+        ref = doc.get("leave_allocation")
+        if ref:
+            out["leave_allocation"] = _safe_row(
+                "Leave Allocation",
+                ref,
+                [
+                    "name",
+                    "new_leaves_allocated",
+                    "total_leaves_allocated",
+                    "from_date",
+                    "to_date",
+                    "docstatus",
+                ],
+            )
+    return out
+
+
+def _attachments(doctype: str, name) -> list:
+    try:
+        return (
+            frappe.get_all(
+                "File",
+                filters={"attached_to_doctype": doctype, "attached_to_name": name},
+                fields=["name", "file_name", "file_url", "is_private", "file_size"],
+                order_by="creation desc",
+                limit_page_length=20,
+            )
+            or []
+        )
+    except Exception:
+        return []
+
+
+def _activity_rows(doctype: str, name, limit: int = 15) -> list:
+    """Timeline: Version (ai sửa gì) + Comment (trao đổi), newest first."""
+    rows: list = []
+    try:
+        rows += [
+            {
+                "type": "version",
+                "owner": r.get("owner"),
+                "creation": r.get("modified"),
+                "data": r.get("data"),
+            }
+            for r in frappe.get_all(
+                "Version",
+                filters={"ref_doctype": doctype, "docname": name},
+                fields=["name", "owner", "modified", "data"],
+                order_by="modified desc",
+                limit_page_length=limit,
+            )
+            or []
+        ]
+    except Exception:
+        pass
+    try:
+        rows += [
+            {
+                "type": "comment",
+                "owner": r.get("owner"),
+                "creation": r.get("creation"),
+                "content": r.get("content"),
+            }
+            for r in frappe.get_all(
+                "Comment",
+                filters={"reference_doctype": doctype, "reference_name": name, "comment_type": "Comment"},
+                fields=["name", "owner", "creation", "content"],
+                order_by="creation desc",
+                limit_page_length=limit,
+            )
+            or []
+        ]
+    except Exception:
+        pass
+    rows.sort(key=lambda r: str(r.get("creation") or ""), reverse=True)
+    return rows[:limit]
+
+
+def _detail_can(doc, *, is_hr: bool | None = None, caller_emp=None) -> dict:
+    """Action matrix for the drawer (§3 — the BE is the single source of truth).
+
+    owner‖HR may edit/withdraw/delete a docstatus-0 row; approve/reject are
+    HR-only and only where a decision is still meaningful; ``resend`` covers
+    Rejected rows (copy-to-new prefill on the SPA).
+    """
+    if is_hr is None:
+        is_hr = _is_manager()
+    if caller_emp is None:
+        try:
+            caller_emp = frappe.db.get_value("Employee", {"user_id": frappe.session.user})
+        except Exception:
+            caller_emp = None
+    mine = bool(caller_emp) and doc.get("employee") == caller_emp
+    allowed = mine or is_hr
+    ds = int(doc.get("docstatus") or 0)
+    vn = str(doc.get("vn_status") or "").strip() or "Draft"
+    is_draft = ds == 0 and vn == "Draft"
+    return {
+        "edit": allowed and ds == 0 and vn in ("Draft", "Rejected"),
+        "withdraw": allowed and is_draft,
+        "delete": allowed and ds == 0,
+        "approve": is_hr and is_draft,
+        "reject": is_hr and (is_draft or ds == 1),
+        "resend": allowed and ((ds == 0 and vn == "Rejected") or ds == 2),
+        "comment": allowed,
+        "attach": allowed and ds == 0,
+    }
 
 
 def _resolve(employee: str | None) -> str:
@@ -418,6 +601,7 @@ def submit_leave_encashment(employee=None, leave_type=None, encashment_days=None
     doc.company = company
     doc.vn_status = "Draft"
     doc.insert(ignore_permissions=True)
+    _publish_leave_extra(ENCASHMENT_DOCTYPE, doc.name, emp, "Draft")
     return {"name": doc.name, "encashment_days": days, "encashment_amount": doc.get("encashment_amount")}
 
 
@@ -448,6 +632,7 @@ def approve_leave_encashment(name=None):
             doc.save(ignore_permissions=True)
     finally:
         frappe.set_user(prev_user)
+    _publish_leave_extra(ENCASHMENT_DOCTYPE, name, doc.get("employee"), "Approved")
     _notify_outcome(doc.get("employee"), name, ENCASHMENT_DOCTYPE, "duyệt", "đổi phép", "Approved")
     return {"name": doc.name, "status": portal_status("Approved", getattr(doc, "docstatus", 0))}
 
@@ -465,7 +650,12 @@ def reject_leave_encashment(name=None, reason=None):
         doc.save(ignore_permissions=True)
     else:
         if getattr(doc, "docstatus", 0) == 1:
+            _cancel_linked_additional_salary(doc)
             try:
+                # HRMS on_cancel intends to cancel the minted Additional
+                # Salary itself, but the core link check blocks cancel BEFORE
+                # on_cancel runs — pre-cancel above + ignore_links here.
+                doc.flags.ignore_links = True
                 doc.cancel()
             except Exception as exc:
                 frappe.log_error(title="leave_encashment.cancel failed")
@@ -474,6 +664,7 @@ def reject_leave_encashment(name=None, reason=None):
             frappe.db.set_value(ENCASHMENT_DOCTYPE, name, {"vn_status": "Rejected", "vn_note": note})
         except Exception:
             frappe.log_error(title="leave_encashment.reject set_value failed")
+    _publish_leave_extra(ENCASHMENT_DOCTYPE, name, doc.get("employee"), "Rejected")
     _notify_outcome(doc.get("employee"), name, ENCASHMENT_DOCTYPE, "từ chối", "đổi phép", "Rejected")
     return {"name": name, "status": "Rejected", "note": note}
 
@@ -553,6 +744,7 @@ def submit_comp_off(employee=None, leave_type=None, work_from_date=None, work_to
     doc.company = company
     doc.vn_status = "Draft"
     doc.insert(ignore_permissions=True)
+    _publish_leave_extra(COMPOFF_DOCTYPE, doc.name, emp, "Draft")
     return {"name": doc.name, "work_from_date": work_from_date, "work_to_date": work_to_date}
 
 
@@ -582,6 +774,7 @@ def approve_comp_off(name=None):
             doc.save(ignore_permissions=True)
     finally:
         frappe.set_user(prev_user)
+    _publish_leave_extra(COMPOFF_DOCTYPE, name, doc.get("employee"), "Approved")
     _notify_outcome(doc.get("employee"), name, COMPOFF_DOCTYPE, "duyệt", "nghỉ bù", "Approved")
     return {"name": doc.name, "status": portal_status("Approved", getattr(doc, "docstatus", 0))}
 
@@ -600,6 +793,9 @@ def reject_comp_off(name=None, reason=None):
     else:
         if getattr(doc, "docstatus", 0) == 1:
             try:
+                # Same link-check shield as the encashment path (the comp-off
+                # cancel adjusts its Leave Allocation via on_cancel).
+                doc.flags.ignore_links = True
                 doc.cancel()
             except Exception as exc:
                 frappe.log_error(title="comp_off.cancel failed")
@@ -608,8 +804,384 @@ def reject_comp_off(name=None, reason=None):
             frappe.db.set_value(COMPOFF_DOCTYPE, name, {"vn_status": "Rejected", "vn_note": note})
         except Exception:
             frappe.log_error(title="comp_off.reject set_value failed")
+    _publish_leave_extra(COMPOFF_DOCTYPE, name, doc.get("employee"), "Rejected")
     _notify_outcome(doc.get("employee"), name, COMPOFF_DOCTYPE, "từ chối", "nghỉ bù", "Rejected")
     return {"name": name, "status": "Rejected", "note": note}
+
+
+# --------------------------------------------------------------------------- #
+# Desk-free P0 — detail / context / update / withdraw / delete
+# (plan leave-extra-deskfree-complete §2.1-§2.6)
+# --------------------------------------------------------------------------- #
+_ENCASH_DETAIL_FIELDS = _ENCASH_FIELDS + [
+    "earning_component",
+    "leave_period",
+    "leave_allocation",
+    "encashment_date",
+    "additional_salary",
+    "currency",
+    "company",
+    "owner",
+    "creation",
+    "modified",
+    "modified_by",
+]
+_COMPOFF_DETAIL_FIELDS = _COMPOFF_FIELDS + [
+    "leave_allocation",
+    "company",
+    "owner",
+    "creation",
+    "modified",
+    "modified_by",
+]
+
+
+def _get_detail(doctype: str, name, fields: list, *, compoff: bool) -> dict:
+    if not name:
+        frappe.throw("Thiếu mã yêu cầu.")
+    doc = frappe.get_doc(doctype, name)
+    if not doc:
+        frappe.throw("Không tìm thấy yêu cầu.")
+    _assert_own(doc.get("employee"))
+    row = project_row({f: doc.get(f) for f in fields}, compoff=compoff)
+    row["docstatus"] = int(doc.get("docstatus") or 0)
+    return {
+        "doc": row,
+        "links": _linked(doc),
+        "attachments": _attachments(doctype, name),
+        "activity": _activity_rows(doctype, name),
+        "can": _detail_can(doc),
+    }
+
+
+@frappe.whitelist()
+def get_leave_encashment(name=None) -> dict:
+    """§2.2 — one encashment for the self-service drawer (can-matrix truth)."""
+    return _get_detail(ENCASHMENT_DOCTYPE, name, _ENCASH_DETAIL_FIELDS, compoff=False)
+
+
+@frappe.whitelist()
+def get_comp_off(name=None) -> dict:
+    """§2.2 — one comp-off request for the self-service drawer."""
+    return _get_detail(COMPOFF_DOCTYPE, name, _COMPOFF_DETAIL_FIELDS, compoff=True)
+
+
+@frappe.whitelist()
+def leave_extra_context() -> dict:
+    """§2.1 — create-form context: options + live balances + earning
+    components + active Leave Period health, so the SPA submits without desk."""
+    base = leave_extra_options() or {}
+    balances: dict = {}
+    emp = None
+    try:
+        emp = frappe.db.get_value("Employee", {"user_id": frappe.session.user})
+    except Exception:
+        emp = None
+    if emp:
+        for t in base.get("leave_types") or []:
+            balances[t] = remaining_leave_days(emp, t)
+    try:
+        # NOTE: the Select value is "Earning" (capitalised) — filter in Python
+        # (case-insensitive) so the dropdown survives schema-casing drift.
+        comp_rows = (
+            frappe.get_all(
+                "Salary Component",
+                filters={"disabled": 0},
+                fields=["name", "type"],
+                limit_page_length=200,
+            )
+            or []
+        )
+        earning = sorted(
+            r.get("name") for r in comp_rows if str(r.get("type") or "").lower() == "earning"
+        )
+    except Exception:
+        earning = []
+    company = None
+    if emp:
+        try:
+            company = frappe.db.get_value("Employee", emp, "company")
+        except Exception:
+            company = None
+    period = _default_leave_period(company)
+    return {
+        **base,
+        "balances": balances,
+        "earning_components": earning,
+        "leave_period": period,
+        "health": "ok" if period else "no_leave_period",
+    }
+
+
+def _reload(doc) -> None:
+    """Best-effort race-guard reload before a draft write."""
+    try:
+        doc.reload()
+    except Exception:
+        pass
+
+
+def _load_owned_draft(doctype: str, name, locked_msg: str):
+    if not name:
+        frappe.throw("Thiếu mã yêu cầu.")
+    doc = frappe.get_doc(doctype, name)
+    if not doc:
+        frappe.throw("Không tìm thấy yêu cầu.")
+    _assert_own(doc.get("employee"))
+    if int(doc.get("docstatus") or 0) != 0:
+        frappe.throw(locked_msg)
+    return doc
+
+
+def _reset_and_save(doc) -> None:
+    """Save a draft with scoped bypass; a Rejected draft resets to Draft."""
+    if str(doc.get("vn_status") or "").strip() == "Rejected":
+        doc.vn_status = "Draft"
+    try:
+        doc.flags.ignore_permissions = True
+        doc.save(ignore_permissions=True)
+    finally:
+        try:
+            doc.flags.ignore_permissions = False
+        except Exception:
+            pass
+
+
+@frappe.whitelist()
+def update_leave_encashment(name=None, leave_type=None, encashment_days=None, earning_component=None) -> dict:
+    """§2.3 — edit a Draft encashment (owner or HR); re-runs the submit-path
+    validations (G3 balance gate) and resets a Rejected draft to Draft."""
+    doc = _load_owned_draft(ENCASHMENT_DOCTYPE, name, "Chỉ sửa được yêu cầu chưa duyệt.")
+    _reload(doc)
+    new_type = leave_type or doc.get("leave_type")
+    if encashment_days not in (None, ""):
+        new_days = _num(encashment_days)
+    else:
+        new_days = _num(doc.get("encashment_days"))
+    if not new_type or new_days <= 0:
+        frappe.throw("Cần loại phép + số ngày đổi > 0.")
+    remaining = remaining_leave_days(doc.get("employee"), new_type)
+    if remaining is not None and new_days > remaining + 1e-9:
+        frappe.throw(
+            f"Số ngày đổi ({new_days:g}) vượt số dư phép còn lại ({remaining:g}) của loại phép này."
+        )
+    doc.leave_type = new_type
+    doc.encashment_days = new_days
+    if earning_component:
+        doc.earning_component = earning_component
+    _reset_and_save(doc)
+    _publish_leave_extra(ENCASHMENT_DOCTYPE, doc.get("name"), doc.get("employee"), "Draft")
+    return {
+        "name": doc.get("name"),
+        "status": "Draft",
+        "encashment_days": new_days,
+        "encashment_amount": doc.get("encashment_amount"),
+    }
+
+
+@frappe.whitelist()
+def update_comp_off(name=None, work_from_date=None, work_to_date=None, reason=None) -> dict:
+    """§2.3 — edit a Draft comp-off (owner or HR); date-order gate (G1)."""
+    doc = _load_owned_draft(COMPOFF_DOCTYPE, name, "Chỉ sửa được yêu cầu chưa duyệt.")
+    _reload(doc)
+    new_from = work_from_date or doc.get("work_from_date")
+    new_to = work_to_date or doc.get("work_to_date") or doc.get("work_end_date")
+    if not (new_from and new_to):
+        frappe.throw("Cần ngày bắt đầu + kết thúc làm bù.")
+    if not date_order_ok(new_from, new_to):
+        frappe.throw("Ngày kết thúc làm bù không được trước ngày bắt đầu.")
+    doc.work_from_date = new_from
+    doc.work_end_date = new_to
+    if reason is not None:
+        doc.reason = reason
+    _reset_and_save(doc)
+    _publish_leave_extra(COMPOFF_DOCTYPE, doc.get("name"), doc.get("employee"), "Draft")
+    return {
+        "name": doc.get("name"),
+        "status": "Draft",
+        "work_from_date": new_from,
+        "work_to_date": new_to,
+    }
+
+
+def _withdraw(doctype: str, name, note) -> dict:
+    """§2.4 — employee withdraws their own Draft (vn_status Rejected + note)."""
+    doc = _load_owned_draft(doctype, name, "Chỉ rút được yêu cầu chưa duyệt.")
+    vn = str(doc.get("vn_status") or "").strip() or "Draft"
+    if vn != "Draft":
+        frappe.throw("Yêu cầu đã có kết quả, không thể rút.")
+    text = append_withdraw_note(doc.get("vn_note"), note)
+    doc.vn_status = "Rejected"
+    doc.vn_note = text
+    try:
+        doc.flags.ignore_permissions = True
+        doc.save(ignore_permissions=True)
+    finally:
+        try:
+            doc.flags.ignore_permissions = False
+        except Exception:
+            pass
+    _publish_leave_extra(doctype, name, doc.get("employee"), "Rejected")
+    return {"name": name, "status": "Rejected", "note": text}
+
+
+@frappe.whitelist()
+def withdraw_leave_encashment(name=None, note=None) -> dict:
+    return _withdraw(ENCASHMENT_DOCTYPE, name, note)
+
+
+@frappe.whitelist()
+def withdraw_comp_off(name=None, note=None) -> dict:
+    return _withdraw(COMPOFF_DOCTYPE, name, note)
+
+
+@frappe.whitelist()
+def delete_leave_extra_draft(doctype=None, name=None) -> dict:
+    """§2.5 — hard-delete a docstatus-0 row (trash); scoped bypass per F7."""
+    if doctype not in (ENCASHMENT_DOCTYPE, COMPOFF_DOCTYPE):
+        frappe.throw("Loại yêu cầu không hợp lệ.")
+    doc = _load_owned_draft(doctype, name, "Chỉ xoá được bản nháp.")
+    _publish_leave_extra(doctype, name, doc.get("employee"), "Deleted")
+    try:
+        frappe.delete_doc(doctype, name, ignore_permissions=True)
+    except TypeError:
+        frappe.delete_doc(doctype, name)
+    return {"name": name, "deleted": True}
+
+
+@frappe.whitelist()
+def add_leave_extra_comment(doctype=None, name=None, text=None) -> dict:
+    """§2.7 (P1) — comment thread entry (Frappe Comment, scoped bypass F7)."""
+    if doctype not in (ENCASHMENT_DOCTYPE, COMPOFF_DOCTYPE):
+        frappe.throw("Loại yêu cầu không hợp lệ.")
+    content = (str(text or "")).strip()
+    if not content:
+        frappe.throw("Nội dung bình luận không được để trống.")
+    doc = frappe.get_doc(doctype, name)
+    if not doc:
+        frappe.throw("Không tìm thấy yêu cầu.")
+    _assert_own(doc.get("employee"))
+    row = frappe.get_doc(
+        {
+            "doctype": "Comment",
+            "comment_type": "Comment",
+            "reference_doctype": doctype,
+            "reference_name": name,
+            "content": content,
+        }
+    )
+    try:
+        row.flags.ignore_permissions = True
+        row.insert(ignore_permissions=True)
+    finally:
+        try:
+            row.flags.ignore_permissions = False
+        except Exception:
+            pass
+    _publish_leave_extra(doctype, name, doc.get("employee"), "Comment")
+    return {
+        "name": row.get("name"),
+        "content": content,
+        "owner": getattr(row, "owner", None) or frappe.session.user,
+    }
+
+
+@frappe.whitelist()
+def bulk_leave_extra_action(doctype=None, names=None, action=None, reason=None) -> dict:
+    """§2.7 (P1) — bulk approve/reject through the SAME endpoints (Administrator
+    set_user path preserved). Partial-safe: per-row try/except, never throws."""
+    if doctype not in (ENCASHMENT_DOCTYPE, COMPOFF_DOCTYPE):
+        frappe.throw("Loại yêu cầu không hợp lệ.")
+    if not _is_manager():
+        frappe.throw("Chỉ HR/Manager thao tác loạt.")
+    if action not in ("approve", "reject"):
+        frappe.throw("Hành động không hợp lệ.")
+    if isinstance(names, str):
+        names = [n for n in (x.strip() for x in names.split(",")) if n]
+    names = list(names or [])
+    if not names:
+        frappe.throw("Chưa chọn yêu cầu nào.")
+    if action == "reject":
+        fn = reject_leave_encashment if doctype == ENCASHMENT_DOCTYPE else reject_comp_off
+    else:
+        fn = approve_leave_encashment if doctype == ENCASHMENT_DOCTYPE else approve_comp_off
+    updated: list = []
+    failed: list = []
+    for n in names:
+        try:
+            if action == "reject":
+                fn(n, reason)
+            else:
+                fn(n)
+            updated.append(n)
+        except Exception as exc:
+            failed.append({"name": n, "reason": str(exc)})
+    return {"updated": updated, "failed": failed}
+
+
+@frappe.whitelist()
+def upload_leave_extra_attachment(doctype=None, name=None, is_private=1, **kwargs) -> dict:
+    """§2.7 (P1, ATT fallback) — thin wrapper for when the native
+    ``/api/method/upload_file`` is permission-blocked (a plain Employee often
+    lacks write on the target doctype); ownership-gated + scoped bypass F7.
+
+    NOTE: frappe does NOT map multipart FILES onto whitelisted kwargs — the
+    file arrives via ``frappe.request.files['file']`` (both paths probed)."""
+    if doctype not in (ENCASHMENT_DOCTYPE, COMPOFF_DOCTYPE):
+        frappe.throw("Loại yêu cầu không hợp lệ.")
+    doc = frappe.get_doc(doctype, name)
+    if not doc:
+        frappe.throw("Không tìm thấy yêu cầu.")
+    _assert_own(doc.get("employee"))
+    file = kwargs.get("file")
+    if file is None and getattr(frappe, "request", None) is not None:
+        files = getattr(frappe.request, "files", None) or {}
+        try:
+            file = files.get("file")
+        except Exception:
+            file = None
+    if not file:
+        frappe.throw("Thiếu tệp đính kèm.")
+    from frappe.utils.file_manager import save_file
+
+    filename = getattr(file, "filename", None) or "attachment"
+    content = file.read() if hasattr(file, "read") else (file or b"")
+    try:
+        private = bool(int(is_private or 0))
+    except (TypeError, ValueError):
+        private = bool(is_private)
+    # save_file on this frappe build has no ignore_permissions kwarg — use the
+    # scoped global flag (has_permission honours frappe.flags.ignore_permissions).
+    try:
+        frappe.flags.ignore_permissions = True
+        out = save_file(filename, content, doctype, name, is_private=private)
+    finally:
+        try:
+            frappe.flags.ignore_permissions = False
+        except Exception:
+            pass
+    _publish_leave_extra(doctype, name, doc.get("employee"), "Attachment")
+    return {"name": out.get("name"), "file_name": out.get("file_name"), "file_url": out.get("file_url")}
+
+
+@frappe.whitelist()
+def leave_extra_summary() -> dict:
+    """§2.7 (P1) — HR tab tiles: counts per portal status for both doctypes."""
+    if not _is_manager():
+        frappe.throw("Chỉ HR/Manager xem tổng quan.")
+    out: dict = {}
+    for key, dt in (("encash", ENCASHMENT_DOCTYPE), ("compoff", COMPOFF_DOCTYPE)):
+        counts = {s: 0 for s in PORTAL_STATUSES}
+        try:
+            rows = frappe.get_all(dt, fields=["vn_status"], limit_page_length=0) or []
+        except Exception:
+            rows = []
+        for r in rows:
+            s = (r.get("vn_status") or "").strip()
+            if s:
+                counts[s] = counts.get(s, 0) + 1
+        out[key] = counts
+    return out
 
 
 def _status_options(doctype: str) -> list:

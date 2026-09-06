@@ -30,6 +30,9 @@ import pytest
 HOLIDAY_API = "gege_hr.gege_hr.api.holiday_master"
 PAYROLL_API = "gege_hr.gege_hr.api.payroll_master"
 ADMIN_API = "gege_hr.gege_hr.api.admin"
+SETTINGS_API = "gege_hr.gege_hr.api.settings_single"
+POLICY_API = "gege_hr.gege_hr.api.attendance_policy"
+RECRUITMENT_API = "gege_hr.gege_hr.api.recruitment"
 
 
 class _PermissionDenied(Exception):
@@ -183,6 +186,9 @@ def denied(monkeypatch):
         "holiday": importlib.import_module(HOLIDAY_API),
         "payroll": importlib.import_module(PAYROLL_API),
         "admin": importlib.import_module(ADMIN_API),
+        "settings": importlib.import_module(SETTINGS_API),
+        "policy": importlib.import_module(POLICY_API),
+        "recruitment": importlib.import_module(RECRUITMENT_API),
     }
     # Point each module's ``frappe`` at the stub (covers admin.py, whose
     # ``_require_hr_admin`` calls ``frappe.only_for`` as a backstop).
@@ -196,9 +202,12 @@ def denied(monkeypatch):
         harness.audit_calls.append((a, k))
 
     # Gate + audit bindings exist on each module's own namespace.
+    # (recruitment.py gates via ``_require_manager`` — same contract.)
     for mod in modules.values():
         if hasattr(mod, "_require_hr_admin"):
             monkeypatch.setattr(mod, "_require_hr_admin", _deny)
+        if hasattr(mod, "_require_manager"):
+            monkeypatch.setattr(mod, "_require_manager", _deny)
         if hasattr(mod, "_audit_admin"):
             monkeypatch.setattr(mod, "_audit_admin", _record)
 
@@ -245,6 +254,23 @@ DENIED_ENDPOINTS = [
     ),
     ("payroll", "assign_leave_policy", {"employee": "E-1", "leave_policy": "P-1"}),
     ("payroll", "list_leave_policy_assignments", {}),
+    # payroll_master — G9 Leave Policy lifecycle (plan leave-policy-frontend-crud)
+    ("payroll", "get_leave_policy", {"name": "P-1"}),
+    ("payroll", "submit_leave_policy", {"name": "P-1"}),
+    ("payroll", "cancel_leave_policy", {"name": "P-1", "reason": "r"}),
+    ("payroll", "amend_leave_policy", {"name": "P-1"}),
+    ("payroll", "delete_leave_policy", {"name": "P-1"}),
+    ("payroll", "duplicate_leave_policy", {"name": "P-1", "title": "Bản sao"}),
+    ("payroll", "cancel_leave_policy_assignment", {"name": "LPA-1", "reason": "r"}),
+    ("payroll", "amend_leave_policy_assignment", {"name": "LPA-1"}),
+    (
+        "payroll",
+        "bulk_assign_leave_policy",
+        {"employees": ["E-1"], "leave_policy": "P-1", "leave_period": "LP-2026"},
+    ),
+    ("payroll", "list_leave_allocations", {}),
+    ("payroll", "update_leave_period", {"name": "LP-2026"}),
+    ("payroll", "delete_leave_period", {"name": "LP-2026"}),
     # admin (session 53) — onboarding / user / role / shift
     ("admin", "get_assignable_roles", {}),
     ("admin", "create_user", {"email": "new@gege.demo", "full_name": "New User"}),
@@ -258,6 +284,76 @@ DENIED_ENDPOINTS = [
         {"employee": "E-1", "shift_type": "S-1", "start_date": "2026-01-01"},
     ),
     ("admin", "end_shift_assignment", {"name": "SA-1", "end_date": "2026-01-02"}),
+    # admin — Shift Assignment full CRUD (plans/shift-assignment-frontend-crud.md)
+    ("admin", "get_shift_assignment", {"name": "SA-1"}),
+    ("admin", "update_shift_assignment", {"name": "SA-1", "end_date": "2026-01-15"}),
+    ("admin", "amend_shift_assignment", {"name": "SA-1", "start_date": "2026-02-01"}),
+    ("admin", "delete_shift_assignment", {"name": "SA-1"}),
+    ("admin", "bulk_end_shift_assignments", {"names": ["SA-1"], "end_date": "2026-01-02"}),
+    ("admin", "bulk_set_shift_assignment_status", {"names": ["SA-1"], "status": "Active"}),
+    # admin — /hr/schedule desk-free (plans/plan-schedule-desk-free.md §2.5–2.6)
+    (
+        "admin",
+        "check_schedule_conflicts",
+        {"employee": "E-1", "shift_type": "S-1", "from_date": "2026-01-01"},
+    ),
+    (
+        "admin",
+        "override_day_shift_assignment",
+        {"employee": "E-1", "date": "2026-01-15", "shift_type": "S-1"},
+    ),
+    # settings_single (plan hr-settings-desk-free §2.1)
+    ("settings", "get_single_settings", {"doctype": "VN HR Portal Setting"}),
+    (
+        "settings",
+        "save_single_settings",
+        {"doctype": "VN HR Portal Setting", "values": {"require_selfie": 1}},
+    ),
+    ("settings", "settings_link_options", {"doctype": "Role"}),
+    # attendance_policy (plan hr-settings-desk-free §2.2)
+    ("policy", "list_policies", {}),
+    ("policy", "get_policy", {"name": "P-1"}),
+    ("policy", "save_policy", {"values": {"policy_name": "X", "company": "C"}}),
+    ("policy", "activate_policy", {"name": "P-1"}),
+    ("policy", "deactivate_policy", {"name": "P-1"}),
+    ("policy", "clone_policy", {"name": "P-1"}),
+    ("policy", "lock_policy", {"name": "P-1"}),
+    ("policy", "delete_policy", {"name": "P-1"}),
+    # recruitment (plan-recruitment-full-frontend) — manager-only mutations
+    ("recruitment", "save_job_opening", {"payload": {"designation": "Dev", "company": "Gege"}}),
+    ("recruitment", "set_job_opening_status", {"name": "JO-1", "status": "Closed"}),
+    ("recruitment", "delete_job_opening", {"name": "JO-1"}),
+    ("recruitment", "get_job_opening", {"name": "JO-1"}),
+    ("recruitment", "get_applicant", {"name": "JA-1"}),
+    ("recruitment", "set_applicant_status", {"name": "JA-1", "status": "Replied"}),
+    ("recruitment", "update_applicant", {"name": "JA-1", "phone_number": "090"}),
+    ("recruitment", "list_interview_rounds", {}),
+    (
+        "recruitment",
+        "save_interview_round",
+        {"payload": {"round_name": "R", "designation": "Dev", "interviewers": ["u@x.y"]}},
+    ),
+    (
+        "recruitment",
+        "schedule_interview",
+        {
+            "payload": {
+                "job_applicant": "JA-1",
+                "interview_round": "R",
+                "scheduled_on": "2026-01-01",
+                "interviewers": ["u@x.y"],
+            }
+        },
+    ),
+    ("recruitment", "list_interviews", {}),
+    ("recruitment", "reschedule_interview", {"name": "IV-1", "scheduled_on": "2026-01-02"}),
+    (
+        "recruitment",
+        "save_job_offer",
+        {"payload": {"job_applicant": "JA-1", "offer_date": "2026-01-01"}},
+    ),
+    ("recruitment", "set_job_offer_status", {"name": "JOF-1", "status": "Accepted"}),
+    ("recruitment", "get_job_offer", {"name": "JOF-1"}),
 ]
 
 

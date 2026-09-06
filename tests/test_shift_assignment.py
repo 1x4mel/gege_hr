@@ -67,11 +67,17 @@ class _FakeDoc:
 
 
 class _FakeMeta:
-    def __init__(self, fields):
+    def __init__(self, fields, allow_on_submit=None):
         self._f = set(fields)
+        self._aos = allow_on_submit or {}
 
     def has_field(self, name):
         return name in self._f
+
+    def get_field(self, name):
+        if name not in self._f:
+            return None
+        return types.SimpleNamespace(allow_on_submit=self._aos.get(name, 0))
 
 
 class _FakeDB:
@@ -85,12 +91,24 @@ class _FakeDB:
     def get_all(self, doctype, **kw):
         self.calls.append({"doctype": doctype, **kw})
         base = list(self.rows.get(doctype, []))
-        # Apply simple equality filters (["field","=",val]) so overlap queries
-        # scoped by employee resolve correctly (parity G5 bulk partial test).
+        # Apply simple equality filters (["field","=",val] lists AND plain dicts —
+        # dict filters ignore non-scalar values like ["between", ...]) so overlap
+        # queries scoped by employee and the options assigned-employees set
+        # resolve correctly (parity G5 bulk partial test + options endpoint).
         filters = kw.get("filters")
+        eq: dict = {}
         if isinstance(filters, list):
-            eq = {f[0]: f[2] for f in filters if isinstance(f, (list, tuple)) and len(f) == 3 and f[1] == "="}
-            base = [r for r in base if not isinstance(r, dict) or all(r.get(k) == v for k, v in eq.items())]
+            eq = {
+                f[0]: f[2]
+                for f in filters
+                if isinstance(f, (list, tuple)) and len(f) == 3 and f[1] == "="
+            }
+        elif isinstance(filters, dict):
+            eq = {k: v for k, v in filters.items() if not isinstance(v, (list, tuple))}
+        if eq:
+            base = [
+                r for r in base if not isinstance(r, dict) or all(r.get(k) == v for k, v in eq.items())
+            ]
         pluck = kw.get("pluck")
         if pluck:
             return [r[pluck] if isinstance(r, dict) else r for r in base]
@@ -118,7 +136,7 @@ class _FakeDB:
 
 
 class _Stub:
-    def __init__(self, db, meta_fields=None, doc_map=None):
+    def __init__(self, db, meta_fields=None, doc_map=None, meta_aos=None):
         self._ = lambda s: s
         self.whitelist = lambda fn=None, **kw: fn if fn is not None else (lambda f: f)
         self.only_for = lambda roles: None  # allow (HR admin gate satisfied)
@@ -127,9 +145,11 @@ class _Stub:
         self.get_all = db.get_all
         self.get_value = db.get_value
         self._meta = meta_fields or {}
-        self.get_meta = lambda dt: _FakeMeta(self._meta.get(dt, []))
+        self._meta_aos = meta_aos or {}
+        self.get_meta = lambda dt: _FakeMeta(self._meta.get(dt, []), self._meta_aos.get(dt, {}))
         self._doc_map = doc_map or {}
         self.created = []
+        self.deleted = []  # [(doctype, name)] recorded by delete_doc
         self.session = types.SimpleNamespace(user="hr.manager@gege.test")
 
     def get_doc(self, payload, name=None):
@@ -138,6 +158,9 @@ class _Stub:
         doc = _FakeDoc(payload, name or "NEW-0001")
         self.created.append(doc)
         return doc
+
+    def delete_doc(self, doctype, name):
+        self.deleted.append((doctype, name))
 
     def throw(self, msg, exc=Exception, *a, **k):
         raise exc(msg)
@@ -148,6 +171,11 @@ def _utils():
     utils.getdate = lambda v=None: (
         datetime.date.today() if v in (None, "") else datetime.date.fromisoformat(str(v)[:10])
     )
+
+    def _add_days(v, days):
+        return utils.getdate(v) + datetime.timedelta(days=days)
+
+    utils.add_days = _add_days
     return utils
 
 
@@ -338,7 +366,10 @@ def test_end_blocked_when_attendance_linked(admin):
     doc.shift_type = "Day"
     doc.company = "CO-1"
     stub._doc_map[("Shift Assignment", "SA-1")] = doc
-    db.rows["Attendance"] = [{"name": "ATT-1"}]  # linked attendance present
+    db.rows["Attendance"] = [
+        # linked attendance present (employee/shift match the assignment span)
+        {"name": "ATT-1", "employee": "E-1", "shift": "Day"}
+    ]
     db.rows["Employee Checkin"] = []
     with pytest.raises(Exception):
         mod.end_shift_assignment("SA-1", "2026-06-15")
@@ -583,3 +614,329 @@ def test_set_shift_assignment_status_toggles(admin):
     # invalid status rejected (no "Completed" etc.)
     with pytest.raises(Exception):
         mod.set_shift_assignment_status("SA-1", "Completed")
+
+
+# --------------------------------------------------------------------------- #
+# Full CRUD — plans/shift-assignment-frontend-crud.md §4.1 (get/update/amend/
+# delete + bulk). The Frappe-standard lifecycle without touching the desk.
+# --------------------------------------------------------------------------- #
+def _mk_sa(name, **kw):
+    payload = {
+        "doctype": "Shift Assignment",
+        "name": name,
+        "employee": "E-1",
+        "employee_name": "Employee One",
+        "shift_type": "Day",
+        "start_date": "2026-06-01",
+        "end_date": "2026-06-30",
+        "status": "Active",
+        "docstatus": 1,
+        "company": "CO-1",
+        "department": "Engineering",
+    }
+    payload.update(kw)
+    doc = _FakeDoc(payload, name=name)
+    doc.name = name
+    return doc
+
+
+def _register(stub, db, doc):
+    stub._doc_map[("Shift Assignment", doc.name)] = doc
+    db.exists_set.add(("Shift Assignment", doc.name))
+    db.values[("Shift Assignment", doc.name)] = {
+        k: v for k, v in doc.__dict__.items() if not k.startswith("_")
+    }
+    return doc
+
+
+# --- B1/B2: get_shift_assignment can-matrix --------------------------------- #
+def test_get_shift_assignment_active_no_links(admin):
+    mod, stub, db = admin
+    _register(stub, db, _mk_sa("SA-1"))
+    db.rows["Employee Checkin"] = []
+    db.rows["Attendance"] = []
+    row = mod.get_shift_assignment("SA-1")
+    assert row["display_status"] == "Active"
+    assert row["docstatus"] == 1
+    assert row["linked"] == {"checkin_count": 0, "attendance_count": 0}
+    assert row["can"] == {
+        "edit_end_date": True,
+        "cancel": True,
+        "amend": True,
+        "delete": False,
+    }
+
+
+def test_get_shift_assignment_blocked_by_checkin(admin):
+    mod, stub, db = admin
+    _register(stub, db, _mk_sa("SA-2"))
+    db.rows["Employee Checkin"] = [{"name": "CK-1", "employee": "E-1", "shift": "Day"}]
+    db.rows["Attendance"] = []
+    row = mod.get_shift_assignment("SA-2")
+    assert row["linked"]["checkin_count"] == 1
+    assert row["can"]["cancel"] is False
+    assert row["can"]["delete"] is False  # still submitted → not deletable
+
+
+def test_get_shift_assignment_cancelled(admin):
+    mod, stub, db = admin
+    _register(stub, db, _mk_sa("SA-3", docstatus=2, status="Inactive"))
+    db.rows["Employee Checkin"] = []
+    db.rows["Attendance"] = []
+    row = mod.get_shift_assignment("SA-3")
+    assert row["display_status"] == "Cancelled"
+    assert row["can"]["delete"] is True
+    assert row["can"]["amend"] is True
+    assert row["can"]["edit_end_date"] is False
+
+
+def test_get_shift_assignment_missing_throws(admin):
+    mod, _, _ = admin
+    with pytest.raises(Exception):
+        mod.get_shift_assignment("NOPE")
+
+
+# --- B3–B6: update_shift_assignment (allow_on_submit fields only) ----------- #
+def test_update_shift_assignment_end_date(admin):
+    mod, stub, db = admin
+    doc = _register(stub, db, _mk_sa("SA-1"))
+    res = mod.update_shift_assignment("SA-1", end_date="2026-07-15")
+    assert doc.saved is True
+    assert str(doc.end_date) == "2026-07-15"
+    assert res["end_date"] == "2026-07-15"
+
+
+def test_update_shift_assignment_rejects_end_before_start(admin):
+    mod, stub, db = admin
+    _register(stub, db, _mk_sa("SA-1"))
+    with pytest.raises(Exception):
+        mod.update_shift_assignment("SA-1", end_date="2026-05-01")
+
+
+def test_update_shift_assignment_rejects_cancelled_doc(admin):
+    mod, stub, db = admin
+    _register(stub, db, _mk_sa("SA-1", docstatus=2, status="Inactive"))
+    with pytest.raises(Exception):
+        mod.update_shift_assignment("SA-1", end_date="2026-07-15")
+
+
+def test_update_shift_assignment_work_location_blocked_without_aos(admin):
+    mod, stub, db = admin
+    stub._meta["Shift Assignment"] = ["vn_work_location"]  # migrated, NOT allow_on_submit
+    _register(stub, db, _mk_sa("SA-1"))
+    db.exists_set.add(("VN Work Location", "HQ"))
+    with pytest.raises(Exception):
+        mod.update_shift_assignment("SA-1", work_location="HQ")
+
+
+def test_update_shift_assignment_work_location_when_editable(admin):
+    mod, stub, db = admin
+    stub._meta["Shift Assignment"] = ["vn_work_location"]
+    stub._meta_aos["Shift Assignment"] = {"vn_work_location": 1}
+    doc = _register(stub, db, _mk_sa("SA-1"))
+    db.exists_set.add(("VN Work Location", "HQ"))
+    res = mod.update_shift_assignment("SA-1", work_location="HQ")
+    assert doc.saved is True
+    assert doc.vn_work_location == "HQ"
+    assert res["work_location"] == "HQ"
+
+
+def test_update_shift_assignment_no_change_throws(admin):
+    mod, stub, db = admin
+    _register(stub, db, _mk_sa("SA-1"))
+    with pytest.raises(Exception):
+        mod.update_shift_assignment("SA-1")
+
+
+# --- B7–B10: amend_shift_assignment (cancel + amended_from) ----------------- #
+def _no_conflicts(db):
+    db.settings[("HR Settings", "allow_multiple_shift_assignments")] = 0
+    db.values[("Shift Type", "Day")] = {"start_time": _dt(9), "end_time": _dt(17)}
+    db.rows["Shift Assignment"] = []
+    db.rows["Employee Checkin"] = []
+    db.rows["Attendance"] = []
+
+
+def test_amend_cuts_old_span_cancels_then_creates_new(admin):
+    mod, stub, db = admin
+    old = _register(stub, db, _mk_sa("SA-1", end_date="2026-06-30"))
+    db.exists_set.add(("Shift Type", "Day"))
+    _no_conflicts(db)
+    res = mod.amend_shift_assignment("SA-1", start_date="2026-07-01", end_date="2026-07-31")
+    # old doc: span cut to new_start - 1, then cancelled
+    assert old.saved is True
+    assert str(old.end_date) == "2026-06-30"
+    assert old.cancelled is True
+    # new doc: submitted with amended_from back-link
+    new = [d for d in stub.created if getattr(d, "amended_from", None) == "SA-1"]
+    assert len(new) == 1
+    assert str(new[0].start_date) == "2026-07-01"
+    assert str(new[0].end_date) == "2026-07-31"
+    assert new[0].submitted is True
+    assert new[0].employee == "E-1"
+    assert res["amended_from"] == "SA-1"
+    assert res["name"] == new[0].name
+
+
+def test_amend_from_cancelled_doc_skips_cancel_step(admin):
+    mod, stub, db = admin
+    old = _register(stub, db, _mk_sa("SA-1", docstatus=2, status="Inactive"))
+    db.exists_set.add(("Shift Type", "Day"))
+    _no_conflicts(db)
+    mod.amend_shift_assignment("SA-1", start_date="2026-08-01")
+    # docstatus 2 → no re-cancel / re-cut path was needed
+    assert old.end_date == "2026-06-30"  # untouched
+    new = [d for d in stub.created if getattr(d, "amended_from", None) == "SA-1"]
+    assert len(new) == 1
+    # Inherited end (06-30) < new start (08-01) → falls back to open-ended.
+    assert new[0].end_date is None
+
+
+def test_amend_draft_rejected(admin):
+    mod, stub, db = admin
+    _register(stub, db, _mk_sa("SA-1", docstatus=0))
+    db.exists_set.add(("Shift Type", "Day"))
+    _no_conflicts(db)
+    with pytest.raises(Exception):
+        mod.amend_shift_assignment("SA-1", start_date="2026-07-01")
+
+
+def test_amend_blocked_by_linked_checkin(admin):
+    mod, stub, db = admin
+    _register(stub, db, _mk_sa("SA-1"))
+    db.exists_set.add(("Shift Type", "Day"))
+    _no_conflicts(db)
+    db.rows["Employee Checkin"] = [{"name": "CK-1", "employee": "E-1", "shift": "Day"}]
+    with pytest.raises(Exception):
+        mod.amend_shift_assignment("SA-1", start_date="2026-07-01")
+    assert not [d for d in stub.created if getattr(d, "amended_from", None) == "SA-1"]
+
+
+# --- B11/B12: delete_shift_assignment (docstatus 0/2 only) ------------------ #
+def test_delete_rejects_submitted(admin):
+    mod, stub, db = admin
+    _register(stub, db, _mk_sa("SA-1", docstatus=1))
+    with pytest.raises(Exception):
+        mod.delete_shift_assignment("SA-1")
+    assert stub.deleted == []
+
+
+def test_delete_cancelled_succeeds(admin):
+    mod, stub, db = admin
+    _register(stub, db, _mk_sa("SA-1", docstatus=2, status="Inactive"))
+    res = mod.delete_shift_assignment("SA-1")
+    assert ("Shift Assignment", "SA-1") in stub.deleted
+    assert res == {"name": "SA-1"}
+
+
+# --- B13/B14: bulk partial-safe wrappers ------------------------------------ #
+def test_bulk_end_partial_safe(admin, monkeypatch):
+    mod, stub, db = admin
+    _register(stub, db, _mk_sa("SA-OK"))
+    _register(stub, db, _mk_sa("SA-BLOCK"))
+    _no_conflicts(db)
+    real_end = mod.end_shift_assignment
+
+    def _flaky(n, end_date):
+        if n == "SA-BLOCK":
+            raise Exception("Không thể kết thúc ca: đã có lượt chấm công CK-1 liên kết.")
+        return real_end(n, end_date)
+
+    monkeypatch.setattr(mod, "end_shift_assignment", _flaky)
+    res = mod.bulk_end_shift_assignments(["SA-OK", "SA-BLOCK"], "2026-06-15")
+    assert res["ended"] == ["SA-OK"]
+    assert res["failed"][0]["name"] == "SA-BLOCK"
+    assert "CK-1" in res["failed"][0]["reason"]
+
+
+def test_bulk_end_requires_selection_and_date(admin):
+    mod, _, _ = admin
+    with pytest.raises(Exception):
+        mod.bulk_end_shift_assignments([], "2026-06-15")
+    with pytest.raises(Exception):
+        mod.bulk_end_shift_assignments(["SA-1"], "")
+
+
+def test_bulk_set_status_runs_and_validates(admin):
+    mod, stub, db = admin
+    doc = _register(stub, db, _mk_sa("SA-1"))
+    res = mod.bulk_set_shift_assignment_status(["SA-1"], "Inactive")
+    assert res["updated"] == ["SA-1"]
+    assert doc.status == "Inactive"
+    with pytest.raises(Exception):
+        mod.bulk_set_shift_assignment_status(["SA-1"], "Completed")
+
+
+def test_options_include_assigned_employees(admin):
+    mod, stub, db = admin
+    db.rows["Shift Assignment"] = [
+        {"name": "SA-1", "employee": "E-1", "docstatus": 1, "status": "Active"},
+        {"name": "SA-2", "employee": "E-1", "docstatus": 1, "status": "Active"},  # dup → dedup
+        {"name": "SA-3", "employee": "E-2", "docstatus": 2, "status": "Inactive"},  # cancelled
+        {"name": "SA-4", "employee": "E-3", "docstatus": 1, "status": "Inactive"},  # expired
+    ]
+    opts = mod.get_shift_assignment_options()
+    assert opts["assigned_employees"] == ["E-1"]
+
+
+# --- work_location fallback: Employee.default_work_location mirrors the
+# --- check-in engine (_shift_location_for_day) ------------------------------- #
+def test_list_work_location_falls_back_to_employee_default(admin):
+    mod, stub, db = admin
+    stub._meta["Shift Assignment"] = ["vn_work_location"]
+    stub._meta["Employee"] = ["default_work_location"]
+    db.rows["Shift Assignment"] = [
+        {"name": "SA-1", "employee": "E-1", "docstatus": 1, "status": "Active"},
+        {
+            "name": "SA-2",
+            "employee": "E-2",
+            "docstatus": 1,
+            "status": "Active",
+            "vn_work_location": "Site B",
+        },
+    ]
+    db.rows["Employee"] = [
+        {"name": "E-1", "default_work_location": "Site A"},
+        {"name": "E-2", "default_work_location": "Ignored"},
+    ]
+    rows = mod.list_shift_assignments()
+    by = {r["name"]: r for r in rows}
+    # SA-1 has no per-shift geofence → inherit the employee default
+    assert by["SA-1"]["work_location"] == "Site A"
+    assert by["SA-1"]["work_location_source"] == "employee"
+    # SA-2 has one → per-shift override wins over the employee default
+    assert by["SA-2"]["work_location"] == "Site B"
+    assert by["SA-2"]["work_location_source"] == "shift"
+
+
+def test_list_work_location_without_employee_field(admin):
+    mod, stub, db = admin
+    stub._meta["Shift Assignment"] = ["vn_work_location"]
+    stub._meta["Employee"] = []  # default_work_location NOT migrated
+    db.rows["Shift Assignment"] = [
+        {"name": "SA-1", "employee": "E-1", "docstatus": 1, "status": "Active"}
+    ]
+    rows = mod.list_shift_assignments()
+    assert rows[0]["work_location"] == ""
+    assert rows[0]["work_location_source"] == ""
+
+
+# --- B15: every new endpoint stays behind the HR admin gate ----------------- #
+def test_new_endpoints_permission_gated(admin):
+    mod, stub, _ = admin
+
+    def _deny(roles=None):
+        raise PermissionError("denied")
+
+    stub.only_for = _deny
+    calls = [
+        lambda: mod.get_shift_assignment("SA-1"),
+        lambda: mod.update_shift_assignment("SA-1", end_date="2026-07-01"),
+        lambda: mod.amend_shift_assignment("SA-1", start_date="2026-07-01"),
+        lambda: mod.delete_shift_assignment("SA-1"),
+        lambda: mod.bulk_end_shift_assignments(["SA-1"], "2026-06-15"),
+        lambda: mod.bulk_set_shift_assignment_status(["SA-1"], "Active"),
+    ]
+    for c in calls:
+        with pytest.raises(PermissionError):
+            c()

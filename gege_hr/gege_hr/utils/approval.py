@@ -76,6 +76,61 @@ TRANSACTION_CONFIG: dict[str, dict[str, Any]] = {
         "approve_state": APPROVED,
         "reject_state": REJECTED,
     },
+    # plans/plan-expense-desk-free.md §2.11 — hrms Expense Claim: a Draft
+    # (docstatus 0, approval_status Draft) claim is "awaiting an approver";
+    # the approve/reject path delegates to gege_hr.api.expense (single-step —
+    # matrix-driven steps for this type are P2).
+    "Expense Claim": {
+        "doctype": "Expense Claim",
+        "status_field": "approval_status",
+        "date_field": "posting_date",
+        "pending_states": ["Draft"],
+        "approve_state": APPROVED,
+        "reject_state": REJECTED,
+    },
+    # plans/leave-extra-deskfree-complete §2.7 P1c — hrms Leave Encashment /
+    # Compensatory Leave Request: a portal Draft (vn_status Draft, docstatus 0)
+    # awaits HR; approve/reject delegates to gege_hr.api.leave_extra (the same
+    # Administrator-set_user path the self-service page uses). Single-step —
+    # matrix-driven steps are P2 (parity Expense Claim).
+    "Leave Encashment": {
+        "doctype": "Leave Encashment",
+        "status_field": "vn_status",
+        "date_field": "creation",
+        "pending_states": ["Draft"],
+        "approve_state": APPROVED,
+        "reject_state": REJECTED,
+    },
+    "Compensatory Leave Request": {
+        "doctype": "Compensatory Leave Request",
+        "status_field": "vn_status",
+        "date_field": "creation",
+        "pending_states": ["Draft"],
+        "approve_state": APPROVED,
+        "reject_state": REJECTED,
+    },
+    # plans/services-deskfree-complete P1c — hrms Employee Grievance / Travel
+    # Request: grievance Open/Investigated awaits HR resolve; travel portal
+    # Draft (vn_status, docstatus 0) awaits HR approve (= doc.submit — F3) /
+    # reject. Approve/reject delegates to gege_hr.api.employee_services (the
+    # same Administrator-set_user path the self-service page uses). Single-step
+    # — matrix-driven steps are P2 (parity Expense Claim / leave-extra).
+    "Employee Grievance": {
+        "doctype": "Employee Grievance",
+        "status_field": "status",
+        "date_field": "date",
+        "pending_states": ["Open", "Investigated"],
+        "approve_state": "Resolved",
+        "reject_state": "Invalid",
+    },
+    "Travel Request": {
+        "doctype": "Travel Request",
+        "status_field": "vn_status",
+        "date_field": "vn_from_date",
+        "pending_states": ["Draft"],
+        "approve_state": APPROVED,
+        "reject_state": REJECTED,
+    },
 }
 
 # Human labels per type for the inbox grouping (FE falls back to its own map,
@@ -86,6 +141,12 @@ TYPE_LABELS = {
     "Correction Request": "Điều chỉnh công",
     "Salary Advance Request": "Tạm ứng lương",
     "Leave Cancellation Request": "Hủy đơn nghỉ",
+    "Expense Claim": "Chi phí",
+    "Leave Encashment": "Đổi phép",
+    "Compensatory Leave Request": "Nghỉ bù",
+    # services-deskfree P1c
+    "Employee Grievance": "Khiếu nại",
+    "Travel Request": "Công tác",
 }
 
 # ``approver_type`` → the Frappe role that implies it (for HR-style steps).
@@ -224,3 +285,28 @@ def approver_matches(
     if atype == "Specific Role":
         return bool(step.get("approver_role")) and step.get("approver_role") in (roles or set())
     return False
+
+
+def step_holder_users(
+    step: dict,
+    *,
+    line_manager_user: str | None,
+    dept_head_user: str | None,
+) -> list[str]:
+    """Concrete users who hold this approval step (desk-free Phase B2).
+
+    Delegation (``VN Approval Delegation``) can only extend a step whose holder
+    resolves to a SPECIFIC user — role-based holders (HR User / HR Manager /
+    Specific Role) are already broad sets, so they return ``[]`` and stay
+    outside the delegation contract (plans/approvals-deskfree-complete §3.5).
+    Pure — mirrors ``approver_matches`` resolution.
+    """
+    atype = step.get("approver_type")
+    if atype == "Line Manager":
+        return [line_manager_user] if line_manager_user else []
+    if atype == "Department Head":
+        return [dept_head_user] if dept_head_user else []
+    if atype == "Specific User":
+        u = step.get("approver_user")
+        return [u] if u else []
+    return []

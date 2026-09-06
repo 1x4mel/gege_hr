@@ -30,6 +30,20 @@ scheduler_events = {
 }
 
 # --------------------------------------------------------------------------- #
+# Doc events — realtime desk-free parity (plans/plan-blackout-desk-free.md §B8).
+# Broadcast a lightweight event on every blackout-rule mutation so the SPA list
+# can show the "N quy tắc thay đổi" refresh pill (pattern: audit_event_created,
+# plan audit-center §B4). The handler is NOT whitelisted — internal only.
+# --------------------------------------------------------------------------- #
+doc_events = {
+    "VN Leave Blackout Period": {
+        "after_insert": "gege_hr.gege_hr.api.leave_blackout.on_doc_event",
+        "on_update": "gege_hr.gege_hr.api.leave_blackout.on_doc_event",
+        "on_trash": "gege_hr.gege_hr.api.leave_blackout.on_doc_event",
+    }
+}
+
+# --------------------------------------------------------------------------- #
 # Doctype permission hooks (inbox-centric migration): the gege_hr approval
 # matrix authorises HR Manager / HR User to act on ANY pending request of these
 # doctypes (regardless of which employee filed it). Frappe's default per-employee
@@ -222,6 +236,17 @@ def _seed_checkout_miss_defaults():
             current = frappe.db.get_single_value("VN HR Portal Setting", field)
             if current in (None, "", 0, "0"):
                 frappe.db.set_single_value("VN HR Portal Setting", field, value)
+        # Desk-free COMPLETE (B1/B6/C4) — for these a configured 0 is MEANINGFUL
+        # (email off, caps unlimited, auto-assign off), so seed only when the
+        # column is truly unset (None/"") — never "0"-means-default like above.
+        soft_defaults = {
+            "vn_cm_max_evidence_files": "5",
+            "vn_cm_max_evidence_mb": "10",
+        }
+        for field, value in soft_defaults.items():
+            current = frappe.db.get_single_value("VN HR Portal Setting", field)
+            if current in (None, ""):
+                frappe.db.set_single_value("VN HR Portal Setting", field, value)
     except Exception:
         pass
 
@@ -272,6 +297,11 @@ scheduler_events = {
         # WP6: 07:30 every day — auto-close LAST month's payroll (attempts on
         # days 1-5, alerts daily afterwards while blocked; stops at Draft).
         "30 7 * * *": ["gege_hr.gege_hr.api.payroll.auto_close_payroll"],
+        # Desk-free B3 (plans/approvals-deskfree-complete §3.6) — 08:00 daily:
+        # one digest mail per approver with pending requests (toggle on the
+        # VN HR Portal Setting); 09:00 daily: SLA reminders + HR escalation.
+        "0 8 * * *": ["gege_hr.gege_hr.api.approval_followup.send_pending_digests"],
+        "0 9 * * *": ["gege_hr.gege_hr.api.approval_followup.escalate_stale_requests"],
     },
 }
 
@@ -313,12 +343,21 @@ doc_events = {
     "VN Attendance Work Session": {
         "on_update": "gege_hr.gege_hr.api.attendance_sync.on_work_session_update",
     },
+    # Desk-free COMPLETE (B1/C3) — email the employee when the engine (or HR)
+    # opens a ticket. doc_events rides the toggle-respecting _email_notify
+    # path (a standard Notification condition cannot read vn_cm_email_enabled
+    # — its safe_eval sandbox has no frappe.db).
+    "VN Checkout Miss": {
+        "after_insert": "gege_hr.gege_hr.api.checkout_miss.on_ticket_created",
+    },
     # WP3 (F-LC17 prod-side): block hard-deleting an Employee that still has
     # attendance data (dangling Shift Assignments once broke the whole
     # company's materialisation) + handle Active → Left cleanly.
     "Employee": {
         "on_trash": "gege_hr.gege_hr.api.employee_lifecycle.guard_employee_delete",
         "on_update": "gege_hr.gege_hr.api.employee_lifecycle.handle_employee_status_change",
+        # plan-employee-frontend-parity §2.5 — chặn chuỗi reports_to vòng lặp.
+        "validate": "gege_hr.gege_hr.api.employee_lifecycle.guard_reports_to_cycle",
     },
 }
 
@@ -361,12 +400,21 @@ after_migrate = [
     "gege_hr.hooks.seed_advance_deduction_component",
     "gege_hr.hooks.normalize_advance_repayment_plans",
     "gege_hr.gege_hr.api.setup_permissions.grant_hr_permissions",
+    # Desk-free COMPLETE (S4) — email templates / notifications / print format
+    # / auto email report / assignment rule / permissive checkout-miss
+    # workflow. Idempotent (creates missing records only) + bench-guarded.
+    "gege_hr.gege_hr.setup_checkout_miss_deskfree.seed",
+    # Payslips desk-free (plan payslips-deskfree-complete WP1) — "Phiếu lương
+    # VN" Print Format for Salary Slip (PDF download + email attachment).
+    "gege_hr.gege_hr.setup_payslips_deskfree.seed",
 ]
 
 after_install = [
     "gege_hr.hooks.sync_custom_fields",
     "gege_hr.hooks.create_seed_data",
     "gege_hr.gege_hr.api.setup_permissions.grant_hr_permissions",
+    "gege_hr.gege_hr.setup_checkout_miss_deskfree.seed",
+    "gege_hr.gege_hr.setup_payslips_deskfree.seed",
 ]
 
 # Expose whitelisted methods to the JS client (rpc / frappe.call).

@@ -71,10 +71,15 @@ def build_cache_key(
     year: Any,
     month: Any,
 ) -> str | None:
-    """Compose ``{company}-{branch|ALL}-{dept|ALL}-{YYYY}-{MM}``.
+    """Compose ``{company}-{branch|ALL}-{dept|ALL}-{YYYY}-{MM}-v2``.
 
     Returns ``None`` when company/year/month are missing/invalid — the api
     layer treats that as "cannot cache" and computes live.
+
+    The ``-v2`` suffix marks the desk-free payload shape (``{leaves, holidays}``
+    multi-status — plan leave-calendar-desk-free D1): rows written by the old
+    flat-array code live under the unsuffixed key, so a deploy/rollback pair
+    never reads the wrong shape (old rows also expire within the TTL).
     """
     if not (company or "").strip():
         return None
@@ -82,7 +87,7 @@ def build_cache_key(
     m = normalize_month(month)
     if y is None or m is None:
         return None
-    return f"{str(company).strip()}-{_scope_token(branch)}-{_scope_token(department)}-{y}-{m}"
+    return f"{str(company).strip()}-{_scope_token(branch)}-{_scope_token(department)}-{y}-{m}-v2"
 
 
 def month_window(year: Any, month: Any) -> tuple[str, str] | None:
@@ -95,6 +100,44 @@ def month_window(year: Any, month: Any) -> tuple[str, str] | None:
         return None
     last = _cal.monthrange(y, int(m))[1]
     return f"{y}-{m}-01", f"{y}-{m}-{last:02d}"
+
+
+def _coerce_date(value: Any):
+    """Best-effort ``datetime.date`` from a date/datetime/ISO string (or None)."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return date.fromisoformat(value.strip()[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def months_between(from_date: Any, to_date: Any) -> list[tuple[str, str]]:
+    """Every ``(year, month)`` touched by the inclusive window.
+
+    Powers cache invalidation for a leave application spanning multiple
+    months (e.g. 15/08 → 05/10 → ``[("2026","08"),("2026","09"),("2026","10")]``).
+    Reversed / unparseable windows normalise to ``[]`` / swapped bounds.
+    """
+    start = _coerce_date(from_date)
+    end = _coerce_date(to_date)
+    if start is None or end is None:
+        return []
+    if end < start:
+        start, end = end, start
+    out: list[tuple[str, str]] = []
+    y, m = start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        out.append((str(y), f"{m:02d}"))
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+    return out
 
 
 def is_expired(expires_at: Any, now: Any = None) -> bool:

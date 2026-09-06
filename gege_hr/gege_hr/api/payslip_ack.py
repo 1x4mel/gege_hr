@@ -174,6 +174,33 @@ def _notify_hr_managers(
 # --------------------------------------------------------------------------- #
 # M1 — bank accounts (profile)
 # --------------------------------------------------------------------------- #
+def _publish_payslip_updated(slip) -> None:
+    """Payslips desk-free (plan payslips-deskfree-complete §2.7) — best-effort
+    realtime ping so open payslip tabs (list + detail) refresh when the ack
+    status changes. Room contract mirrors useHrRealtime's ``payroll:{company}``
+    channel; the employee's own user room gets a direct ping too."""
+    try:
+        frappe.publish_realtime(
+            "payslip_updated",
+            {
+                "name": getattr(slip, "name", None),
+                "employee": getattr(slip, "employee", None),
+                "vn_ack_status": getattr(slip, "vn_ack_status", None) or "",
+            },
+            room=f"payroll:{getattr(slip, 'company', None) or ''}",
+        )
+        user_id = frappe.db.get_value("Employee", getattr(slip, "employee", None), "user_id")
+        if user_id:
+            frappe.publish_realtime(
+                "payslip_updated",
+                {"name": getattr(slip, "name", None)},
+                user=user_id,
+            )
+    except Exception:
+        pass
+
+
+# --------------------------------------------------------------------------- #
 @frappe.whitelist()
 def my_bank_accounts() -> list[dict]:
     """The caller's own VND payout accounts (default first)."""
@@ -312,6 +339,7 @@ def request_payslip_adjustment(name: str | None = None, reason: str | None = Non
         SLIP_DOCTYPE,
         slip.name,
     )
+    _publish_payslip_updated(slip)
     return {
         "name": slip.name,
         "status": ACK_REQUESTED,
@@ -392,6 +420,7 @@ def confirm_payslip(name: str | None = None, bank_account: str | None = None, **
         new_value=ACK_AWAITING,
     )
     maybe_lock_period_after_confirm(getattr(slip, "vn_payroll_review_period", None))
+    _publish_payslip_updated(slip)
 
     return {
         "name": slip.name,
@@ -582,6 +611,7 @@ def reject_payslip_adjustment(name: str | None = None, reason: str | None = None
         )
     except Exception:
         pass
+    _publish_payslip_updated(slip)
     return {
         "name": slip.name,
         "status": "",
@@ -844,6 +874,7 @@ def mark_payslip_paid(name: str | None = None, proof_file: str | None = None) ->
         )
     except Exception:
         pass
+    _publish_payslip_updated(slip)
     return {
         "name": slip.name,
         "status": ACK_PAID,

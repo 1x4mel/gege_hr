@@ -160,7 +160,7 @@ def settings_api(monkeypatch):
     return api, base.db, setting
 
 
-# ---- B1: GET returns all 6 checkout_miss keys ----
+# ---- B1: GET returns all 10 checkout_miss keys (6 engine + 4 desk-free) ----
 def test_get_checkout_miss_returns_all_keys(settings_api):
     api, db, _ = settings_api
     db.singles.update(
@@ -181,6 +181,11 @@ def test_get_checkout_miss_returns_all_keys(settings_api):
         "grace_hours": 24,
         "window_days": 90,
         "buffer_minutes": 360,
+        # Desk-free COMPLETE (B1/B6/C4) — unset columns fall back to defaults.
+        "email_enabled": False,
+        "auto_assign_enabled": False,
+        "max_evidence_files": 5,
+        "max_evidence_mb": 10.0,
     }
 
 
