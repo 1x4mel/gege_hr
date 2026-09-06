@@ -38,9 +38,7 @@ def execute() -> None:
         )
     except Exception:
         # Field projection failed (partial deploy) — retry minimal projection.
-        employees = frappe.get_all(
-            "Employee", filters={"status": "Active"}, fields=["name", "department"]
-        )
+        employees = frappe.get_all("Employee", filters={"status": "Active"}, fields=["name", "department"])
         for e in employees:
             e["vn_payroll_mode"] = None
             e["vn_hourly_rate"] = None

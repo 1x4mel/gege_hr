@@ -379,10 +379,19 @@ def test_b6b_duplicate_policy(fake):
 
 def test_b31_get_leave_policy_can_matrix(fake):
     fake.policy(name="P1", docstatus=1, title="Gốc")
-    fake.set_rows("Leave Type", [
-        {"name": "Annual", "max_leaves_allowed": 20, "is_carry_forward": 1, "is_earned_leave": 0,
-         "is_lwp": 0, "is_compensatory": 0},
-    ])
+    fake.set_rows(
+        "Leave Type",
+        [
+            {
+                "name": "Annual",
+                "max_leaves_allowed": 20,
+                "is_carry_forward": 1,
+                "is_earned_leave": 0,
+                "is_lwp": 0,
+                "is_compensatory": 0,
+            },
+        ],
+    )
     fake.set_rows("Leave Policy Assignment", [{"name": "A1"}, {"name": "A2"}])
     res = fake.api.get_leave_policy("P1")
     assert res["assignment_count"] == 2
@@ -398,36 +407,39 @@ def test_b31_get_leave_policy_can_matrix(fake):
 def test_b17_assign_requires_submitted_policy(fake):
     fake.db.values_map[("Leave Policy", "P1", "docstatus")] = 0
     with pytest.raises(_FrappeError) as err:
-        fake.api.assign_leave_policy(
-            employee="EMP-1", leave_policy="P1", leave_period="LP-2026"
-        )
+        fake.api.assign_leave_policy(employee="EMP-1", leave_policy="P1", leave_period="LP-2026")
     assert "đã duyệt" in str(err.value)
 
 
 def test_b18_assign_carries_carry_forward(fake):
-    fake.api.assign_leave_policy(
-        employee="EMP-1", leave_policy="P1", leave_period="LP-2026", carry_forward=1
-    )
+    fake.api.assign_leave_policy(employee="EMP-1", leave_policy="P1", leave_period="LP-2026", carry_forward=1)
     doc = fake.docs_created[-1]
     assert doc.carry_forward is True
     assert doc.submitted is True
 
 
 def test_b19_assign_returns_allocations(fake):
-    fake.set_rows("Leave Allocation", [
-        {"name": "LA-1", "leave_type": "Annual", "new_leaves_allocated": 12},
-        {"name": "LA-2", "leave_type": "Sick", "new_leaves_allocated": 5},
-    ])
-    res = fake.api.assign_leave_policy(
-        employee="EMP-1", leave_policy="P1", leave_period="LP-2026"
+    fake.set_rows(
+        "Leave Allocation",
+        [
+            {"name": "LA-1", "leave_type": "Annual", "new_leaves_allocated": 12},
+            {"name": "LA-2", "leave_type": "Sick", "new_leaves_allocated": 5},
+        ],
     )
+    res = fake.api.assign_leave_policy(employee="EMP-1", leave_policy="P1", leave_period="LP-2026")
     assert len(res["allocations"]) == 2
 
 
 def test_b20_cancel_assignment_guards(fake):
     lpa = _FakeDoc(
-        {"doctype": "Leave Policy Assignment", "employee": "EMP-1", "leave_policy": "P1",
-         "docstatus": 1, "leave_period": "LP-2026", "assignment_based_on": "Leave Period"},
+        {
+            "doctype": "Leave Policy Assignment",
+            "employee": "EMP-1",
+            "leave_policy": "P1",
+            "docstatus": 1,
+            "leave_period": "LP-2026",
+            "assignment_based_on": "Leave Period",
+        },
         name="LPA-1",
     )
     fake._existing[("Leave Policy Assignment", "LPA-1")] = lpa
@@ -440,8 +452,14 @@ def test_b20_cancel_assignment_guards(fake):
 
 def test_b21_cancel_assignment_cascades_allocations(fake):
     lpa = _FakeDoc(
-        {"doctype": "Leave Policy Assignment", "employee": "EMP-1", "leave_policy": "P1",
-         "docstatus": 1, "leave_period": "LP-2026", "assignment_based_on": "Leave Period"},
+        {
+            "doctype": "Leave Policy Assignment",
+            "employee": "EMP-1",
+            "leave_policy": "P1",
+            "docstatus": 1,
+            "leave_period": "LP-2026",
+            "assignment_based_on": "Leave Period",
+        },
         name="LPA-1",
     )
     fake._existing[("Leave Policy Assignment", "LPA-1")] = lpa
@@ -459,10 +477,18 @@ def test_b21_cancel_assignment_cascades_allocations(fake):
 
 def test_b22_amend_assignment(fake):
     old = _FakeDoc(
-        {"doctype": "Leave Policy Assignment", "employee": "EMP-1", "leave_policy": "P1",
-         "docstatus": 1, "leave_period": "LP-2026", "assignment_based_on": "Leave Period",
-         "company": "GEGE", "carry_forward": 0, "effective_from": "2026-01-01",
-         "effective_to": "2026-12-31"},
+        {
+            "doctype": "Leave Policy Assignment",
+            "employee": "EMP-1",
+            "leave_policy": "P1",
+            "docstatus": 1,
+            "leave_period": "LP-2026",
+            "assignment_based_on": "Leave Period",
+            "company": "GEGE",
+            "carry_forward": 0,
+            "effective_from": "2026-01-01",
+            "effective_to": "2026-12-31",
+        },
         name="LPA-1",
     )
     fake._existing[("Leave Policy Assignment", "LPA-1")] = old
@@ -495,9 +521,7 @@ def test_b24_bulk_empty_throws(fake):
 
 
 def test_friendly_error_maps_overlap(fake):
-    msg = fake.api._friendly_leave_error(
-        "Leave Policy: P1 already assigned for Employee EMP-2 for period"
-    )
+    msg = fake.api._friendly_leave_error("Leave Policy: P1 already assigned for Employee EMP-2 for period")
     assert "chồng kỳ" in msg
     assert "Value missing for Title" not in msg or "Thiếu" in fake.api._friendly_leave_error(
         "Error: Value missing for Title"

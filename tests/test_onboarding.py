@@ -255,7 +255,9 @@ def test_permission_denied_for_employee(mod):
 import datetime as _dt  # noqa: E402
 
 
-def _seed_doc(stub, name="OB-X", status="Open", tasks=None, employee="E1", boarding_date="2026-08-08", progress=0):
+def _seed_doc(
+    stub, name="OB-X", status="Open", tasks=None, employee="E1", boarding_date="2026-08-08", progress=0
+):
     doc = _Doc(
         "VN Employee Onboarding",
         {
@@ -390,7 +392,15 @@ def test_update_task_reassign_resyncs_todo(mod, monkeypatch):
     calls = _fake_assign_to(monkeypatch)
     doc = _seed_doc(
         stub,
-        tasks=[{"name": "row-a", "task_name": "A", "assignee": "old@x", "status": "Open", "due_date": "2026-08-01"}]
+        tasks=[
+            {
+                "name": "row-a",
+                "task_name": "A",
+                "assignee": "old@x",
+                "status": "Open",
+                "due_date": "2026-08-01",
+            }
+        ],
     )
     res = m.update_task(doc.name, "row-a", due_date="2026-08-20", assignee="new@x")
     assert res["name"] == doc.name
@@ -447,9 +457,27 @@ def test_onboarding_summary_counts_and_overdue(mod):
         {"name": "OB-3", "status": "Cancelled"},
     ]
     stub.rows["VN Onboarding Task"] = [
-        {"name": "t1", "parenttype": "VN Employee Onboarding", "parent": "OB-1", "status": "Open", "due_date": yday},
-        {"name": "t2", "parenttype": "VN Employee Onboarding", "parent": "OB-1", "status": "Open", "due_date": tmrw},
-        {"name": "t3", "parenttype": "VN Employee Onboarding", "parent": "OB-2", "status": "Open", "due_date": yday},
+        {
+            "name": "t1",
+            "parenttype": "VN Employee Onboarding",
+            "parent": "OB-1",
+            "status": "Open",
+            "due_date": yday,
+        },
+        {
+            "name": "t2",
+            "parenttype": "VN Employee Onboarding",
+            "parent": "OB-1",
+            "status": "Open",
+            "due_date": tmrw,
+        },
+        {
+            "name": "t3",
+            "parenttype": "VN Employee Onboarding",
+            "parent": "OB-2",
+            "status": "Open",
+            "due_date": yday,
+        },
     ]
     res = m.onboarding_summary()
     assert res["total"] == 3
@@ -461,7 +489,9 @@ def test_onboarding_summary_counts_and_overdue(mod):
 def test_get_onboarding_payload_and_can(mod):
     # B15/B16 — one-call drawer payload.
     m, stub = mod
-    doc = _seed_doc(stub, tasks=[{"name": "row-a", "task_name": "A", "status": "Open", "due_date": "2026-08-01"}])
+    doc = _seed_doc(
+        stub, tasks=[{"name": "row-a", "task_name": "A", "status": "Open", "due_date": "2026-08-01"}]
+    )
     res = m.get_onboarding(doc.name)
     assert res["can"] == {"edit_tasks": True, "cancel": True, "delete": True}
     assert res["tasks"][0]["row_name"] == "row-a"
@@ -481,7 +511,9 @@ def test_delete_onboarding_attachment_wrong_owner_throws(mod):
     # B18 — File attached to another doctype is rejected.
     m, stub = mod
     _with_delete(stub)
-    stub.store[("File", "F-1")] = _Doc("File", {"name": "F-1", "attached_to_doctype": "Employee", "attached_to_name": "E1"})
+    stub.store[("File", "F-1")] = _Doc(
+        "File", {"name": "F-1", "attached_to_doctype": "Employee", "attached_to_name": "E1"}
+    )
     with pytest.raises(Exception):
         m.delete_onboarding_attachment("F-1")
 
@@ -499,7 +531,9 @@ def test_delete_template_referenced_throws(mod):
 def test_duplicate_template_copies_tasks_inactive(mod):
     # B20
     m, stub = mod
-    _seed_template(stub, "Default", [{"task_name": "A", "due_in_days": 1}, {"task_name": "B", "due_in_days": 2}])
+    _seed_template(
+        stub, "Default", [{"task_name": "A", "due_in_days": 1}, {"task_name": "B", "due_in_days": 2}]
+    )
     res = m.duplicate_template("Default")
     assert res["task_count"] == 2
     dup = stub.store[("VN Onboarding Template", res["name"])]
@@ -557,7 +591,7 @@ def test_cancel_onboarding_closes_all_todos(mod, monkeypatch):
         tasks=[
             {"name": "row-a", "task_name": "A", "assignee": "it@x", "status": "Open"},
             {"name": "row-b", "task_name": "B", "assignee": "hr2@x", "status": "Open"},
-        ]
+        ],
     )
     m.cancel_onboarding(doc.name, "nhầm")
     assert ("remove", "it@x", doc.name) in calls and ("remove", "hr2@x", doc.name) in calls

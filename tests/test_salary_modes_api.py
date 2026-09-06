@@ -93,14 +93,30 @@ def api(monkeypatch):
     calc = importlib.import_module("gege_hr.gege_hr.utils.payroll")
 
     # Pure-module defaults for the bench loaders this flow touches.
-    monkeypatch.setattr(calc, "load_employee_period_summary", lambda *a, **k: {
-        "regular_hours": 0, "overtime_hours": 0, "payable_days": 0,
-    }, raising=False)
-    monkeypatch.setattr(calc, "load_employee_period_agg", lambda *a, **k: {
-        "payable_days": 0, "regular_hours": 0, "regular_night_hours": 0,
-        "overtime_normal_hours": 0, "overtime_night_hours": 0,
-        "overtime_holiday_hours": 0, "late_minutes": 0,
-    }, raising=False)
+    monkeypatch.setattr(
+        calc,
+        "load_employee_period_summary",
+        lambda *a, **k: {
+            "regular_hours": 0,
+            "overtime_hours": 0,
+            "payable_days": 0,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        calc,
+        "load_employee_period_agg",
+        lambda *a, **k: {
+            "payable_days": 0,
+            "regular_hours": 0,
+            "regular_night_hours": 0,
+            "overtime_normal_hours": 0,
+            "overtime_night_hours": 0,
+            "overtime_holiday_hours": 0,
+            "late_minutes": 0,
+        },
+        raising=False,
+    )
     monkeypatch.setattr(calc, "load_segment_multipliers", lambda *a, **k: {"OT": 1.5}, raising=False)
     monkeypatch.setattr(calc, "load_checkout_miss_penalty", lambda *a, **k: 0.0, raising=False)
     monkeypatch.setattr(api, "_employee_late_minutes", lambda *a, **k: [], raising=False)
@@ -143,12 +159,18 @@ def test_ps21_hourly_branch_math(api, monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_ps22_monthly_branch_math(api, monkeypatch):
     api.calc.load_employee_period_summary = lambda *a, **k: {
-        "regular_hours": 208.0, "overtime_hours": 10.0, "payable_days": 26.0,
+        "regular_hours": 208.0,
+        "overtime_hours": 10.0,
+        "payable_days": 26.0,
     }
     api.calc.load_employee_period_agg = lambda *a, **k: {
-        "payable_days": 26.0, "regular_hours": 208.0, "regular_night_hours": 0.0,
-        "overtime_normal_hours": 10.0, "overtime_night_hours": 0.0,
-        "overtime_holiday_hours": 0.0, "late_minutes": 0.0,
+        "payable_days": 26.0,
+        "regular_hours": 208.0,
+        "regular_night_hours": 0.0,
+        "overtime_normal_hours": 10.0,
+        "overtime_night_hours": 0.0,
+        "overtime_holiday_hours": 0.0,
+        "late_minutes": 0.0,
     }
     api._employee_late_minutes = lambda *a, **k: [15.0]
     api._employee_salary_components = lambda *a, **k: ([500_000.0], [100_000.0])

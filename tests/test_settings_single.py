@@ -27,9 +27,7 @@ class _Meta:
     """Tiny meta stand-in: {fieldname: (fieldtype, options)}."""
 
     def __init__(self, spec):
-        self.spec = {
-            f: _Field(fieldname=f, fieldtype=t, options=o, label=f) for f, (t, o) in spec.items()
-        }
+        self.spec = {f: _Field(fieldname=f, fieldtype=t, options=o, label=f) for f, (t, o) in spec.items()}
 
     def has_field(self, fieldname):
         return fieldname in self.spec
@@ -240,7 +238,9 @@ def test_get_denied_without_hr_admin(fake, monkeypatch):  # S3
 
 
 def test_save_updates_changed_fields_and_audits(fake):  # S4
-    out = fake.api.save_single_settings("VN HR Portal Setting", {"require_selfie": 1, "timezone": "Asia/Bangkok"})
+    out = fake.api.save_single_settings(
+        "VN HR Portal Setting", {"require_selfie": 1, "timezone": "Asia/Bangkok"}
+    )
     assert out["ok"] is True
     assert sorted(out["changed"]) == ["require_selfie", "timezone"]
     assert fake.portal.saved == 1
@@ -279,7 +279,10 @@ def test_save_rejects_missing_link(fake):  # S8
 def test_save_hr_settings_dependent_field(fake):  # S9
     out = fake.api.save_single_settings(
         "HR Settings",
-        {"restrict_backdated_leave_application": 1, "role_allowed_to_create_backdated_leave_application": "HR Manager"},
+        {
+            "restrict_backdated_leave_application": 1,
+            "role_allowed_to_create_backdated_leave_application": "HR Manager",
+        },
     )
     assert sorted(out["changed"]) == [
         "restrict_backdated_leave_application",

@@ -74,7 +74,10 @@ _FRIENDLY_MAP = [
     ),
     ("please set relieving date", "Nhân viên chưa có ngày nghỉ việc (Relieving Date)."),
     ("mandatory value missing", "Thiếu thông tin bắt buộc."),
-    ("should be in the application as pro-rata component", "Phần còn lại phải được phân bổ vào component pro-rata."),
+    (
+        "should be in the application as pro-rata component",
+        "Phần còn lại phải được phân bổ vào component pro-rata.",
+    ),
 ]
 
 
@@ -260,7 +263,11 @@ def _benefit_components(structure):
         rows = (
             frappe.get_all(
                 "Salary Detail",
-                filters=[["parent", "=", structure], ["parentfield", "=", "earnings"], ["is_flexible_benefit", "=", 1]],
+                filters=[
+                    ["parent", "=", structure],
+                    ["parentfield", "=", "earnings"],
+                    ["is_flexible_benefit", "=", 1],
+                ],
                 fields=["salary_component"],
                 limit_page_length=50,
             )
@@ -845,9 +852,7 @@ def list_gratuity_rules(search=None, page=1, page_size=20):
             or []
         )
         total = len(
-            frappe.get_all(
-                GRATUITY_RULE_DOCTYPE, or_filters=or_filters, fields=["name"], limit_page_length=0
-            )
+            frappe.get_all(GRATUITY_RULE_DOCTYPE, or_filters=or_filters, fields=["name"], limit_page_length=0)
             or []
         )
     except Exception:
@@ -1068,7 +1073,9 @@ def get_benefit_filter_options():
         components = []
     periods: list = []
     try:
-        periods = frappe.get_all("Payroll Period", fields=["name", "start_date", "end_date"], limit_page_length=100)
+        periods = frappe.get_all(
+            "Payroll Period", fields=["name", "start_date", "end_date"], limit_page_length=100
+        )
     except Exception:
         periods = []
     rules: list = []

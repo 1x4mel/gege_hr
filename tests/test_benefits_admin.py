@@ -222,7 +222,9 @@ def test_promotion_requires_manager(mod):
     m, stub = mod
     stub.roles = {"Employee"}
     with pytest.raises(Exception):
-        m.save_promotion(payload={"employee": "HR-EMP-1", "details": [{"fieldname": "designation", "new_value": "X"}]})
+        m.save_promotion(
+            payload={"employee": "HR-EMP-1", "details": [{"fieldname": "designation", "new_value": "X"}]}
+        )
 
 
 # ── B24: endpoint cũ broken đã xoá ───────────────────────────────────────────
@@ -245,7 +247,12 @@ def _seed_context(stub):
         {"employee": "HR-EMP-9", "from_date": "2026-01-01", "docstatus": 1, "salary_structure": "SS-9"},
     ]
     stub.list_rows["Salary Detail"] = [
-        {"parent": "SS-1", "parentfield": "earnings", "is_flexible_benefit": 1, "salary_component": "Meal Card"},
+        {
+            "parent": "SS-1",
+            "parentfield": "earnings",
+            "is_flexible_benefit": 1,
+            "salary_component": "Meal Card",
+        },
         {"parent": "SS-1", "parentfield": "earnings", "is_flexible_benefit": 1, "salary_component": "Fuel"},
         {"parent": "SS-1", "parentfield": "deductions", "is_flexible_benefit": 1, "salary_component": "Bad"},
         {"parent": "SS-1", "parentfield": "earnings", "is_flexible_benefit": 0, "salary_component": "Basic"},
@@ -442,10 +449,20 @@ def test_b15_get_claim_with_attachments(mod):
     _seed_context(stub)
     res = m.save_benefit_claim(payload=_claim_payload())
     stub.list_rows["File"] = [
-        {"name": "F1", "file_name": "hoa-don.jpg", "file_url": "/files/hd.jpg",
-         "attached_to_doctype": "Employee Benefit Claim", "attached_to_name": res["name"]},
-        {"name": "F2", "file_name": "khac.pdf", "file_url": "/files/k.pdf",
-         "attached_to_doctype": "Expense Claim", "attached_to_name": "OTHER"},
+        {
+            "name": "F1",
+            "file_name": "hoa-don.jpg",
+            "file_url": "/files/hd.jpg",
+            "attached_to_doctype": "Employee Benefit Claim",
+            "attached_to_name": res["name"],
+        },
+        {
+            "name": "F2",
+            "file_name": "khac.pdf",
+            "file_url": "/files/k.pdf",
+            "attached_to_doctype": "Expense Claim",
+            "attached_to_name": "OTHER",
+        },
     ]
     out = m.get_benefit_claim(res["name"])
     assert len(out["attachments"]) == 1

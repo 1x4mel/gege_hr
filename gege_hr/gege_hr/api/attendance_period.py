@@ -38,8 +38,7 @@ from frappe import _
 from frappe.utils import now_datetime
 
 from gege_hr.gege_hr.api import audit as audit_api
-from gege_hr.gege_hr.utils import attendance_period as ap, employee as emp_utils
-from gege_hr.gege_hr.utils import notify
+from gege_hr.gege_hr.utils import attendance_period as ap, employee as emp_utils, notify
 
 PERIOD_DOCTYPE = "VN Monthly Attendance Period"
 LINE_DOCTYPE = "VN Monthly Attendance Line"
@@ -175,12 +174,9 @@ def _notify_employees_locked(period) -> None:
             filters={"attendance_period": period.name, "docstatus": ["<", 2]},
             pluck="employee",
         )
-        title = _("Công tháng {0}/{1} đã chốt").format(
-            period.payroll_month, period.payroll_year
-        )
+        title = _("Công tháng {0}/{1} đã chốt").format(period.payroll_month, period.payroll_year)
         message = _(
-            "Kỳ công {0}/{1} đã được niêm phong. Dữ liệu chấm công tháng này "
-            "không còn chỉnh sửa được."
+            "Kỳ công {0}/{1} đã được niêm phong. Dữ liệu chấm công tháng này không còn chỉnh sửa được."
         ).format(period.payroll_month, period.payroll_year)
         for emp in employees:
             notify.push_notification(
@@ -210,12 +206,9 @@ def _notify_managers_unlocked(period) -> None:
             filters={"user_id": ["in", list(users)], "status": "Active"},
             pluck="name",
         )
-        title = _("Kỳ công {0}/{1} đã mở khóa").format(
-            period.payroll_month, period.payroll_year
-        )
+        title = _("Kỳ công {0}/{1} đã mở khóa").format(period.payroll_month, period.payroll_year)
         message = _(
-            "{0} đã mở khóa kỳ công {1}/{2}. Dữ liệu chấm công có thể thay đổi "
-            "— hãy chốt lại khi xử lý xong."
+            "{0} đã mở khóa kỳ công {1}/{2}. Dữ liệu chấm công có thể thay đổi — hãy chốt lại khi xử lý xong."
         ).format(frappe.session.user, period.payroll_month, period.payroll_year)
         for emp in employees:
             notify.push_notification(
@@ -634,9 +627,7 @@ def adjust_line(name: str, values: dict | str | None = None, reason: str | None 
     return {
         "name": name,
         "status": line.status,
-        "message": _("Đã điều chỉnh dòng công của {0}.").format(
-            line.employee_name or line.employee
-        ),
+        "message": _("Đã điều chỉnh dòng công của {0}.").format(line.employee_name or line.employee),
     }
 
 
@@ -653,9 +644,7 @@ def delete_period(name: str) -> dict:
     period = _get_period(name)
     if period.status != "Draft":
         frappe.throw(
-            _("Chỉ kỳ công nháp (Draft) mới có thể xoá. Kỳ {0} đang {1}.").format(
-                name, period.status
-            )
+            _("Chỉ kỳ công nháp (Draft) mới có thể xoá. Kỳ {0} đang {1}.").format(name, period.status)
         )
 
     line_names = frappe.db.get_all(

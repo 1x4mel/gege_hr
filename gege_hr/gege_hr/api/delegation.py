@@ -85,7 +85,6 @@ def save_delegation(values=None) -> dict:
     """
     values = _coerce_values(values)
     name = (values.get("name") or "").strip()
-    from_user = (values.get("from_user") or "").strip()
 
     if name:
         doc = frappe.get_doc(DOCTYPE, name)

@@ -20,11 +20,13 @@ block delete_payroll_review trên kỳ đã Cancelled).
 from __future__ import annotations
 
 import frappe
-from frappe.utils import get_first_day, get_last_day, add_months, getdate
+from frappe.utils import add_months, get_first_day, get_last_day, getdate
 
-from gege_hr.gege_hr.api import payroll as payroll_api
-from gege_hr.gege_hr.api import payroll_master as master_api
-from gege_hr.gege_hr.api import benefits_admin as benefits_api
+from gege_hr.gege_hr.api import (
+    benefits_admin as benefits_api,
+    payroll as payroll_api,
+    payroll_master as master_api,
+)
 
 P = "ZZ-PPSMOKE"
 COMPANY_CACHE: str | None = None
@@ -179,8 +181,6 @@ def run() -> dict:
 
     cleaned = _cleanup()
     report["cleanup"] = {"ok": cleaned >= 0, "detail": f"{cleaned} doc dọn sau smoke"}
-    report["ALL_OK"] = all(
-        v.get("ok") for k, v in report.items() if isinstance(v, dict) and k != "cleanup"
-    )
+    report["ALL_OK"] = all(v.get("ok") for k, v in report.items() if isinstance(v, dict) and k != "cleanup")
     print(f"[SMOKE] ALL_OK={report['ALL_OK']} — cleanup {cleaned} doc")
     return report

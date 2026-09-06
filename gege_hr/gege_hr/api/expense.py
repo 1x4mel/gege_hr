@@ -167,8 +167,7 @@ def resolve_sanctions(rows, sanctions=None) -> list:
     ``frappe.throw`` on out-of-range rows or 0 ≤ sanction ≤ amount violations.
     """
     amounts = [
-        _num(r.get("amount") if isinstance(r, dict) else getattr(r, "amount", None))
-        for r in rows or []
+        _num(r.get("amount") if isinstance(r, dict) else getattr(r, "amount", None)) for r in rows or []
     ]
     out = list(amounts)
     by_idx: dict[int, float] = {}
@@ -502,12 +501,8 @@ def _list(
             summary = {
                 "count": len(agg),
                 "total_claimed": round(sum(_num(r.get("total_claimed_amount")) for r in agg), 2),
-                "total_sanctioned": round(
-                    sum(_num(r.get("total_sanctioned_amount")) for r in agg), 2
-                ),
-                "total_reimbursed": round(
-                    sum(_num(r.get("total_amount_reimbursed")) for r in agg), 2
-                ),
+                "total_sanctioned": round(sum(_num(r.get("total_sanctioned_amount")) for r in agg), 2),
+                "total_reimbursed": round(sum(_num(r.get("total_amount_reimbursed")) for r in agg), 2),
                 "unpaid_count": sum(1 for r in agg if r.get("status") == "Unpaid"),
             }
         except Exception:
@@ -811,7 +806,7 @@ def update_expense_claim(
         try:
             doc.set("expenses", [])
         except Exception:
-            setattr(doc, "expenses", [])
+            doc.expenses = []
         for r in rows:
             doc.append("expenses", r)
         doc.total_claimed_amount = claim_total(expenses)
@@ -957,7 +952,7 @@ def approve_expense_claim(
         frappe.throw("Phiếu không có dòng chi phí.")
 
     sanctioned = resolve_sanctions(rows, sanctions)
-    for row, s in zip(rows, sanctioned):
+    for row, s in zip(rows, sanctioned, strict=False):
         try:
             row.sanction_amount = s
         except Exception:
@@ -1198,7 +1193,10 @@ def export_expense_csv(
             "Manual Override",
             company=None,
             description=f"Xuất CSV chi phí: {len(rows)} dòng",
-            new_value={"filters": {"status": status, "date_from": date_from, "date_to": date_to}, "rows": len(rows)},
+            new_value={
+                "filters": {"status": status, "date_from": date_from, "date_to": date_to},
+                "rows": len(rows),
+            },
         )
     except Exception:
         pass

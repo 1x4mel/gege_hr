@@ -216,9 +216,7 @@ class Stub:
         }
         # get_all reads stub.rows — mirror the users table there (minus _roles).
         self.rows: dict[str, list[dict]] = {
-            "User": [
-                {k: v for k, v in u.items() if k != "_roles"} for u in self.users.values()
-            ],
+            "User": [{k: v for k, v in u.items() if k != "_roles"} for u in self.users.values()],
             "Employee": [
                 {
                     "name": "E1",
@@ -450,9 +448,7 @@ def _password_mod(stub: Stub):
     mod = types.ModuleType("frappe.utils.password")
 
     def update_password(user, pwd, doctype="User", fieldname="password", logout_all_sessions=False):
-        stub.pwd_updates.append(
-            {"user": user, "pwd": pwd, "logout_all_sessions": logout_all_sessions}
-        )
+        stub.pwd_updates.append({"user": user, "pwd": pwd, "logout_all_sessions": logout_all_sessions})
 
     mod.update_password = update_password
     return mod
@@ -473,10 +469,10 @@ def _sessions_mod(stub: Stub):
 def _permissions_mod(stub: Stub):
     mod = types.ModuleType("frappe.permissions")
 
-    def add_user_permission(doctype, name, user, ignore_permissions=False, applicable_for=None, is_default=0, hide_descendants=0):
-        stub.perm_adds.append(
-            {"allow": doctype, "value": name, "user": user, "is_default": is_default}
-        )
+    def add_user_permission(
+        doctype, name, user, ignore_permissions=False, applicable_for=None, is_default=0, hide_descendants=0
+    ):
+        stub.perm_adds.append({"allow": doctype, "value": name, "user": user, "is_default": is_default})
 
     mod.add_user_permission = add_user_permission
     return mod

@@ -180,9 +180,7 @@ def _checkin_meta(name: str | None) -> dict | None:
     if not name:
         return None
     try:
-        row = frappe.db.get_value(
-            "Employee Checkin", name, ["name", "time", "log_type"], as_dict=True
-        )
+        row = frappe.db.get_value("Employee Checkin", name, ["name", "time", "log_type"], as_dict=True)
         return dict(row) if row else None
     except Exception:
         return None
@@ -193,9 +191,7 @@ def _attendance_meta(name: str | None) -> dict | None:
     if not name:
         return None
     try:
-        row = frappe.db.get_value(
-            "Attendance", name, ["name", "status", "attendance_date"], as_dict=True
-        )
+        row = frappe.db.get_value("Attendance", name, ["name", "status", "attendance_date"], as_dict=True)
         return dict(row) if row else None
     except Exception:
         return None
@@ -445,15 +441,11 @@ def all_correction_requests(
         filters["employee"] = emp_utils.emp_name(employee)
     elif department:
         try:
-            emps = frappe.db.get_all(
-                "Employee", filters={"department": department}, pluck="name"
-            )
+            emps = frappe.db.get_all("Employee", filters={"department": department}, pluck="name")
         except Exception:
             emps = []
         if not emps:
-            return pagination.paginate_filtered(
-                [], page=page, page_size=page_size, summary=empty_summary
-            )
+            return pagination.paginate_filtered([], page=page, page_size=page_size, summary=empty_summary)
         filters["employee"] = ["in", emps]
 
     rows = frappe.db.get_all(

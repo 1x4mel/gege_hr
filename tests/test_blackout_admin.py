@@ -16,7 +16,7 @@ import types
 
 import pytest
 
-from tests.test_blackout_api import make_fake, _rule
+from tests.test_blackout_api import _rule, make_fake
 
 
 @pytest.fixture

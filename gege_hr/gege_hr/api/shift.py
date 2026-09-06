@@ -312,14 +312,11 @@ def _assert_no_request_overlap(
     dup = [
         r
         for r in reqs
-        if getattr(r, "name", None) != exclude_name
-        and _date_overlaps(r.from_date, r.to_date, start_s, end_s)
+        if getattr(r, "name", None) != exclude_name and _date_overlaps(r.from_date, r.to_date, start_s, end_s)
     ]
     if dup:
         frappe.throw(
-            _("Bạn đã có yêu cầu ca trùng khoảng ngày này: {0}.").format(
-                ", ".join(str(d.name) for d in dup)
-            )
+            _("Bạn đã có yêu cầu ca trùng khoảng ngày này: {0}.").format(", ".join(str(d.name) for d in dup))
         )
 
 
@@ -355,9 +352,7 @@ def schedule_context(from_date: str | None = None, to_date: str | None = None) -
             filters=[["employee", "=", own_emp], ["docstatus", "=", 0], ["status", "=", "Draft"]],
             fields=["name", "from_date", "to_date"],
         )
-        out["my_requests"]["pending"] = len(
-            [r for r in reqs if _in_window(r, "from_date", "to_date")]
-        )
+        out["my_requests"]["pending"] = len([r for r in reqs if _in_window(r, "from_date", "to_date")])
     if manager:
         try:
             drafts = frappe.db.get_all(
@@ -365,9 +360,7 @@ def schedule_context(from_date: str | None = None, to_date: str | None = None) -
                 filters=[["docstatus", "=", 0], ["status", "=", "Draft"]],
                 fields=["name", "from_date", "to_date"],
             )
-            out["pending_team_requests"] = len(
-                [r for r in drafts if _in_window(r, "from_date", "to_date")]
-            )
+            out["pending_team_requests"] = len([r for r in drafts if _in_window(r, "from_date", "to_date")])
         except Exception:
             out["pending_team_requests"] = 0
     return out
@@ -478,9 +471,7 @@ def create_my_shift_request(
 
     approver = _resolve_shift_approver(emp)
     if not approver:
-        frappe.throw(
-            _("Chưa cấu hình người duyệt ca cho bạn — vui lòng liên hệ HR.")
-        )
+        frappe.throw(_("Chưa cấu hình người duyệt ca cho bạn — vui lòng liên hệ HR."))
     _assert_no_request_overlap(emp, shift_type, start, end)
 
     company = None

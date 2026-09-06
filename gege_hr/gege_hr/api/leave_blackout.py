@@ -598,9 +598,7 @@ def _guard_overlap(
         exclude=exclude,
     )
     if clashes:
-        names = ", ".join(
-            str(r.get("blackout_name") or r.get("name") or "") for r in clashes
-        )
+        names = ", ".join(str(r.get("blackout_name") or r.get("name") or "") for r in clashes)
         frappe.throw(
             _("Chồng lấp với kỳ cấm: {0}. Gửi lại với force=1 để ghi đè.").format(names),
             frappe.ValidationError,
@@ -740,9 +738,7 @@ def bulk_update_blackouts(names, fields=None) -> dict:
     unsupported = set(fields) - _BULK_UPDATE_ALLOWED
     if unsupported:
         frappe.throw(
-            _("Chỉ cho phép cập nhật hàng loạt: {0}.").format(
-                ", ".join(sorted(_BULK_UPDATE_ALLOWED))
-            ),
+            _("Chỉ cho phép cập nhật hàng loạt: {0}.").format(", ".join(sorted(_BULK_UPDATE_ALLOWED))),
             frappe.ValidationError,
         )
     updated: list[str] = []
@@ -877,9 +873,7 @@ def export_blackout_csv(
         }
         _stamp_export_audit(
             company=company or rows[0].get("company"),
-            description=_("Xuất CSV kỳ cấm nghỉ: {0} dòng (truncated={1})").format(
-                len(rows), truncated
-            ),
+            description=_("Xuất CSV kỳ cấm nghỉ: {0} dòng (truncated={1})").format(len(rows), truncated),
             new_value={
                 "filters": {k: v for k, v in export_filters.items() if v},
                 "rows": len(rows),

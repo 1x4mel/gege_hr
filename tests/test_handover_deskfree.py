@@ -163,9 +163,7 @@ class _DB:
         or_filters=None,
         **_kw,
     ):
-        self.list_calls.append(
-            {"doctype": doctype, "filters": filters, "or_filters": or_filters}
-        )
+        self.list_calls.append({"doctype": doctype, "filters": filters, "or_filters": or_filters})
         return [dict(r) for r in self.rows_by_doctype.get(doctype, [])]
 
     def get_list(self, *a, **kw):
@@ -254,9 +252,7 @@ def fake(monkeypatch):
         api.notify, "push_notification", lambda *a, **k: notified.append({"args": a, "kwargs": k})
     )
     audits: list[dict] = []
-    monkeypatch.setattr(
-        api.audit_api, "log", lambda *a, **k: audits.append({"args": a, "kwargs": k})
-    )
+    monkeypatch.setattr(api.audit_api, "log", lambda *a, **k: audits.append({"args": a, "kwargs": k}))
 
     emp_utils = importlib.import_module("gege_hr.gege_hr.utils.employee")
     state = {"roles": [], "employee": None}

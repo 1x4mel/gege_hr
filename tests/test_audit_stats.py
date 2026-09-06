@@ -76,10 +76,8 @@ def stats_mod(monkeypatch):
         frappe_mod.session = types.SimpleNamespace(user="hr@example.com")
 
         utils = types.ModuleType("frappe.utils")
-        utils.getdate = (
-            lambda v=None: datetime.date.today()
-            if v in (None, "")
-            else datetime.date.fromisoformat(str(v)[:10])
+        utils.getdate = lambda v=None: (
+            datetime.date.today() if v in (None, "") else datetime.date.fromisoformat(str(v)[:10])
         )
         frappe_mod.utils = utils
 

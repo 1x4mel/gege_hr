@@ -292,6 +292,10 @@ def settings_link_options(doctype: str, search: str = "", limit: int = 100) -> l
     search = (search or "").strip()
     filters = [["name", "like", f"%{search}%"]] if search else None
     rows = frappe.db.get_all(
-        doctype, filters=filters, fields=["name"], limit_page_length=min(int(limit or 100), 200), order_by="name asc"
+        doctype,
+        filters=filters,
+        fields=["name"],
+        limit_page_length=min(int(limit or 100), 200),
+        order_by="name asc",
     )
     return [{"value": r.name, "label": r.name} for r in rows]

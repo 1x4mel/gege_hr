@@ -319,9 +319,7 @@ def _rule(**overrides):
 
 def test_bc1_generic_rule_covers_branch_request():
     rules = [_rule(branch="")]  # generic scope
-    out = bk.overlapping_rules(
-        rules, from_date="2026-06-10", to_date="2026-06-15", branch="HNI"
-    )
+    out = bk.overlapping_rules(rules, from_date="2026-06-10", to_date="2026-06-15", branch="HNI")
     assert [r["blackout_name"] for r in out] == ["Tết"]
 
 
@@ -329,9 +327,7 @@ def test_bc2_leave_type_mismatch_does_not_overlap():
     rules = [_rule(applies_to_leave_type="Sick Leave")]
     kwargs = {"from_date": "2026-06-10", "to_date": "2026-06-15"}
     assert bk.overlapping_rules(rules, leave_type="Casual Leave", **kwargs) == []
-    assert [r["name"] for r in bk.overlapping_rules(rules, leave_type="Sick Leave", **kwargs)] == [
-        "BLK-1"
-    ]
+    assert [r["name"] for r in bk.overlapping_rules(rules, leave_type="Sick Leave", **kwargs)] == ["BLK-1"]
 
 
 def test_bc3_exclude_drops_the_rule_being_edited():

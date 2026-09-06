@@ -242,7 +242,12 @@ def _activity_rows(doctype, name, limit=15) -> list:
             limit_page_length=limit,
         ):
             rows.append(
-                {"type": "version", "name": v.get("name"), "actor": v.get("owner"), "creation": v.get("creation")}
+                {
+                    "type": "version",
+                    "name": v.get("name"),
+                    "actor": v.get("owner"),
+                    "creation": v.get("creation"),
+                }
             )
     except Exception:
         pass

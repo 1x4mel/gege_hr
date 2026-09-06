@@ -933,9 +933,7 @@ def leave_calendar_seed_cleanup():
     """Leave-calendar desk-free e2e (plans/plan-leave-calendar-desk-free):
     drop EVERY leftover seeded Leave Application (description like 'E2E-LC-%',
     any run). Submitted docs are cancelled first (mirror :func:`_lc_drop`)."""
-    names = frappe.get_all(
-        "Leave Application", filters={"description": ["like", "E2E-LC-%"]}, pluck="name"
-    )
+    names = frappe.get_all("Leave Application", filters={"description": ["like", "E2E-LC-%"]}, pluck="name")
     deleted = 0
     for n in names:
         try:
@@ -1043,9 +1041,7 @@ def shift_crud_smoke():
     try:
         _shift_crud_smoke_body(admin, emp, st)
     finally:
-        for sa in frappe.get_all(
-            "Shift Assignment", filters={"employee": emp}, fields=["name", "docstatus"]
-        ):
+        for sa in frappe.get_all("Shift Assignment", filters={"employee": emp}, fields=["name", "docstatus"]):
             try:
                 if sa.docstatus == 1:
                     frappe.get_doc("Shift Assignment", sa.name).cancel()
@@ -1152,8 +1148,7 @@ def schedule_deskfree_smoke():
     HARDEN_DENIED / APPROVE_LINK / OVERRIDE_SPLIT / CONFLICT_PREVIEW /
     SKIP_RESTORE / CLEANED.
     """
-    from gege_hr.gege_hr.api import admin as admin_api
-    from gege_hr.gege_hr.api import shift as shift_api
+    from gege_hr.gege_hr.api import admin as admin_api, shift as shift_api
 
     ts = datetime.now().strftime("%H%M%S")
     email = f"e2e.sched{ts}@gege.test"
@@ -1262,15 +1257,11 @@ def schedule_deskfree_smoke():
         cut_end = frappe.db.get_value("Shift Assignment", sa_name, "end_date")
         assert str(cut_end) == _day_str(7) and str(_day_str(8)) == d2, (cut_end, d2)
         assert len(ov["created"]) == 2 and ov["adjusted"] == [sa_name]
-        inst = frappe.db.get_value(
-            "VN Employee Shift Instance", {"employee": emp, "work_date": d2}, "name"
-        )
+        inst = frappe.db.get_value("VN Employee Shift Instance", {"employee": emp, "work_date": d2}, "name")
         assert inst, "override must backfill the day's instance immediately"
         print(f"ASSERT: OVERRIDE_SPLIT created={ov['created']} instance={inst}")
 
-        conflicts = admin_api.check_schedule_conflicts(
-            employee=emp, shift_type=day, from_date=d3, to_date=d3
-        )
+        conflicts = admin_api.check_schedule_conflicts(employee=emp, shift_type=day, from_date=d3, to_date=d3)
         assert any(c["type"] == "shift_assignment" for c in conflicts), conflicts
         print("ASSERT: CONFLICT_PREVIEW " + json.dumps(conflicts[:2]))
 
@@ -1295,13 +1286,9 @@ def schedule_deskfree_smoke():
                 frappe.delete_doc("Shift Assignment", sa_row.name, force=True, ignore_permissions=True)
             except Exception:
                 pass
-        for si in frappe.get_all(
-            "VN Employee Shift Instance", filters={"employee": emp}, pluck="name"
-        ):
+        for si in frappe.get_all("VN Employee Shift Instance", filters={"employee": emp}, pluck="name"):
             try:
-                frappe.delete_doc(
-                    "VN Employee Shift Instance", si, force=True, ignore_permissions=True
-                )
+                frappe.delete_doc("VN Employee Shift Instance", si, force=True, ignore_permissions=True)
             except Exception:
                 pass
         for st_name in (day, night):

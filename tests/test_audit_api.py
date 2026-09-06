@@ -306,9 +306,7 @@ def test_ax4_legacy_call_unchanged(fake):
     fake.db.rows = [_ev_row()]
     res = fake.api.audit_events()
     assert isinstance(res, list) and len(res) == 1
-    legacy_calls = [
-        c for c in fake.db.get_all_calls if c["kw"].get("limit_page_length") == 200
-    ]
+    legacy_calls = [c for c in fake.db.get_all_calls if c["kw"].get("limit_page_length") == 200]
     assert legacy_calls[0]["kw"]["order_by"] == "created_at desc, name desc"
 
 

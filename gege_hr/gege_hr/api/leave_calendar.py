@@ -101,20 +101,35 @@ def get_leave_calendar(
     if key is None:
         # Still unbuildable (e.g. no Company exists yet) — return an empty
         # payload instead of raising so the calendar screen loads cleanly.
-        return {"cache_key": "", "data": {"leaves": [], "holidays": []}, "generated_at": "", "from_cache": False}
+        return {
+            "cache_key": "",
+            "data": {"leaves": [], "holidays": []},
+            "generated_at": "",
+            "from_cache": False,
+        }
     if not force_refresh and _table_ready():
         cached = _fetch_cached(key)
         if cached is not None:
             cached["from_cache"] = True
             return _apply_read_filters(
-                cached, statuses=statuses, employee=employee, leave_type=leave_type,
-                branch=branch, department=department,
+                cached,
+                statuses=statuses,
+                employee=employee,
+                leave_type=leave_type,
+                branch=branch,
+                department=department,
             )
     # No fresh cache → build live.
-    payload = build_leave_calendar(company=company, year=year, month=month, branch=branch, department=department)
+    payload = build_leave_calendar(
+        company=company, year=year, month=month, branch=branch, department=department
+    )
     return _apply_read_filters(
-        payload, statuses=statuses, employee=employee, leave_type=leave_type,
-        branch=branch, department=department,
+        payload,
+        statuses=statuses,
+        employee=employee,
+        leave_type=leave_type,
+        branch=branch,
+        department=department,
     )
 
 
@@ -164,7 +179,10 @@ def _apply_read_filters(
     data = payload.get("data")
     if isinstance(data, list):
         # Legacy v1 shape (flat Approved-only array) — filter as leaves.
-        payload["data"] = {"leaves": _filter_leaves(data, statuses, employee, leave_type, branch, department), "holidays": []}
+        payload["data"] = {
+            "leaves": _filter_leaves(data, statuses, employee, leave_type, branch, department),
+            "holidays": [],
+        }
         return payload
     if not isinstance(data, dict):
         payload["data"] = {"leaves": [], "holidays": []}
@@ -455,9 +473,7 @@ def touch_leave_calendar(doc) -> None:
             return
         branch = (emp and emp.get("branch")) or None
         department = (emp and emp.get("department")) or None
-        months = calendar_utils.months_between(
-            getattr(doc, "from_date", None), getattr(doc, "to_date", None)
-        )
+        months = calendar_utils.months_between(getattr(doc, "from_date", None), getattr(doc, "to_date", None))
         if not months:
             return
         scopes = {
@@ -468,7 +484,7 @@ def touch_leave_calendar(doc) -> None:
         }
         if not _table_ready():
             return
-        for (y, m) in months:
+        for y, m in months:
             for b, d in scopes:
                 key = calendar_utils.build_cache_key(company=company, branch=b, department=d, year=y, month=m)
                 if key:

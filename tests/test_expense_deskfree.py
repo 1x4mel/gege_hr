@@ -174,9 +174,7 @@ class _Frappe:
         data["docstatus"] = 0
         # NB: no copy.deepcopy — _AttrDict.__getattr__ returns None for
         # __deepcopy__ which breaks deepcopy; plain dict() copies suffice.
-        data["expenses"] = [
-            dict(r) if isinstance(r, dict) else r for r in (data.get("expenses") or [])
-        ]
+        data["expenses"] = [dict(r) if isinstance(r, dict) else r for r in (data.get("expenses") or [])]
         return _Doc(doc.doctype, doc._store, data=data)
 
     def delete_doc(self, doctype, name, ignore_permissions=False):
@@ -264,7 +262,9 @@ def _events(stub, event="expense_updated"):
 def _create(mod, **kw):
     return mod.submit_expense_claim(
         employee=kw.pop("employee", "HR-EMP-1"),
-        expenses=kw.pop("expenses", [{"expense_type": "Taxi", "amount": 80}, {"expense_type": "Vé", "amount": 20}]),
+        expenses=kw.pop(
+            "expenses", [{"expense_type": "Taxi", "amount": 80}, {"expense_type": "Vé", "amount": 20}]
+        ),
         **kw,
     )
 
@@ -295,9 +295,16 @@ def test_b2_get_detail_can_matrix_and_rows(mod):
     m, stub = mod
     res = _create(m, remark="đi khách")
     stub.list_rows["File"] = [
-        {"name": "F1", "file_name": "receipt.jpg", "file_url": "/files/receipt.jpg",
-         "file_size": 10, "is_private": 1, "attached_to_doctype": "Expense Claim",
-         "attached_to_name": res["name"], "creation": "2026-09-03T10:00:00"}
+        {
+            "name": "F1",
+            "file_name": "receipt.jpg",
+            "file_url": "/files/receipt.jpg",
+            "file_size": 10,
+            "is_private": 1,
+            "attached_to_doctype": "Expense Claim",
+            "attached_to_name": res["name"],
+            "creation": "2026-09-03T10:00:00",
+        }
     ]
     out = m.get_expense_claim(res["name"])
     assert out["doc"]["employee"] == "HR-EMP-1"
@@ -319,14 +326,25 @@ def test_b3_timeline_merges_three_sources_sorted(mod):
     res = _create(m)
     name = res["name"]
     stub.list_rows["Version"] = [
-        {"name": "V1", "ref_doctype": "Expense Claim", "docname": name,
-         "owner": "hr@gege.local", "creation": "2026-09-03T09:00:00",
-         "data": json.dumps({"changed": [["remark", "a", "b"]]})}
+        {
+            "name": "V1",
+            "ref_doctype": "Expense Claim",
+            "docname": name,
+            "owner": "hr@gege.local",
+            "creation": "2026-09-03T09:00:00",
+            "data": json.dumps({"changed": [["remark", "a", "b"]]}),
+        }
     ]
     stub.list_rows["VN Audit Event"] = [
-        {"reference_doctype": "Expense Claim", "reference_name": name,
-         "actor": "hr@gege.local", "description": "Expense Submit",
-         "created_at": "2026-09-03T08:00:00", "old_value": None, "new_value": None}
+        {
+            "reference_doctype": "Expense Claim",
+            "reference_name": name,
+            "actor": "hr@gege.local",
+            "description": "Expense Submit",
+            "created_at": "2026-09-03T08:00:00",
+            "old_value": None,
+            "new_value": None,
+        }
     ]
     m.add_expense_comment(name, "ghi chú nhé")
     out = m.get_expense_claim(name)
@@ -526,11 +544,22 @@ def test_b18_summary_and_csv_export(mod):
     m, stub = mod
     _create(m)  # store-backed Draft claim
     stub.list_rows["Expense Claim"] = [
-        {"name": "EC-1", "employee": "HR-EMP-9", "employee_name": "Zed",
-         "approval_status": "Approved", "status": "Unpaid", "posting_date": "2026-09-01",
-         "total_claimed_amount": 100, "total_sanctioned_amount": 90,
-         "total_amount_reimbursed": 0, "remark": "", "expense_approver": "x",
-         "company": "Gege", "is_paid": 0, "docstatus": 1},
+        {
+            "name": "EC-1",
+            "employee": "HR-EMP-9",
+            "employee_name": "Zed",
+            "approval_status": "Approved",
+            "status": "Unpaid",
+            "posting_date": "2026-09-01",
+            "total_claimed_amount": 100,
+            "total_sanctioned_amount": 90,
+            "total_amount_reimbursed": 0,
+            "remark": "",
+            "expense_approver": "x",
+            "company": "Gege",
+            "is_paid": 0,
+            "docstatus": 1,
+        },
     ]
     res = m.all_expense_claims(page=1, page_size=20)
     assert res["summary"]["count"] == 2
@@ -561,12 +590,24 @@ def test_b19_comment_owner_ok_stranger_denied(mod):
 def test_b22_list_regressions(mod):
     m, stub = mod
     stub.list_rows["Expense Claim"] = [
-        {"name": "EC-1", "employee": "HR-EMP-1", "employee_name": "An",
-         "approval_status": "Approved", "total_claimed_amount": 100,
-         "posting_date": "2026-08-01", "remark": ""},
-        {"name": "EC-2", "employee": "HR-EMP-2", "employee_name": "Binh",
-         "approval_status": "Draft", "total_claimed_amount": 250,
-         "posting_date": "2026-08-05", "remark": "taxi"},
+        {
+            "name": "EC-1",
+            "employee": "HR-EMP-1",
+            "employee_name": "An",
+            "approval_status": "Approved",
+            "total_claimed_amount": 100,
+            "posting_date": "2026-08-01",
+            "remark": "",
+        },
+        {
+            "name": "EC-2",
+            "employee": "HR-EMP-2",
+            "employee_name": "Binh",
+            "approval_status": "Draft",
+            "total_claimed_amount": 250,
+            "posting_date": "2026-08-05",
+            "remark": "taxi",
+        },
     ]
     res = m.my_expense_claims()
     assert res["total"] == 1
@@ -594,7 +635,8 @@ def test_b23_publishes_on_mutations(mod):
 def test_b24_options_v2(mod):
     m, stub = mod
     stub.list_rows["Expense Claim Type"] = [
-        {"name": "Taxi"}, {"name": "Ăn"},
+        {"name": "Taxi"},
+        {"name": "Ăn"},
     ]
     out = m.expense_claim_options()
     assert set(out["expense_types"]) == {"Taxi", "Ăn"}

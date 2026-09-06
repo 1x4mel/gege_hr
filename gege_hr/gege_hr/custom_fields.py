@@ -746,7 +746,6 @@ grievance_portal_fields = [
 ]
 
 
-
 # Desk-free B3 (plans/approvals-deskfree-complete §3.6) — approval follow-up
 # knobs on the portal setting (digest toggle + SLA/escalate hours).
 approval_followup_fields = [

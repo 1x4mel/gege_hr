@@ -68,11 +68,7 @@ class _FakeDB:
         filters = kw.get("filters")
         eq: dict = {}
         if isinstance(filters, list):
-            eq = {
-                f[0]: f[2]
-                for f in filters
-                if isinstance(f, (list, tuple)) and len(f) == 3 and f[1] == "="
-            }
+            eq = {f[0]: f[2] for f in filters if isinstance(f, (list, tuple)) and len(f) == 3 and f[1] == "="}
         elif isinstance(filters, dict):
             eq = {k: v for k, v in filters.items() if not isinstance(v, (list, tuple))}
         if eq:
@@ -395,7 +391,9 @@ def test_merge_payslip_timeline_empty_and_cap(api):
     many = [{"creation": f"2026-09-01 00:00:{i:02d}", "owner": "u", "content": f"c{i}"} for i in range(60)]
     assert len(mod.merge_payslip_timeline(comments=many, limit=50)) == 50
     # blank texts are dropped
-    assert mod.merge_payslip_timeline(comments=[{"creation": "2026-09-01", "owner": "u", "content": "  "}]) == []
+    assert (
+        mod.merge_payslip_timeline(comments=[{"creation": "2026-09-01", "owner": "u", "content": "  "}]) == []
+    )
 
 
 # --------------------------------------------------------------------------- #

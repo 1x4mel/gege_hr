@@ -206,9 +206,7 @@ def test_pp03_save_requires_end_date(fake):
 # --------------------------------------------------------------------------- #
 def test_pp04_save_rejects_inverted_range(fake):
     with pytest.raises(_FrappeError):
-        fake.api.save_payroll_period(
-            company="GEGE", start_date="2027-12-31", end_date="2027-01-01"
-        )
+        fake.api.save_payroll_period(company="GEGE", start_date="2027-12-31", end_date="2027-01-01")
     assert fake.docs_created == []
 
 
@@ -241,9 +239,7 @@ def test_pp05_overlap_error_mapped_to_vietnamese_without_html(fake):
     fake.stub.get_doc = _get_doc
 
     with pytest.raises(_FrappeError) as ei:
-        fake.api.save_payroll_period(
-            company="GEGE", start_date="2027-06-01", end_date="2028-05-31"
-        )
+        fake.api.save_payroll_period(company="GEGE", start_date="2027-06-01", end_date="2028-05-31")
     msg = str(ei.value)
     assert "PP-2027" in msg, "phải nêu tên kỳ giao nhau"
     assert "<a" not in msg and "/app/" not in msg, "không lộ HTML link Desk"
@@ -253,9 +249,7 @@ def test_pp05_overlap_error_mapped_to_vietnamese_without_html(fake):
 # PP-06 — update kỳ đã bị EBA reference vẫn được sửa (chỉ delete bị chặn)
 # --------------------------------------------------------------------------- #
 def test_pp06_update_allowed_even_when_referenced(fake):
-    fake.set_rows(
-        "Employee Benefit Application", [{"payroll_period": "PP-2027", "n": 2}]
-    )
+    fake.set_rows("Employee Benefit Application", [{"payroll_period": "PP-2027", "n": 2}])
     fake._existing[("Payroll Period", "PP-2027")] = _FakeDoc(
         {
             "doctype": "Payroll Period",
@@ -287,12 +281,8 @@ def test_pp07_delete_unused_period(fake):
 # PP-08 — delete có 2 EBA + 1 Tax → chặn với tổng đúng
 # --------------------------------------------------------------------------- #
 def test_pp08_delete_blocked_by_usage(fake):
-    fake.set_rows(
-        "Employee Benefit Application", [{"payroll_period": "PP-2027", "n": 2}]
-    )
-    fake.set_rows(
-        "Employee Tax Exemption Declaration", [{"payroll_period": "PP-2027", "n": 1}]
-    )
+    fake.set_rows("Employee Benefit Application", [{"payroll_period": "PP-2027", "n": 2}])
+    fake.set_rows("Employee Tax Exemption Declaration", [{"payroll_period": "PP-2027", "n": 1}])
     with pytest.raises(_FrappeError) as ei:
         fake.api.delete_payroll_period("PP-2027")
     assert "3" in str(ei.value)
@@ -369,9 +359,7 @@ def test_pp11_guest_blocked_on_all_endpoints(fake, monkeypatch):
         lambda: fake.api.payroll_period_context(),
         lambda: fake.api.list_payroll_periods(),
         lambda: fake.api.get_payroll_period("PP-2027"),
-        lambda: fake.api.save_payroll_period(
-            company="GEGE", start_date="2027-01-01", end_date="2027-12-31"
-        ),
+        lambda: fake.api.save_payroll_period(company="GEGE", start_date="2027-01-01", end_date="2027-12-31"),
         lambda: fake.api.delete_payroll_period("PP-2027"),
     ]
     for call in calls:

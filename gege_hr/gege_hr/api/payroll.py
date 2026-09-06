@@ -603,9 +603,7 @@ def calculate_payroll_review(name: str | None = None) -> dict:
     # Per-employee salary plan (plan per-employee-salary §4.3): resolve every
     # setting ONCE up-front — Monthly employees missing a base fail fast with
     # the full offender list (same pattern as the blockers above).
-    settings = {
-        e["employee"]: calc.resolve_payroll_setting(e["employee"], period.to_date) for e in employees
-    }
+    settings = {e["employee"]: calc.resolve_payroll_setting(e["employee"], period.to_date) for e in employees}
     missing_base = _monthly_missing_base(settings)
     if missing_base:
         frappe.throw(
@@ -725,9 +723,7 @@ def _compute_hourly_amounts(
     late_minutes_list = _employee_late_minutes(emp_id, period.from_date, period.to_date)
     # daily_rate = 8 standard hours × hourly rate (basis for Percentage /
     # Half-Day / Full-Day penalty rules — M4).
-    late_penalty = calc.compute_late_penalty(
-        late_minutes_list, penalty_rules, daily_rate=hourly_rate * 8.0
-    )
+    late_penalty = calc.compute_late_penalty(late_minutes_list, penalty_rules, daily_rate=hourly_rate * 8.0)
 
     # Checkout-miss penalty: Σ penalty_amount of Penalised (non-waived) tickets this period.
     checkout_miss_penalty = calc.load_checkout_miss_penalty(emp_id, period.from_date, period.to_date)
@@ -880,9 +876,7 @@ def update_payroll_review(
     _assert_closer()
     period = _get_period(name)
     if period.status != "Draft":
-        frappe.throw(
-            _("Chỉ sửa được kỳ lương ở trạng thái Nháp (kỳ hiện tại: {0}).").format(period.status)
-        )
+        frappe.throw(_("Chỉ sửa được kỳ lương ở trạng thái Nháp (kỳ hiện tại: {0}).").format(period.status))
 
     old = {
         "from_date": str(period.from_date or ""),
@@ -940,9 +934,7 @@ def cancel_payroll_review(name: str | None = None, reason: str = "") -> dict:
         frappe.throw(_("Kỳ lương đã bị huỷ từ trước."))
 
     if calc.period_has_confirmed_slips(name) > 0:
-        frappe.throw(
-            _("Kỳ đã có phiếu lương được nhân viên xác nhận — dùng 'Mở lại để điều chỉnh'.")
-        )
+        frappe.throw(_("Kỳ đã có phiếu lương được nhân viên xác nhận — dùng 'Mở lại để điều chỉnh'."))
 
     lines = frappe.db.get_all(
         LINE_DOCTYPE,
@@ -960,9 +952,7 @@ def cancel_payroll_review(name: str | None = None, reason: str = "") -> dict:
         )
         if submitted:
             frappe.throw(
-                _(
-                    "Kỳ đã sinh phiếu lương đã submit — dùng 'Mở lại để điều chỉnh' rồi xoá để tính lại."
-                )
+                _("Kỳ đã sinh phiếu lương đã submit — dùng 'Mở lại để điều chỉnh' rồi xoá để tính lại.")
             )
         for slip in slip_names:
             try:
@@ -1361,9 +1351,7 @@ def _line_breakdown(doc) -> dict:
             "payable_days": payable_days,
             "standard_days": standard_days,
             "daily_rate": round(base_salary / standard_days, 2) if standard_days else 0.0,
-            "hourly_equivalent": round(
-                base_salary / (calc.DEFAULT_STANDARD_HOURS or 208.0), 2
-            ),
+            "hourly_equivalent": round(base_salary / (calc.DEFAULT_STANDARD_HOURS or 208.0), 2),
             "proportional_base": proportional_base if monthly else 0.0,
         },
         "allowance_amount": float(doc.get("allowance_amount") or 0),
@@ -2706,9 +2694,7 @@ def download_payslip_pdf(name: str | None = None) -> None:
     name = (name or "").strip()
     if not name:
         frappe.throw(_("Thiếu mã phiếu lương."))
-    slip = frappe.db.get_value(
-        "Salary Slip", name, ["employee", "vn_employee_visible"], as_dict=True
-    )
+    slip = frappe.db.get_value("Salary Slip", name, ["employee", "vn_employee_visible"], as_dict=True)
     if not slip:
         frappe.throw(_("Phiếu lương {0} không tồn tại.").format(name))
     if not _is_payslip_manager():
@@ -2957,9 +2943,9 @@ def _send_payslip_email(name: str, recipients: list[str]) -> None:
             slip.get("start_date") or "", slip.get("employee_name") or ""
         ),
         message=(
-            "<p>Xin chào {0},</p>"
-            "<p>Phiếu lương kỳ <b>{1} → {2}</b> của bạn được đính kèm dưới dạng PDF.</p>"
-            "<p>Thực lĩnh: <b>{3}</b></p>".format(
+            "<p>Xin chào {},</p>"
+            "<p>Phiếu lương kỳ <b>{} → {}</b> của bạn được đính kèm dưới dạng PDF.</p>"
+            "<p>Thực lĩnh: <b>{}</b></p>".format(
                 slip.get("employee_name") or "",
                 slip.get("start_date") or "",
                 slip.get("end_date") or "",

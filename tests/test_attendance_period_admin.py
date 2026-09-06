@@ -239,9 +239,7 @@ def make_fake(monkeypatch, roles=("HR Manager",)):
         raise RuntimeError(f"{target} does not exist")
 
     monkeypatch.setattr(stub, "get_doc", _get_doc)
-    monkeypatch.setattr(
-        stub, "delete_doc", lambda dt, nm, **_k: store["deleted"].append((dt, nm))
-    )
+    monkeypatch.setattr(stub, "delete_doc", lambda dt, nm, **_k: store["deleted"].append((dt, nm)))
 
     audits = []
 
@@ -267,7 +265,12 @@ def make_fake(monkeypatch, roles=("HR Manager",)):
     monkeypatch.setattr(stub, "publish_realtime", _pub)
 
     return types.SimpleNamespace(
-        api=api, db=db, stub=stub, store=store, audits=audits, pushes=pushes,
+        api=api,
+        db=db,
+        stub=stub,
+        store=store,
+        audits=audits,
+        pushes=pushes,
         published=published,
     )
 
@@ -368,9 +371,7 @@ def test_be01_lock_logs_hr_user_reads_rows_and_pushes_filters(fake):
     ]
     out = fake.api.lock_logs("P-1")
     assert [r["name"] for r in out] == ["LL-1", "LL-2"]
-    assert all(
-        f in out[0] for f in ("action", "reason", "actor", "old_status", "new_status", "created_at")
-    )
+    assert all(f in out[0] for f in ("action", "reason", "actor", "old_status", "new_status", "created_at"))
     log_call = [c for c in fake.db.get_all_calls if c["doctype"] == LOG_DT][-1]
     assert log_call["filters"] == {"attendance_period": "P-1"}
     assert log_call["order_by"] == "created_at desc"
@@ -542,9 +543,7 @@ def test_be10b_lock_notifies_employees_unlock_notifies_managers(fake):
     for row in fake.db.rows[LINE_DT]:
         row["status"] = "Locked"
     fake.db.has_role_rows = [{"parent": "hr2@test.local"}]
-    fake.db.employee_rows = [
-        {"name": "E9", "user_id": "hr2@test.local", "status": "Active"}
-    ]
+    fake.db.employee_rows = [{"name": "E9", "user_id": "hr2@test.local", "status": "Active"}]
     fake.pushes.clear()
 
     out = fake.api.unlock_period("P-1", reason="sai dữ liệu")
@@ -583,15 +582,11 @@ def test_be12_wrappers_delegate_to_core(fake, monkeypatch):
     att = _import_attendance(fake, monkeypatch)
     called = {}
     monkeypatch.setattr(fake.api, "confirm_line", lambda n: called.setdefault("confirm_line", n))
-    monkeypatch.setattr(
-        fake.api, "confirm_all_lines", lambda p: called.setdefault("confirm_all_lines", p)
-    )
+    monkeypatch.setattr(fake.api, "confirm_all_lines", lambda p: called.setdefault("confirm_all_lines", p))
     monkeypatch.setattr(
         fake.api,
         "adjust_line",
-        lambda n, values=None, reason=None: called.setdefault(
-            "adjust_line", (n, values, reason)
-        ),
+        lambda n, values=None, reason=None: called.setdefault("adjust_line", (n, values, reason)),
     )
     monkeypatch.setattr(fake.api, "delete_period", lambda n: called.setdefault("delete_period", n))
     monkeypatch.setattr(fake.api, "lock_logs", lambda p: called.setdefault("lock_logs", p))

@@ -82,10 +82,10 @@ class FakeDoc:
 
 class FakeStore:
     def __init__(self):
-        self.docs: dict[str, dict] = {}          # DOCTYPE docs by name (DB truth)
-        self.queries: dict[str, list[dict]] = {} # get_all rows per doctype
-        self.values: dict[str, dict] = {}        # get_value maps per doctype
-        self.exists: dict[str, str] = {}         # exists() truths
+        self.docs: dict[str, dict] = {}  # DOCTYPE docs by name (DB truth)
+        self.queries: dict[str, list[dict]] = {}  # get_all rows per doctype
+        self.values: dict[str, dict] = {}  # get_value maps per doctype
+        self.exists: dict[str, str] = {}  # exists() truths
         self.inserted: list[str] = []
         self.publish_calls: list[tuple] = []
         self.audit_calls: list[tuple] = []
@@ -113,10 +113,10 @@ class FakeDB:
                 return False
         return True
 
-    def get_all(self, doctype, filters=None, fields=None, order_by=None,
-                limit_page_length=None, pluck=None, **kw):
-        rows = [dict(r) for r in self._store.queries.get(doctype, [])
-                if self._match(r, filters)]
+    def get_all(
+        self, doctype, filters=None, fields=None, order_by=None, limit_page_length=None, pluck=None, **kw
+    ):
+        rows = [dict(r) for r in self._store.queries.get(doctype, []) if self._match(r, filters)]
         if pluck:
             return [r.get(pluck) for r in rows]
         if fields:
@@ -155,6 +155,7 @@ def _install_stub(monkeypatch, store: FakeStore):
         def deco(f):
             recorded.add(getattr(f, "__name__", ""))
             return f
+
         return deco(fn) if fn is not None else deco
 
     mod.whitelist = _whitelist
@@ -274,8 +275,7 @@ def approval(monkeypatch, store):
 def att(monkeypatch, store):
     """Fresh api.attendance (legacy CR endpoints + the new publish wire)."""
     _install_stub(monkeypatch, store)
-    from gege_hr.gege_hr.api import attendance as att_mod
-    from gege_hr.gege_hr.api import correction as cr_mod
+    from gege_hr.gege_hr.api import attendance as att_mod, correction as cr_mod
     from gege_hr.gege_hr.utils import employee as emp_utils
 
     # correction FIRST: attendance lazy-imports it at call time; reloading it
@@ -320,7 +320,8 @@ def _seed_doc(store, name="CR-1", employee="EMP-1", state="Draft", docstatus=0, 
     store.docs[name] = row
     store.queries.setdefault(DOCTYPE, []).append(row)
     store.values.setdefault("Employee", {})[employee] = {
-        "employee_name": row["employee_name"], "department": "IT",
+        "employee_name": row["employee_name"],
+        "department": "IT",
     }
     return row
 
@@ -336,25 +337,46 @@ class TestGetCorrectionRequest:
 
     def test_cd1_shape_and_links(self, cr, store, monkeypatch):
         _seed_doc(store)
-        store.values["VN Employee Shift Instance"] = {"SI-1": {
-            "name": "SI-1", "shift_type": "Ca A", "planned_start": "2026-09-01 08:00:00",
-            "planned_end": "2026-09-01 17:00:00",
-        }}
-        store.values["VN Attendance Work Session"] = {"WS-1": {
-            "name": "WS-1", "actual_checkin": "2026-09-01 08:30:00",
-            "actual_checkout": "2026-09-01 17:30:00", "total_actual_hours": 9.0,
-            "calculation_status": "Computed",
-        }}
+        store.values["VN Employee Shift Instance"] = {
+            "SI-1": {
+                "name": "SI-1",
+                "shift_type": "Ca A",
+                "planned_start": "2026-09-01 08:00:00",
+                "planned_end": "2026-09-01 17:00:00",
+            }
+        }
+        store.values["VN Attendance Work Session"] = {
+            "WS-1": {
+                "name": "WS-1",
+                "actual_checkin": "2026-09-01 08:30:00",
+                "actual_checkout": "2026-09-01 17:30:00",
+                "total_actual_hours": 9.0,
+                "calculation_status": "Computed",
+            }
+        }
         store.queries["File"] = [
-            {"name": "F1", "file_name": "may.jpg", "file_url": "/private/files/may.jpg",
-             "is_private": 1, "file_size": 10,
-             "attached_to_doctype": DOCTYPE, "attached_to_name": "CR-1"},
+            {
+                "name": "F1",
+                "file_name": "may.jpg",
+                "file_url": "/private/files/may.jpg",
+                "is_private": 1,
+                "file_size": 10,
+                "attached_to_doctype": DOCTYPE,
+                "attached_to_name": "CR-1",
+            },
         ]
         store.queries["VN Approval Log"] = [
-            {"name": "L1", "action": "Reject", "from_state": "Pending Manager",
-             "to_state": "Rejected", "actor": "mgr@x", "comment": "thiếu bằng chứng",
-             "creation": "2026-09-02",
-             "reference_doctype": DOCTYPE, "reference_name": "CR-1"},
+            {
+                "name": "L1",
+                "action": "Reject",
+                "from_state": "Pending Manager",
+                "to_state": "Rejected",
+                "actor": "mgr@x",
+                "comment": "thiếu bằng chứng",
+                "creation": "2026-09-02",
+                "reference_doctype": DOCTYPE,
+                "reference_name": "CR-1",
+            },
         ]
         out = self._run(cr, store, monkeypatch, is_hr=False, caller="EMP-1")
         assert out["doc"]["name"] == "CR-1"
@@ -370,20 +392,55 @@ class TestGetCorrectionRequest:
     def test_cd1_can_matrix_branches(self, cr, store, monkeypatch):
         cases = [
             # (state, docstatus, is_hr, caller) -> expected can dict (no confirm in CR)
-            ("Draft", 0, False, "EMP-1", dict(edit=True, cancel=True, resend=False,
-                                              upload=True, remove_file=True)),
-            ("Pending Manager", 0, False, "EMP-1", dict(edit=False, cancel=True, resend=False,
-                                                        upload=False, remove_file=False)),
-            ("Pending HR", 0, False, "EMP-1", dict(edit=False, cancel=True, resend=False,
-                                                   upload=False, remove_file=False)),
-            ("Rejected", 0, False, "EMP-1", dict(edit=False, cancel=False, resend=True,
-                                                 upload=False, remove_file=False)),
-            ("Draft", 0, True, None, dict(edit=True, cancel=True, resend=False,
-                                          upload=True, remove_file=True)),
-            ("Approved", 0, True, None, dict(edit=False, cancel=False, resend=False,
-                                             upload=False, remove_file=False)),
-            ("Approved", 1, True, None, dict(edit=False, cancel=False, resend=False,
-                                             upload=False, remove_file=False)),
+            (
+                "Draft",
+                0,
+                False,
+                "EMP-1",
+                dict(edit=True, cancel=True, resend=False, upload=True, remove_file=True),
+            ),
+            (
+                "Pending Manager",
+                0,
+                False,
+                "EMP-1",
+                dict(edit=False, cancel=True, resend=False, upload=False, remove_file=False),
+            ),
+            (
+                "Pending HR",
+                0,
+                False,
+                "EMP-1",
+                dict(edit=False, cancel=True, resend=False, upload=False, remove_file=False),
+            ),
+            (
+                "Rejected",
+                0,
+                False,
+                "EMP-1",
+                dict(edit=False, cancel=False, resend=True, upload=False, remove_file=False),
+            ),
+            (
+                "Draft",
+                0,
+                True,
+                None,
+                dict(edit=True, cancel=True, resend=False, upload=True, remove_file=True),
+            ),
+            (
+                "Approved",
+                0,
+                True,
+                None,
+                dict(edit=False, cancel=False, resend=False, upload=False, remove_file=False),
+            ),
+            (
+                "Approved",
+                1,
+                True,
+                None,
+                dict(edit=False, cancel=False, resend=False, upload=False, remove_file=False),
+            ),
         ]
         for i, (state, docstatus, is_hr, caller, expected) in enumerate(cases):
             _seed_doc(store, name=f"CR-C{i}", state=state, docstatus=docstatus)
@@ -413,10 +470,17 @@ class TestGetCorrectionRequest:
         the employee's drawer activity (VN Approval Log projection)."""
         _seed_doc(store, state="Rejected")
         store.queries["VN Approval Log"] = [
-            {"name": "L1", "action": "Reject", "from_state": "Pending HR",
-             "to_state": "Rejected", "actor": "hr@x", "comment": "ảnh không rõ",
-             "creation": "2026-09-02",
-             "reference_doctype": DOCTYPE, "reference_name": "CR-1"},
+            {
+                "name": "L1",
+                "action": "Reject",
+                "from_state": "Pending HR",
+                "to_state": "Rejected",
+                "actor": "hr@x",
+                "comment": "ảnh không rõ",
+                "creation": "2026-09-02",
+                "reference_doctype": DOCTYPE,
+                "reference_name": "CR-1",
+            },
         ]
         out = self._run(cr, store, monkeypatch, is_hr=False, caller="EMP-1")
         rows = out["activity"]
@@ -424,20 +488,37 @@ class TestGetCorrectionRequest:
 
     def test_cd22_approved_with_ticket_and_results(self, cr, store, monkeypatch):
         _seed_doc(
-            store, state="Approved", vn_checkout_miss="CM-1",
-            generated_checkin="EC-1", generated_attendance="ATT-1",
-            approver="hr@x", approved_at="2026-09-02 09:00:00",
+            store,
+            state="Approved",
+            vn_checkout_miss="CM-1",
+            generated_checkin="EC-1",
+            generated_attendance="ATT-1",
+            approver="hr@x",
+            approved_at="2026-09-02 09:00:00",
         )
-        store.values["VN Checkout Miss"] = {"CM-1": {
-            "name": "CM-1", "status": "Waived", "penalty_amount": 0,
-            "grace_deadline": "2026-09-02 12:00:00", "work_date": "2026-09-01",
-        }}
-        store.values["Employee Checkin"] = {"EC-1": {
-            "name": "EC-1", "time": "2026-09-01 22:00:00", "log_type": "OUT",
-        }}
-        store.values["Attendance"] = {"ATT-1": {
-            "name": "ATT-1", "status": "Present", "attendance_date": "2026-09-01",
-        }}
+        store.values["VN Checkout Miss"] = {
+            "CM-1": {
+                "name": "CM-1",
+                "status": "Waived",
+                "penalty_amount": 0,
+                "grace_deadline": "2026-09-02 12:00:00",
+                "work_date": "2026-09-01",
+            }
+        }
+        store.values["Employee Checkin"] = {
+            "EC-1": {
+                "name": "EC-1",
+                "time": "2026-09-01 22:00:00",
+                "log_type": "OUT",
+            }
+        }
+        store.values["Attendance"] = {
+            "ATT-1": {
+                "name": "ATT-1",
+                "status": "Present",
+                "attendance_date": "2026-09-01",
+            }
+        }
         out = self._run(cr, store, monkeypatch, is_hr=True, caller=None)
         assert out["links"]["vn_checkout_miss"]["status"] == "Waived"
         assert out["links"]["generated_checkin"]["log_type"] == "OUT"
@@ -450,8 +531,13 @@ class TestGetCorrectionRequest:
         row["work_session"] = None
         store.docs["CR-1"] = row
         out = self._run(cr, store, monkeypatch, is_hr=True, caller=None)
-        for key in ("shift_instance", "work_session", "vn_checkout_miss",
-                    "generated_checkin", "generated_attendance"):
+        for key in (
+            "shift_instance",
+            "work_session",
+            "vn_checkout_miss",
+            "generated_checkin",
+            "generated_attendance",
+        ):
             assert out["links"][key] is None
         assert out["activity"] == []
 
@@ -525,8 +611,12 @@ class TestUpdateCorrectionRequest:
         _seed_doc(store)
         self._patch_actor(cr, monkeypatch)
         cr.update_correction_request(
-            name="CR-1", reason="đủ lý do ok", employee="EMP-9", company="HACK",
-            docstatus=1, workflow_state="Approved",
+            name="CR-1",
+            reason="đủ lý do ok",
+            employee="EMP-9",
+            company="HACK",
+            docstatus=1,
+            workflow_state="Approved",
         )
         saved = store.docs["CR-1"]
         assert saved["employee"] == "EMP-1"
@@ -582,11 +672,17 @@ class TestAllCorrectionRequests:
     def _seed(self, store):
         _seed_doc(store, name="CR-A", employee="EMP-1", state="Pending Manager")
         _seed_doc(
-            store, name="CR-B", employee="EMP-2", state="Approved",
+            store,
+            name="CR-B",
+            employee="EMP-2",
+            state="Approved",
             employee_name="Nhân viên Hai",
         )
         _seed_doc(
-            store, name="CR-C", employee="EMP-2", state="Rejected",
+            store,
+            name="CR-C",
+            employee="EMP-2",
+            state="Rejected",
             employee_name="Nhân viên Hai",
         )
         store.queries["Employee"] = [
@@ -645,9 +741,7 @@ class TestRealtimeWire:
     def test_cd17_publish_helper(self, cr, store):
         cr._publish_correction(types.SimpleNamespace(name="CR-1"))
         cr._publish_correction(None)
-        assert store.publish_calls[0] == (
-            "correction_updated", {"doctype": DOCTYPE, "name": "CR-1"}
-        )
+        assert store.publish_calls[0] == ("correction_updated", {"doctype": DOCTYPE, "name": "CR-1"})
         assert store.publish_calls[1][1]["name"] is None
 
     def test_cd17_publish_never_raises(self, cr, store, monkeypatch):
@@ -696,8 +790,11 @@ class TestRealtimeWire:
 
     def test_cd17_attendance_submit_publishes(self, att, store):
         out = att.submit_correction_request(
-            employee="EMP-1", work_date="2026-09-03", correction_type="Wrong Time",
-            requested_checkin_time="2026-09-03 08:02:00", reason="máy lỗi quét muộn",
+            employee="EMP-1",
+            work_date="2026-09-03",
+            correction_type="Wrong Time",
+            requested_checkin_time="2026-09-03 08:02:00",
+            reason="máy lỗi quét muộn",
         )
         assert out["name"] == "CR-NEW"
         assert any(e == "correction_updated" for e, _ in store.publish_calls)
@@ -720,13 +817,8 @@ class TestSeedRegressionAndContracts:
         from gege_hr.gege_hr import setup_workflows as sw
 
         importlib.reload(sw)
-        cr_spec = next(
-            w for w in sw._WORKFLOWS if w["doctype"] == DOCTYPE
-        )
-        keys = {
-            (t["state"], t["action"], t["next_state"], t["allowed"])
-            for t in cr_spec["transitions"]
-        }
+        cr_spec = next(w for w in sw._WORKFLOWS if w["doctype"] == DOCTYPE)
+        keys = {(t["state"], t["action"], t["next_state"], t["allowed"]) for t in cr_spec["transitions"]}
         assert ("Pending HR", "Reject", "Rejected", "Employee") in keys
         assert ("Pending Manager", "Reject", "Rejected", "Employee") in keys
         assert ("Draft", "Send for Approval", "Pending Manager", "Employee") in keys

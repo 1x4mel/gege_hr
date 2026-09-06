@@ -191,9 +191,7 @@ def make_fake(monkeypatch, roles=("HR Manager",)):
         raise RuntimeError(f"{target} does not exist")
 
     monkeypatch.setattr(stub, "get_doc", _get_doc)
-    monkeypatch.setattr(
-        stub, "delete_doc", lambda doctype, name: store["deleted"].append(name)
-    )
+    monkeypatch.setattr(stub, "delete_doc", lambda doctype, name: store["deleted"].append(name))
 
     def _publish(event, payload=None):
         store["published"].append((event, payload))

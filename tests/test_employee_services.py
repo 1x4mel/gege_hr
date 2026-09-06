@@ -437,8 +437,20 @@ def test_get_grievance_resolved(mod):  # SV4
 def test_activity_rows_merges_version_comment(mod):  # SV5
     m, stub = mod
     stub.list_rows["Version"] = [
-        {"ref_doctype": "Employee Grievance", "docname": "G-1", "name": "V1", "owner": "a@x", "creation": "2026-09-01 10:00:00"},
-        {"ref_doctype": "Employee Grievance", "docname": "G-1", "name": "V2", "owner": "b@x", "creation": "2026-09-03 10:00:00"},
+        {
+            "ref_doctype": "Employee Grievance",
+            "docname": "G-1",
+            "name": "V1",
+            "owner": "a@x",
+            "creation": "2026-09-01 10:00:00",
+        },
+        {
+            "ref_doctype": "Employee Grievance",
+            "docname": "G-1",
+            "name": "V2",
+            "owner": "b@x",
+            "creation": "2026-09-03 10:00:00",
+        },
     ]
     stub.list_rows["Comment"] = [
         {

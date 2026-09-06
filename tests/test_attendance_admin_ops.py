@@ -241,9 +241,7 @@ def env(monkeypatch):
     monkeypatch.setattr(
         m, "_recalc_for_checkin", lambda doc: spies["recalc"].append(getattr(doc, "name", None))
     )
-    monkeypatch.setattr(
-        m, "_recalc_work_sessions", lambda emp, wd: spies["recalc_ws"].append((emp, wd))
-    )
+    monkeypatch.setattr(m, "_recalc_work_sessions", lambda emp, wd: spies["recalc_ws"].append((emp, wd)))
 
     def _backfill(from_date, to_date, employee):
         spies["backfill"].append((from_date, to_date, employee))
@@ -396,9 +394,7 @@ def test_list_checkins_requires_employee(env):
 def test_create_checkin_inserts_recalcs_and_audits(env):
     m, stub, spies = env
     _seed_base(stub)
-    res = m.create_checkin(
-        employee="E2", time="2026-08-08 08:30", log_type="IN", reason="quên chấm máy"
-    )
+    res = m.create_checkin(employee="E2", time="2026-08-08 08:30", log_type="IN", reason="quên chấm máy")
     assert res["ok"] is True
     created = [r for r in stub.stores["Employee Checkin"].values() if r["employee"] == "E2"]
     assert len(created) == 1
@@ -533,9 +529,7 @@ def test_mark_bulk_creates_and_skips_existing(env):
             "docstatus": 0,
         }
     }
-    res = m.mark_attendance_bulk(
-        employees=["E1", "E2"], attendance_date="2026-08-08", status="Present"
-    )
+    res = m.mark_attendance_bulk(employees=["E1", "E2"], attendance_date="2026-08-08", status="Present")
     assert res["created"] == 1 and res["skipped"] == 1
     new_rows = [
         r

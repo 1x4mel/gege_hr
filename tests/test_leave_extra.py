@@ -835,9 +835,7 @@ def test_lx24_add_comment_inserts_and_publishes(mod):  # LX24 (P1)
         return _Frappe.get_doc(stub, *a, **k)
 
     stub.get_doc = _get_doc
-    res = m.add_leave_extra_comment(
-        doctype="Leave Encashment", name=created["name"], text="xin duyệt sớm"
-    )
+    res = m.add_leave_extra_comment(doctype="Leave Encashment", name=created["name"], text="xin duyệt sớm")
     assert res["content"] == "xin duyệt sớm"
     assert res["owner"]
     assert events[-1][1]["status"] == "Comment"

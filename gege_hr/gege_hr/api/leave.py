@@ -544,8 +544,8 @@ def update_draft(name: str | None = None, **kwargs) -> dict:
         doc.to_date = getdate(kwargs["to_date"])
     doc.half_day = 1 if leave_utils.to_bool(kwargs.get("half_day")) else 0
     if doc.half_day:
-        doc.half_day_date = (
-            leave_utils.coerce_date(kwargs.get("half_day_date")) or getattr(doc, "from_date", None)
+        doc.half_day_date = leave_utils.coerce_date(kwargs.get("half_day_date")) or getattr(
+            doc, "from_date", None
         )
     if "description" in kwargs:
         doc.description = kwargs.get("description") or ""
@@ -586,9 +586,7 @@ def update_draft(name: str | None = None, **kwargs) -> dict:
     audit_api.log(
         "Leave Update Draft",
         doc=doc.as_dict(),
-        description=(
-            "gửi lại đơn sau khi bị từ chối: " if was_rejected else "sửa đơn nháp: "
-        )
+        description=("gửi lại đơn sau khi bị từ chối: " if was_rejected else "sửa đơn nháp: ")
         + str(doc.name),
     )
     _touch_calendar(doc)

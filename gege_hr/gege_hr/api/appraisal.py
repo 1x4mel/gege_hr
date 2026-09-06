@@ -403,8 +403,7 @@ def get_goal(name: str | None = None) -> dict:
     _assert_own(doc.employee)
 
     children_rows = (
-        frappe.get_all(GOAL_DOCTYPE, filters=[["parent_goal", "=", name]], fields=["name", "status"])
-        or []
+        frappe.get_all(GOAL_DOCTYPE, filters=[["parent_goal", "=", name]], fields=["name", "status"]) or []
     )
     total = len(children_rows)
     counts = {"Completed": 0, "In Progress": 0, "Pending": 0}
@@ -423,7 +422,9 @@ def get_goal(name: str | None = None) -> dict:
         "in_progress": counts["In Progress"],
         "pending": counts["Pending"],
     }
-    out["completion_count"] = f"{counts['Completed']}/{total} hoàn thành" if _to_bool(doc.is_group) and total else ""
+    out["completion_count"] = (
+        f"{counts['Completed']}/{total} hoàn thành" if _to_bool(doc.is_group) and total else ""
+    )
     out["can"] = goal_can(doc.status, getattr(doc, "is_group", 0), total)
     return out
 
@@ -550,9 +551,7 @@ def list_goal_children(name: str | None = None) -> dict:
     children = []
     for row in rows:
         child = dict(row)
-        child["has_children"] = bool(
-            frappe.db.count(GOAL_DOCTYPE, [["parent_goal", "=", row.get("name")]])
-        )
+        child["has_children"] = bool(frappe.db.count(GOAL_DOCTYPE, [["parent_goal", "=", row.get("name")]]))
         children.append(child)
     return {"parent": name, "children": children}
 

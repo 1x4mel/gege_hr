@@ -327,10 +327,34 @@ def test_lv10_delete_draft_denies_other_employee(fake):
 # --------------------------------------------------------------------------- #
 def test_lv11_get_leave_application_can_matrix(fake):
     cases = [
-        (_FakeDoc("A", status="Open", docstatus=0), {"edit": True, "delete": True, "resubmit": False, "cancel_draft": True, "request_cancel": False}),
-        (_FakeDoc("B", status="Rejected", docstatus=0), {"edit": True, "delete": True, "resubmit": True, "cancel_draft": False, "request_cancel": False}),
-        (_FakeDoc("C", status="Approved", docstatus=1), {"edit": False, "delete": False, "resubmit": False, "cancel_draft": False, "request_cancel": True}),
-        (_FakeDoc("D", status="Cancelled", docstatus=2), {"edit": False, "delete": False, "resubmit": False, "cancel_draft": False, "request_cancel": False}),
+        (
+            _FakeDoc("A", status="Open", docstatus=0),
+            {"edit": True, "delete": True, "resubmit": False, "cancel_draft": True, "request_cancel": False},
+        ),
+        (
+            _FakeDoc("B", status="Rejected", docstatus=0),
+            {"edit": True, "delete": True, "resubmit": True, "cancel_draft": False, "request_cancel": False},
+        ),
+        (
+            _FakeDoc("C", status="Approved", docstatus=1),
+            {
+                "edit": False,
+                "delete": False,
+                "resubmit": False,
+                "cancel_draft": False,
+                "request_cancel": True,
+            },
+        ),
+        (
+            _FakeDoc("D", status="Cancelled", docstatus=2),
+            {
+                "edit": False,
+                "delete": False,
+                "resubmit": False,
+                "cancel_draft": False,
+                "request_cancel": False,
+            },
+        ),
     ]
     for doc, expected in cases:
         fake.wire([doc])
@@ -344,7 +368,14 @@ def test_lv12_get_leave_application_attachments_and_cancellation(fake):
     fake.wire([doc])
     fake.db.configure(
         "File",
-        [{"name": "F1", "file_name": "don-benh.jpg", "file_url": "/private/files/don-benh.jpg", "is_private": 1}],
+        [
+            {
+                "name": "F1",
+                "file_name": "don-benh.jpg",
+                "file_url": "/private/files/don-benh.jpg",
+                "is_private": 1,
+            }
+        ],
     )
     fake.db.configure(
         "VN Leave Cancellation Request",

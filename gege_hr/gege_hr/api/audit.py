@@ -165,9 +165,7 @@ def _stamp_export(*, company, first_company, filters: dict, rows: int, truncated
         record(
             audit_type="Manual Override",
             company=company or first_company,
-            description=_("Xuất CSV nhật ký kiểm toán: {0} dòng (truncated={1})").format(
-                rows, truncated
-            ),
+            description=_("Xuất CSV nhật ký kiểm toán: {0} dòng (truncated={1})").format(rows, truncated),
             new_value={
                 "filters": {k: v for k, v in (filters or {}).items()},
                 "rows": rows,

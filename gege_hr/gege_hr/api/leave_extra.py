@@ -892,9 +892,7 @@ def leave_extra_context() -> dict:
             )
             or []
         )
-        earning = sorted(
-            r.get("name") for r in comp_rows if str(r.get("type") or "").lower() == "earning"
-        )
+        earning = sorted(r.get("name") for r in comp_rows if str(r.get("type") or "").lower() == "earning")
     except Exception:
         earning = []
     company = None
@@ -962,9 +960,7 @@ def update_leave_encashment(name=None, leave_type=None, encashment_days=None, ea
         frappe.throw("Cần loại phép + số ngày đổi > 0.")
     remaining = remaining_leave_days(doc.get("employee"), new_type)
     if remaining is not None and new_days > remaining + 1e-9:
-        frappe.throw(
-            f"Số ngày đổi ({new_days:g}) vượt số dư phép còn lại ({remaining:g}) của loại phép này."
-        )
+        frappe.throw(f"Số ngày đổi ({new_days:g}) vượt số dư phép còn lại ({remaining:g}) của loại phép này.")
     doc.leave_type = new_type
     doc.encashment_days = new_days
     if earning_component:

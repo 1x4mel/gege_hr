@@ -81,7 +81,11 @@ class _FakeDB:
     def _filtered(self, doctype, filters, or_filters=None):
         rows = list(self.rows.get(doctype, []))
         if filters:
-            conds = [f if isinstance(f, list) else [f, "=", filters[f]] for f in filters] if isinstance(filters, dict) else filters
+            conds = (
+                [f if isinstance(f, list) else [f, "=", filters[f]] for f in filters]
+                if isinstance(filters, dict)
+                else filters
+            )
             rows = [r for r in rows if all(self._match(r, c) for c in conds)]
         if or_filters:
             rows = [r for r in rows if any(self._match(r, c) for c in or_filters)]
@@ -93,11 +97,15 @@ class _FakeDB:
 
     def get_value(self, doctype, name, *args, as_dict=False, order_by=None, **kw):
         if isinstance(name, dict):
-            rows = [r for r in self.rows.get(doctype, []) if all(
-                self._match(r, c if isinstance(c, list) else [c, "=", name[c]]) for c in name
-            )]
+            rows = [
+                r
+                for r in self.rows.get(doctype, [])
+                if all(self._match(r, c if isinstance(c, list) else [c, "=", name[c]]) for c in name)
+            ]
         else:
-            rows = [r for r in self.rows.get(doctype, []) if r.get("name") == name or r.get("employee") == name]
+            rows = [
+                r for r in self.rows.get(doctype, []) if r.get("name") == name or r.get("employee") == name
+            ]
         if order_by:
             field = order_by.split()[0]
             rows = sorted(rows, key=lambda r: str(r.get(field) or ""), reverse="desc" in order_by)
@@ -110,10 +118,15 @@ class _FakeDB:
         out = {f: r.get(f) for f in fields}
         return out if (as_dict or not isinstance(args[0], str)) else out[fields[0]]
 
-    def get_all(self, doctype, filters=None, or_filters=None, fields=None,
-                limit_page_length=None, limit_start=0, **kw):
+    def get_all(
+        self, doctype, filters=None, or_filters=None, fields=None, limit_page_length=None, limit_start=0, **kw
+    ):
         rows = self._filtered(doctype, filters, or_filters)
-        rows = rows[int(limit_start or 0):][: int(limit_page_length or 0)] if limit_page_length else rows[int(limit_start or 0):]
+        rows = (
+            rows[int(limit_start or 0) :][: int(limit_page_length or 0)]
+            if limit_page_length
+            else rows[int(limit_start or 0) :]
+        )
         if fields:
             rows = [{f: r.get(f) for f in fields} for r in rows]
         return rows

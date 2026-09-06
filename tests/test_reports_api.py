@@ -83,8 +83,16 @@ class _FilterRow(types.SimpleNamespace):
 class FakeReportDoc:
     """Minimal Report doc: .get() over the payload + roles/filters children."""
 
-    def __init__(self, name, ref_doctype, roles=("HR Manager", "HR User"), disabled=0,
-                 report_type="Script Report", filters=None, add_total_row=0):
+    def __init__(
+        self,
+        name,
+        ref_doctype,
+        roles=("HR Manager", "HR User"),
+        disabled=0,
+        report_type="Script Report",
+        filters=None,
+        add_total_row=0,
+    ):
         self.name = name
         self.report_name = name
         self.ref_doctype = ref_doctype
@@ -101,12 +109,27 @@ class FakeReportDoc:
 
 
 ALLOWLISTED_DOC = FakeReportDoc(
-    "Monthly Attendance Sheet", "Attendance",
+    "Monthly Attendance Sheet",
+    "Attendance",
     filters=[
-        {"fieldname": "company", "label": "Company", "fieldtype": "Link",
-         "options": "Company", "default": None, "reqd": 1, "depends_on": None},
-        {"fieldname": "month", "label": "Month", "fieldtype": "Select",
-         "options": "\nJanuary\nFebruary", "default": "January", "reqd": 0, "depends_on": None},
+        {
+            "fieldname": "company",
+            "label": "Company",
+            "fieldtype": "Link",
+            "options": "Company",
+            "default": None,
+            "reqd": 1,
+            "depends_on": None,
+        },
+        {
+            "fieldname": "month",
+            "label": "Month",
+            "fieldtype": "Select",
+            "options": "\nJanuary\nFebruary",
+            "default": "January",
+            "reqd": 0,
+            "depends_on": None,
+        },
     ],
 )
 
@@ -142,7 +165,7 @@ def harness(monkeypatch):
         return h.docs.get(name) or FakeReportDoc(name, reports.REPORT_ALLOWLIST[name])
 
     mod.get_doc = _get_doc
-    mod.db.exists = lambda doctype, name: (name in h.exists)
+    mod.db.exists = lambda doctype, name: name in h.exists
     return h
 
 
@@ -239,9 +262,9 @@ def test_rp8_run_report_disabled(harness):
 # RP6 — the engine's permission errors are translated to Vietnamese
 # --------------------------------------------------------------------------- #
 def test_rp6_run_report_translates_permission_error(harness):
-    monkey_engine = _build_engine_stub(error=_FrappePermissionError(
-        "Must have report permission to access this report."
-    ))
+    monkey_engine = _build_engine_stub(
+        error=_FrappePermissionError("Must have report permission to access this report.")
+    )
     harness_mod_engine = sys.modules["frappe.desk.query_report"]
     harness_mod_engine.run = monkey_engine.run
     with pytest.raises(_FrappePermissionError, match="Bạn không có quyền chạy báo cáo này"):
@@ -263,9 +286,7 @@ def test_rp6b_run_report_translates_link_filter_error(harness):
 # --------------------------------------------------------------------------- #
 def test_rp7_run_report_propagates_validation(harness):
     harness_mod_engine = sys.modules["frappe.desk.query_report"]
-    harness_mod_engine.run = _build_engine_stub(
-        error=_FrappeValidationError("Please select company.")
-    ).run
+    harness_mod_engine.run = _build_engine_stub(error=_FrappeValidationError("Please select company.")).run
     with pytest.raises(_FrappeValidationError, match="Please select company."):
         harness.api.run_report("Monthly Attendance Sheet", filters={})
 
@@ -279,8 +300,13 @@ def test_rp5_report_meta_filters_shape(harness):
     assert meta["ref_doctype"] == "Attendance"
     assert [f["fieldname"] for f in meta["filters"]] == ["company", "month"]
     assert meta["filters"][0] == {
-        "fieldname": "company", "label": "Company", "fieldtype": "Link",
-        "options": "Company", "default": None, "reqd": 1, "depends_on": None,
+        "fieldname": "company",
+        "label": "Company",
+        "fieldtype": "Link",
+        "options": "Company",
+        "default": None,
+        "reqd": 1,
+        "depends_on": None,
     }
 
 

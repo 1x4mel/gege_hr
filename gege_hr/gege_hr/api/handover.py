@@ -105,9 +105,7 @@ def _publish_handover() -> None:
 def _attach_employee_names(rows: list[dict]) -> list[dict]:
     """Enrich rows with ``from_employee_name`` / ``to_employee_name`` (one
     batched Employee lookup per page; degrades silently)."""
-    ids = sorted(
-        {r.get(key) for r in rows for key in ("from_employee", "to_employee") if r.get(key)}
-    )
+    ids = sorted({r.get(key) for r in rows for key in ("from_employee", "to_employee") if r.get(key)})
     names: dict = {}
     if ids:
         try:
@@ -405,10 +403,7 @@ def handover_leave_options(
         out = [
             r
             for r in out
-            if any(
-                q in str(r.get(key) or "").lower()
-                for key in ("name", "leave_type", "from_employee_name")
-            )
+            if any(q in str(r.get(key) or "").lower() for key in ("name", "leave_type", "from_employee_name"))
         ]
     return out
 
@@ -773,9 +768,7 @@ def update_handover_status(name: str, status: str, note: str | None = None) -> d
             frappe.flags.ignore_permissions = False
     else:
         doc.save(ignore_permissions=is_hr)
-    audit_api.log(
-        audit_action, doc=_doc_snapshot(doc), description=f"{name}: {current} → {status}"
-    )
+    audit_api.log(audit_action, doc=_doc_snapshot(doc), description=f"{name}: {current} → {status}")
     # Notify the original owner when their handover is completed/cancelled.
     if status in ("Completed", "Cancelled") and doc.from_employee:
         notify.push_notification(

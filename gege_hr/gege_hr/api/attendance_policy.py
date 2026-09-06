@@ -426,7 +426,7 @@ def lock_policy(name: str, locked: int = 1) -> dict:
     doc.set("is_locked", target)
     doc.flags.ignore_permissions = True
     doc.save(ignore_permissions=True)
-    action = _("Khoá chính sách \"{0}\"") if target else _("Mở khoá chính sách \"{0}\"")
+    action = _('Khoá chính sách "{0}"') if target else _('Mở khoá chính sách "{0}"')
     _audit_admin(
         action.format(doc.name),
         reference_doctype=DOCTYPE,
@@ -452,9 +452,7 @@ def delete_policy(name: str) -> dict:
     try:
         frappe.delete_doc(DOCTYPE, name, ignore_permissions=True)
     except frappe.LinkExistsError:
-        frappe.throw(
-            _("Chính sách đang được tham chiếu (phiên chấm công / kỳ lương), không xoá được.")
-        )
+        frappe.throw(_("Chính sách đang được tham chiếu (phiên chấm công / kỳ lương), không xoá được."))
     _audit_admin(
         _('Xoá chính sách "{0}"').format(name),
         reference_doctype=DOCTYPE,

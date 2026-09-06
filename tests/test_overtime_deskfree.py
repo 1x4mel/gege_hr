@@ -81,10 +81,10 @@ class FakeDoc:
 
 class FakeStore:
     def __init__(self):
-        self.docs: dict[str, dict] = {}          # DOCTYPE docs by name (DB truth)
-        self.queries: dict[str, list[dict]] = {} # get_all rows per doctype
-        self.values: dict[str, dict] = {}        # get_value maps per doctype
-        self.exists: dict[str, str] = {}         # exists() truths
+        self.docs: dict[str, dict] = {}  # DOCTYPE docs by name (DB truth)
+        self.queries: dict[str, list[dict]] = {}  # get_all rows per doctype
+        self.values: dict[str, dict] = {}  # get_value maps per doctype
+        self.exists: dict[str, str] = {}  # exists() truths
         self.inserted: list[str] = []
         self.publish_calls: list[tuple] = []
         self.audit_calls: list[tuple] = []
@@ -112,10 +112,10 @@ class FakeDB:
                 return False
         return True
 
-    def get_all(self, doctype, filters=None, fields=None, order_by=None,
-                limit_page_length=None, pluck=None, **kw):
-        rows = [dict(r) for r in self._store.queries.get(doctype, [])
-                if self._match(r, filters)]
+    def get_all(
+        self, doctype, filters=None, fields=None, order_by=None, limit_page_length=None, pluck=None, **kw
+    ):
+        rows = [dict(r) for r in self._store.queries.get(doctype, []) if self._match(r, filters)]
         if pluck:
             return [r.get(pluck) for r in rows]
         if fields:
@@ -153,6 +153,7 @@ def _install_stub(monkeypatch, store: FakeStore):
         def deco(f):
             recorded.add(getattr(f, "__name__", ""))
             return f
+
         return deco(fn) if fn is not None else deco
 
     mod.whitelist = _whitelist
@@ -160,6 +161,7 @@ def _install_stub(monkeypatch, store: FakeStore):
     mod.PermissionError = type("PermissionError", (Exception,), {})
     mod.ValidationError = type("ValidationError", (Exception,), {})
     mod.DoesNotExistError = type("DoesNotExistError", (Exception,), {})
+
     def _throw(msg, exc=None):
         # Raise an instance of the REQUESTED class so pytest.raises(frappe.X)
         # matches exactly like the real frappe.throw.
@@ -278,7 +280,8 @@ def _seed_doc(store, name="OR-1", employee="EMP-1", state="Draft", docstatus=0, 
     store.docs[name] = row
     store.queries.setdefault(DOCTYPE, []).append(row)
     store.values.setdefault("Employee", {})[employee] = {
-        "employee_name": row["employee_name"], "department": "IT",
+        "employee_name": row["employee_name"],
+        "department": "IT",
     }
     return row
 
@@ -294,24 +297,46 @@ class TestGetOvertimeRequest:
 
     def test_od1_shape_and_links(self, ot, store, monkeypatch):
         _seed_doc(store)
-        store.values["VN Employee Shift Instance"] = {"SI-1": {
-            "name": "SI-1", "shift_type": "Ca A", "planned_start": "2026-09-01 08:00:00",
-            "planned_end": "2026-09-01 17:00:00",
-        }}
-        store.values["VN Attendance Work Session"] = {"WS-1": {
-            "name": "WS-1", "total_actual_hours": 9.5, "raw_overtime_hours": 2.5,
-            "approved_overtime_hours": 0, "calculation_status": "Computed",
-        }}
+        store.values["VN Employee Shift Instance"] = {
+            "SI-1": {
+                "name": "SI-1",
+                "shift_type": "Ca A",
+                "planned_start": "2026-09-01 08:00:00",
+                "planned_end": "2026-09-01 17:00:00",
+            }
+        }
+        store.values["VN Attendance Work Session"] = {
+            "WS-1": {
+                "name": "WS-1",
+                "total_actual_hours": 9.5,
+                "raw_overtime_hours": 2.5,
+                "approved_overtime_hours": 0,
+                "calculation_status": "Computed",
+            }
+        }
         store.queries["File"] = [
-            {"name": "F1", "file_name": "a.pdf", "file_url": "/private/files/a.pdf",
-             "is_private": 1, "file_size": 10,
-             "attached_to_doctype": DOCTYPE, "attached_to_name": "OR-1"},
+            {
+                "name": "F1",
+                "file_name": "a.pdf",
+                "file_url": "/private/files/a.pdf",
+                "is_private": 1,
+                "file_size": 10,
+                "attached_to_doctype": DOCTYPE,
+                "attached_to_name": "OR-1",
+            },
         ]
         store.queries["VN Approval Log"] = [
-            {"name": "L1", "action": "Reject", "from_state": "Pending Manager",
-             "to_state": "Rejected", "actor": "mgr@x", "comment": "thiếu lý do",
-             "creation": "2026-09-02",
-             "reference_doctype": DOCTYPE, "reference_name": "OR-1"},
+            {
+                "name": "L1",
+                "action": "Reject",
+                "from_state": "Pending Manager",
+                "to_state": "Rejected",
+                "actor": "mgr@x",
+                "comment": "thiếu lý do",
+                "creation": "2026-09-02",
+                "reference_doctype": DOCTYPE,
+                "reference_name": "OR-1",
+            },
         ]
         out = self._run(ot, store, monkeypatch, is_hr=False, caller="EMP-1")
         assert out["doc"]["name"] == "OR-1"
@@ -326,18 +351,48 @@ class TestGetOvertimeRequest:
     def test_od1_can_matrix_six_branches(self, ot, store, monkeypatch):
         cases = [
             # (state, docstatus, is_hr, caller) -> expected can dict
-            ("Draft", 0, False, "EMP-1", dict(edit=True, cancel=True, resend=False, confirm=False,
-                                              upload=True, remove_file=True)),
-            ("Pending Manager", 0, False, "EMP-1", dict(edit=False, cancel=True, resend=False,
-                                                        confirm=False, upload=False, remove_file=False)),
-            ("Rejected", 0, False, "EMP-1", dict(edit=False, cancel=False, resend=True,
-                                                confirm=False, upload=False, remove_file=False)),
-            ("Draft", 0, True, None, dict(edit=True, cancel=True, resend=False, confirm=False,
-                                          upload=True, remove_file=True)),
-            ("Approved", 0, True, None, dict(edit=False, cancel=False, resend=False, confirm=True,
-                                             upload=False, remove_file=False)),
-            ("Confirmed", 1, True, None, dict(edit=False, cancel=False, resend=False, confirm=False,
-                                              upload=False, remove_file=False)),
+            (
+                "Draft",
+                0,
+                False,
+                "EMP-1",
+                dict(edit=True, cancel=True, resend=False, confirm=False, upload=True, remove_file=True),
+            ),
+            (
+                "Pending Manager",
+                0,
+                False,
+                "EMP-1",
+                dict(edit=False, cancel=True, resend=False, confirm=False, upload=False, remove_file=False),
+            ),
+            (
+                "Rejected",
+                0,
+                False,
+                "EMP-1",
+                dict(edit=False, cancel=False, resend=True, confirm=False, upload=False, remove_file=False),
+            ),
+            (
+                "Draft",
+                0,
+                True,
+                None,
+                dict(edit=True, cancel=True, resend=False, confirm=False, upload=True, remove_file=True),
+            ),
+            (
+                "Approved",
+                0,
+                True,
+                None,
+                dict(edit=False, cancel=False, resend=False, confirm=True, upload=False, remove_file=False),
+            ),
+            (
+                "Confirmed",
+                1,
+                True,
+                None,
+                dict(edit=False, cancel=False, resend=False, confirm=False, upload=False, remove_file=False),
+            ),
         ]
         for i, (state, docstatus, is_hr, caller, expected) in enumerate(cases):
             _seed_doc(store, name=f"OR-C{i}", state=state, docstatus=docstatus)
@@ -439,8 +494,13 @@ class TestUpdateOvertimeRequest:
         _seed_doc(store)
         self._patch_actor(ot, monkeypatch)
         ot.update_overtime_request(
-            name="OR-1", reason="ok", name_alt=None, employee="EMP-9", company="HACK",
-            docstatus=1, workflow_state="Approved",
+            name="OR-1",
+            reason="ok",
+            name_alt=None,
+            employee="EMP-9",
+            company="HACK",
+            docstatus=1,
+            workflow_state="Approved",
         )
         saved = store.docs["OR-1"]
         assert saved["employee"] == "EMP-1"
@@ -480,8 +540,12 @@ class TestAllOvertimeRequests:
     def _seed(self, store):
         _seed_doc(store, name="OR-A", employee="EMP-1", state="Pending Manager")
         _seed_doc(
-            store, name="OR-B", employee="EMP-2", state="Approved",
-            employee_name="Nhân viên Hai", approved_hours=3.0,
+            store,
+            name="OR-B",
+            employee="EMP-2",
+            state="Approved",
+            employee_name="Nhân viên Hai",
+            approved_hours=3.0,
         )
         store.queries["Employee"] = [
             {"name": "EMP-1", "employee_name": "Nhân viên Một", "department": "IT"},
@@ -540,9 +604,7 @@ class TestRealtimeAndComment:
     def test_od15_publish_helper(self, ot, store):
         ot._publish_overtime(types.SimpleNamespace(name="OR-1"))
         ot._publish_overtime(None)
-        assert store.publish_calls[0] == (
-            "overtime_updated", {"doctype": DOCTYPE, "name": "OR-1"}
-        )
+        assert store.publish_calls[0] == ("overtime_updated", {"doctype": DOCTYPE, "name": "OR-1"})
         assert store.publish_calls[1][1]["name"] is None
 
     def test_od15_publish_never_raises(self, ot, store, monkeypatch):
@@ -603,9 +665,13 @@ class TestRealtimeAndComment:
 
         monkeypatch.setattr(approval.frappe, "new_doc", lambda dt: _Log())
         approval._write_log(
-            transaction_type="Overtime Request", name="OR-1", action="Reject",
-            from_state="Pending HR", to_state="Rejected",
-            comment="ngoài giờ cho phép", actor="mgr@x",
+            transaction_type="Overtime Request",
+            name="OR-1",
+            action="Reject",
+            from_state="Pending HR",
+            to_state="Rejected",
+            comment="ngoài giờ cho phép",
+            actor="mgr@x",
         )
         assert created["inserted"] is True
         assert created["reference_doctype"] == DOCTYPE
@@ -625,10 +691,7 @@ class TestSeedFixAndContracts:
         assert ("Pending HR", "Reject", "Rejected", "Employee") in rows
         # Shared blueprint → the fix lands on Correction + Salary Advance too.
         for spec in sw._WORKFLOWS:
-            keys = {
-                (t["state"], t["action"], t["next_state"], t["allowed"])
-                for t in spec["transitions"]
-            }
+            keys = {(t["state"], t["action"], t["next_state"], t["allowed"]) for t in spec["transitions"]}
             assert ("Pending HR", "Reject", "Rejected", "Employee") in keys, spec["name"]
 
     def test_od17_employee_can_cancel_pending_hr_with_fixed_seed(self, monkeypatch, store):
@@ -663,8 +726,13 @@ class TestSeedFixAndContracts:
 
         importlib.reload(sw)
         existing = [
-            {"state": "Pending HR", "action": "Reject", "next_state": "Rejected",
-             "allowed": "HR User", "allow_self_approval": 1},
+            {
+                "state": "Pending HR",
+                "action": "Reject",
+                "next_state": "Rejected",
+                "allowed": "HR User",
+                "allow_self_approval": 1,
+            },
         ]
         appended = []
         saved = []
@@ -706,9 +774,13 @@ class TestSeedFixAndContracts:
     def test_od19_submit_publishes_realtime(self, ot, store, monkeypatch):
         monkeypatch.setattr(ot, "send_for_approval", lambda doc: None)
         out = ot.submit_overtime_request(
-            employee="EMP-1", work_date="2026-09-03", overtime_type="Post-shift",
-            from_datetime="2026-09-03 17:00:00", to_datetime="2026-09-03 19:00:00",
-            requested_hours=2, reason="gấp",
+            employee="EMP-1",
+            work_date="2026-09-03",
+            overtime_type="Post-shift",
+            from_datetime="2026-09-03 17:00:00",
+            to_datetime="2026-09-03 19:00:00",
+            requested_hours=2,
+            reason="gấp",
         )
         assert out["name"] == "OR-NEW"
         assert any(e == "overtime_updated" for e, _ in store.publish_calls)

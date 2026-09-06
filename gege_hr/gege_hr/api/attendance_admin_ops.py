@@ -138,7 +138,10 @@ def _guard_writable_date(work_date: str | None, label: str = "ngày") -> None:
 def _require_reason(reason: str | None) -> str:
     r = (reason or "").strip()
     if len(r) < 3:
-        frappe.throw(frappe._("Lý do thao tác là bắt buộc (tối thiểu 3 ký tự) để lưu vết kiểm toán."), frappe.ValidationError)
+        frappe.throw(
+            frappe._("Lý do thao tác là bắt buộc (tối thiểu 3 ký tự) để lưu vết kiểm toán."),
+            frappe.ValidationError,
+        )
     return r
 
 
@@ -190,7 +193,13 @@ def _as_list(value) -> list[str]:
 
 
 # ---- lazy gege_hr indirections (monkeypatch seams for bench-free tests) ---- #
-def _audit(action: str, employee: str | None = None, reference_doctype: str | None = None, reference_name: str | None = None, description: str = "") -> None:
+def _audit(
+    action: str,
+    employee: str | None = None,
+    reference_doctype: str | None = None,
+    reference_name: str | None = None,
+    description: str = "",
+) -> None:
     """Best-effort VN Audit Event write — never blocks the business operation."""
     try:
         from gege_hr.gege_hr.api import audit as audit_api
@@ -394,7 +403,11 @@ def list_checkins(
     filters: list = [
         ["employee", "=", employee],
         ["time", ">=", _dt.datetime.combine(start, _dt.time.min).strftime("%Y-%m-%d %H:%M:%S")],
-        ["time", "<", _dt.datetime.combine(end + _dt.timedelta(days=1), _dt.time.min).strftime("%Y-%m-%d %H:%M:%S")],
+        [
+            "time",
+            "<",
+            _dt.datetime.combine(end + _dt.timedelta(days=1), _dt.time.min).strftime("%Y-%m-%d %H:%M:%S"),
+        ],
     ]
     lt = (log_type or "").strip().upper()
     if lt:
@@ -742,9 +755,7 @@ def approve_session_overtime(
     except (TypeError, ValueError):
         raw = 0.0
     if raw <= 0:
-        frappe.throw(
-            frappe._("Phiên này không có giờ tăng ca thô để duyệt."), frappe.ValidationError
-        )
+        frappe.throw(frappe._("Phiên này không có giờ tăng ca thô để duyệt."), frappe.ValidationError)
     try:
         requested = float(hours) if hours is not None else raw
     except (TypeError, ValueError):

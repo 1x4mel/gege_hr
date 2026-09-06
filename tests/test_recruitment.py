@@ -143,7 +143,9 @@ class _Frappe:
 
         def keep(r):
             for cond in conds(filters):
-                if not _match(r.get(cond[0]), cond[1] if len(cond) > 2 else "=", cond[2] if len(cond) > 2 else cond[1]):
+                if not _match(
+                    r.get(cond[0]), cond[1] if len(cond) > 2 else "=", cond[2] if len(cond) > 2 else cond[1]
+                ):
                     return False
             if or_filters:
                 if not any(
@@ -501,8 +503,21 @@ def test_b19_recruitment_filter_options_standard_keys(mod):
         ("delete_job_opening", {"name": "JO-1"}),
         ("get_applicant", {"name": "JA-1"}),
         ("set_applicant_status", {"name": "JA-1", "status": "Replied"}),
-        ("save_interview_round", {"payload": {"round_name": "R", "designation": "D", "interviewers": ["u@x"]}}),
-        ("schedule_interview", {"payload": {"job_applicant": "JA-1", "interview_round": "R", "scheduled_on": "2026-01-01", "interviewers": ["u@x"]}}),
+        (
+            "save_interview_round",
+            {"payload": {"round_name": "R", "designation": "D", "interviewers": ["u@x"]}},
+        ),
+        (
+            "schedule_interview",
+            {
+                "payload": {
+                    "job_applicant": "JA-1",
+                    "interview_round": "R",
+                    "scheduled_on": "2026-01-01",
+                    "interviewers": ["u@x"],
+                }
+            },
+        ),
         ("save_job_offer", {"payload": {"job_applicant": "JA-1", "offer_date": "2026-01-01"}}),
         ("set_job_offer_status", {"name": "JOF-1", "status": "Accepted"}),
     ],

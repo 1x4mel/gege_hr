@@ -46,9 +46,7 @@ ALLOWED_TRANSITIONS: dict[str, tuple[str, ...]] = {
 # --------------------------------------------------------------------------- #
 # Pure helpers
 # --------------------------------------------------------------------------- #
-def can_transition(
-    current: str | None, target: str | None, docstatus: int | None = None
-) -> bool:
+def can_transition(current: str | None, target: str | None, docstatus: int | None = None) -> bool:
     """Whether a handover may move from ``current`` → ``target`` status.
 
     ``docstatus`` (optional — plan-handover-deskfree H1) tightens the table

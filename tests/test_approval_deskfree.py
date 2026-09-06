@@ -71,14 +71,14 @@ class FakeDoc:
 
 class FakeStore:
     def __init__(self):
-        self.docs: dict[str, dict] = {}          # get_doc truth by name
-        self.queries: dict[str, list[dict]] = {} # db.get_all rows per doctype
+        self.docs: dict[str, dict] = {}  # get_doc truth by name
+        self.queries: dict[str, list[dict]] = {}  # db.get_all rows per doctype
         self.mod_queries: dict[str, list[dict]] = {}  # frappe.get_all rows (Comment/File)
-        self.values: dict[str, dict] = {}        # db.get_value maps per doctype
-        self.inserted: list[str] = []            # names inserted via FakeDoc.insert
-        self.deleted: list[str] = []             # names removed via frappe.delete_doc
-        self.mails: list[tuple] = []             # (recipients, subject) via frappe.sendmail
-        self.single: dict = {}                   # db.get_single_value map (field → value)
+        self.values: dict[str, dict] = {}  # db.get_value maps per doctype
+        self.inserted: list[str] = []  # names inserted via FakeDoc.insert
+        self.deleted: list[str] = []  # names removed via frappe.delete_doc
+        self.mails: list[tuple] = []  # (recipients, subject) via frappe.sendmail
+        self.single: dict = {}  # db.get_single_value map (field → value)
 
 
 class FakeDB:
@@ -131,10 +131,10 @@ class FakeDB:
                     return False
         return True
 
-    def get_all(self, doctype, filters=None, fields=None, order_by=None,
-                limit_page_length=None, pluck=None, **kw):
-        rows = [dict(r) for r in self._store.queries.get(doctype, [])
-                if self._match(r, filters)]
+    def get_all(
+        self, doctype, filters=None, fields=None, order_by=None, limit_page_length=None, pluck=None, **kw
+    ):
+        rows = [dict(r) for r in self._store.queries.get(doctype, []) if self._match(r, filters)]
         if pluck:
             return [r.get(pluck) for r in rows]
         if fields:
@@ -168,6 +168,7 @@ def _install_stub(monkeypatch, store: FakeStore):
     def _whitelist(fn=None, **kw):
         def deco(f):
             return f
+
         return deco(fn) if fn is not None else deco
 
     mod.whitelist = _whitelist
@@ -209,8 +210,7 @@ def _install_stub(monkeypatch, store: FakeStore):
     mod.parse_json = lambda v: v
 
     def _mod_get_all(doctype, filters=None, fields=None, order_by=None, limit=None, pluck=None, **kw):
-        rows = [dict(r) for r in store.mod_queries.get(doctype, [])
-                if FakeDB._match(r, filters)]
+        rows = [dict(r) for r in store.mod_queries.get(doctype, []) if FakeDB._match(r, filters)]
         if pluck:
             return [r.get(pluck) for r in rows]
         if fields:
@@ -237,9 +237,7 @@ def _install_stub(monkeypatch, store: FakeStore):
     import datetime as _dtmod
 
     utils.now_datetime = lambda: _dtmod.datetime(2026, 9, 5, 12, 0, 0)
-    utils.get_datetime = lambda v=None: (
-        _dtmod.datetime.fromisoformat(str(v).replace(" ", "T")) if v else None
-    )
+    utils.get_datetime = lambda v=None: _dtmod.datetime.fromisoformat(str(v).replace(" ", "T")) if v else None
     mod.utils = utils
 
     monkeypatch.setitem(sys.modules, "frappe", mod)
@@ -267,35 +265,39 @@ def approval(monkeypatch, store):
 
 
 def _seed_ot_pending(store, employee="EMP-1", employee_name="An Nguyen", name="OR-1"):
-    store.queries.setdefault(OT_DT, []).append({
-        "name": name,
-        "employee": employee,
-        "employee_name": employee_name,
-        "docstatus": 0,
-        "creation": "2026-09-01 08:00:00",
-        "workflow_state": "Pending Manager",
-        "company": "GEGE",
-        "work_date": "2026-09-01",
-        "overtime_type": "Post Shift",
-        "requested_hours": 2.0,
-        "reason": "gấp deadline",
-    })
+    store.queries.setdefault(OT_DT, []).append(
+        {
+            "name": name,
+            "employee": employee,
+            "employee_name": employee_name,
+            "docstatus": 0,
+            "creation": "2026-09-01 08:00:00",
+            "workflow_state": "Pending Manager",
+            "company": "GEGE",
+            "work_date": "2026-09-01",
+            "overtime_type": "Post Shift",
+            "requested_hours": 2.0,
+            "reason": "gấp deadline",
+        }
+    )
 
 
 def _seed_leave_pending(store, name="LAP-1", employee="EMP-2", employee_name="Binh Tran"):
-    store.queries.setdefault(LEAVE_DT, []).append({
-        "name": name,
-        "employee": employee,
-        "employee_name": employee_name,
-        "docstatus": 0,
-        "creation": "2026-09-02 09:00:00",
-        "status": "Open",
-        "from_date": "2026-09-10",
-        "to_date": "2026-09-11",
-        "leave_type": "Casual Leave",
-        "total_leave_days": 2,
-        "description": "việc gia đình",
-    })
+    store.queries.setdefault(LEAVE_DT, []).append(
+        {
+            "name": name,
+            "employee": employee,
+            "employee_name": employee_name,
+            "docstatus": 0,
+            "creation": "2026-09-02 09:00:00",
+            "status": "Open",
+            "from_date": "2026-09-10",
+            "to_date": "2026-09-11",
+            "leave_type": "Casual Leave",
+            "total_leave_days": 2,
+            "description": "việc gia đình",
+        }
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -306,10 +308,12 @@ class TestFilterOptions:
         _seed_ot_pending(store, employee="EMP-1", employee_name="An Nguyen", name="OR-1")
         _seed_ot_pending(store, employee="EMP-2", employee_name="Binh Tran", name="OR-2")
         _seed_leave_pending(store, name="LAP-1", employee="EMP-1", employee_name="An Nguyen")
-        store.queries.setdefault("Employee", []).extend([
-            {"name": "EMP-1", "employee_name": "An Nguyen", "department": "Eng", "branch": "HN"},
-            {"name": "EMP-2", "employee_name": "Binh Tran", "department": "Sales", "branch": "HCM"},
-        ])
+        store.queries.setdefault("Employee", []).extend(
+            [
+                {"name": "EMP-1", "employee_name": "An Nguyen", "department": "Eng", "branch": "HN"},
+                {"name": "EMP-2", "employee_name": "Binh Tran", "department": "Sales", "branch": "HCM"},
+            ]
+        )
 
         out = approval.filter_options(approver="hr@x")
 
@@ -334,28 +338,61 @@ class TestFilterOptions:
 # --------------------------------------------------------------------------- #
 class TestProcessedBucket:
     def _seed_logs(self, store):
-        store.queries.setdefault(LOG_DT, []).extend([
-            {"reference_doctype": OT_DT, "reference_name": "OR-1", "action": "Approve",
-             "actor": "hr@x", "action_at": "2026-09-02 10:00:00"},
-            {"reference_doctype": LEAVE_DT, "reference_name": "LAP-1", "action": "Reject",
-             "actor": "hr@x", "action_at": "2026-09-03 11:00:00"},
-            # Another approver's log — must be filtered out by actor.
-            {"reference_doctype": OT_DT, "reference_name": "OR-2", "action": "Approve",
-             "actor": "other@x", "action_at": "2026-09-03 12:00:00"},
-        ])
+        store.queries.setdefault(LOG_DT, []).extend(
+            [
+                {
+                    "reference_doctype": OT_DT,
+                    "reference_name": "OR-1",
+                    "action": "Approve",
+                    "actor": "hr@x",
+                    "action_at": "2026-09-02 10:00:00",
+                },
+                {
+                    "reference_doctype": LEAVE_DT,
+                    "reference_name": "LAP-1",
+                    "action": "Reject",
+                    "actor": "hr@x",
+                    "action_at": "2026-09-03 11:00:00",
+                },
+                # Another approver's log — must be filtered out by actor.
+                {
+                    "reference_doctype": OT_DT,
+                    "reference_name": "OR-2",
+                    "action": "Approve",
+                    "actor": "other@x",
+                    "action_at": "2026-09-03 12:00:00",
+                },
+            ]
+        )
 
     def test_ad3_groups_by_type_with_last_action(self, approval, store):
         self._seed_logs(store)
-        store.queries.setdefault(OT_DT, []).append({
-            "name": "OR-1", "employee": "EMP-1", "employee_name": "An", "docstatus": 1,
-            "creation": "2026-09-01 08:00:00", "workflow_state": "Approved",
-            "company": "GEGE", "work_date": "2026-09-01", "reason": "ok",
-        })
-        store.queries.setdefault(LEAVE_DT, []).append({
-            "name": "LAP-1", "employee": "EMP-2", "employee_name": "Binh", "docstatus": 0,
-            "creation": "2026-09-02 09:00:00", "status": "Rejected",
-            "from_date": "2026-09-10", "to_date": "2026-09-11", "description": "x",
-        })
+        store.queries.setdefault(OT_DT, []).append(
+            {
+                "name": "OR-1",
+                "employee": "EMP-1",
+                "employee_name": "An",
+                "docstatus": 1,
+                "creation": "2026-09-01 08:00:00",
+                "workflow_state": "Approved",
+                "company": "GEGE",
+                "work_date": "2026-09-01",
+                "reason": "ok",
+            }
+        )
+        store.queries.setdefault(LEAVE_DT, []).append(
+            {
+                "name": "LAP-1",
+                "employee": "EMP-2",
+                "employee_name": "Binh",
+                "docstatus": 0,
+                "creation": "2026-09-02 09:00:00",
+                "status": "Rejected",
+                "from_date": "2026-09-10",
+                "to_date": "2026-09-11",
+                "description": "x",
+            }
+        )
 
         out = approval.get_pending_approvals(approver="hr@x", bucket="processed")
         by_type = {g["request_type"]: g for g in out["groups"]}
@@ -368,19 +405,29 @@ class TestProcessedBucket:
 
     def test_ad4_window_filters_on_action_at(self, approval, store):
         self._seed_logs(store)
-        store.queries.setdefault(OT_DT, []).append({
-            "name": "OR-1", "employee": "EMP-1", "employee_name": "An", "docstatus": 1,
-            "creation": "2026-09-01 08:00:00", "workflow_state": "Approved",
-        })
-        store.queries.setdefault(LEAVE_DT, []).append({
-            "name": "LAP-1", "employee": "EMP-2", "employee_name": "Binh", "docstatus": 0,
-            "creation": "2026-09-02 09:00:00", "status": "Rejected",
-        })
+        store.queries.setdefault(OT_DT, []).append(
+            {
+                "name": "OR-1",
+                "employee": "EMP-1",
+                "employee_name": "An",
+                "docstatus": 1,
+                "creation": "2026-09-01 08:00:00",
+                "workflow_state": "Approved",
+            }
+        )
+        store.queries.setdefault(LEAVE_DT, []).append(
+            {
+                "name": "LAP-1",
+                "employee": "EMP-2",
+                "employee_name": "Binh",
+                "docstatus": 0,
+                "creation": "2026-09-02 09:00:00",
+                "status": "Rejected",
+            }
+        )
 
         # from 2026-09-03 → only the 09-03 Reject log survives.
-        out = approval.get_pending_approvals(
-            approver="hr@x", bucket="processed", from_date="2026-09-03"
-        )
+        out = approval.get_pending_approvals(approver="hr@x", bucket="processed", from_date="2026-09-03")
         types_seen = {g["request_type"] for g in out["groups"]}
         assert types_seen == {LEAVE_TYPE}
 
@@ -415,27 +462,51 @@ class TestProcessedBucket:
 class TestGetRequestDetail:
     def _seed_ot_doc(self, store):
         store.docs["OR-1"] = {
-            "doctype": OT_DT, "name": "OR-1", "employee": "EMP-1",
-            "employee_name": "An Nguyen", "docstatus": 0,
-            "workflow_state": "Pending Manager", "company": "GEGE",
-            "work_date": "2026-09-01", "overtime_type": "Post Shift",
-            "requested_hours": 2.0, "reason": "gấp deadline",
+            "doctype": OT_DT,
+            "name": "OR-1",
+            "employee": "EMP-1",
+            "employee_name": "An Nguyen",
+            "docstatus": 0,
+            "workflow_state": "Pending Manager",
+            "company": "GEGE",
+            "work_date": "2026-09-01",
+            "overtime_type": "Post Shift",
+            "requested_hours": 2.0,
+            "reason": "gấp deadline",
         }
-        store.queries.setdefault(LOG_DT, []).append({
-            "reference_doctype": OT_DT, "reference_name": "OR-1", "action": "Submit",
-            "from_state": "Draft", "to_state": "Pending Manager", "actor": "emp@x",
-            "comment": "", "action_at": "2026-09-01 08:00:00",
-        })
-        store.mod_queries.setdefault("Comment", []).append({
-            "reference_doctype": OT_DT, "reference_name": "OR-1",
-            "comment_type": "Comment", "name": "C-1", "owner": "emp@x",
-            "content": "đính kèm thêm giờ", "creation": "2026-09-01 09:00:00",
-        })
-        store.mod_queries.setdefault("File", []).append({
-            "attached_to_doctype": OT_DT, "attached_to_name": "OR-1",
-            "name": "F-1", "file_name": "proof.png", "file_url": "/files/proof.png",
-            "file_size": 1024,
-        })
+        store.queries.setdefault(LOG_DT, []).append(
+            {
+                "reference_doctype": OT_DT,
+                "reference_name": "OR-1",
+                "action": "Submit",
+                "from_state": "Draft",
+                "to_state": "Pending Manager",
+                "actor": "emp@x",
+                "comment": "",
+                "action_at": "2026-09-01 08:00:00",
+            }
+        )
+        store.mod_queries.setdefault("Comment", []).append(
+            {
+                "reference_doctype": OT_DT,
+                "reference_name": "OR-1",
+                "comment_type": "Comment",
+                "name": "C-1",
+                "owner": "emp@x",
+                "content": "đính kèm thêm giờ",
+                "creation": "2026-09-01 09:00:00",
+            }
+        )
+        store.mod_queries.setdefault("File", []).append(
+            {
+                "attached_to_doctype": OT_DT,
+                "attached_to_name": "OR-1",
+                "name": "F-1",
+                "file_name": "proof.png",
+                "file_url": "/files/proof.png",
+                "file_size": 1024,
+            }
+        )
 
     def test_ad6_ot_pending_full_payload(self, approval, store):
         self._seed_ot_doc(store)
@@ -454,10 +525,16 @@ class TestGetRequestDetail:
 
     def test_ad7_leave_not_returnable(self, approval, store):
         store.docs["LAP-1"] = {
-            "doctype": LEAVE_DT, "name": "LAP-1", "employee": "EMP-2",
-            "employee_name": "Binh Tran", "docstatus": 0, "status": "Open",
-            "from_date": "2026-09-10", "to_date": "2026-09-11",
-            "leave_type": "Casual Leave", "total_leave_days": 2,
+            "doctype": LEAVE_DT,
+            "name": "LAP-1",
+            "employee": "EMP-2",
+            "employee_name": "Binh Tran",
+            "docstatus": 0,
+            "status": "Open",
+            "from_date": "2026-09-10",
+            "to_date": "2026-09-11",
+            "leave_type": "Casual Leave",
+            "total_leave_days": 2,
             "description": "việc gia đình",
         }
 
@@ -507,11 +584,17 @@ class TestExportCsv:
 # --------------------------------------------------------------------------- #
 def _seed_ot_doc_pending(store, name="OR-1", state="Pending Manager"):
     store.docs[name] = {
-        "doctype": OT_DT, "name": name, "employee": "EMP-1",
-        "employee_name": "An Nguyen", "docstatus": 0,
-        "workflow_state": state, "company": "GEGE",
-        "work_date": "2026-09-01", "overtime_type": "Post Shift",
-        "requested_hours": 2.0, "reason": "gấp deadline",
+        "doctype": OT_DT,
+        "name": name,
+        "employee": "EMP-1",
+        "employee_name": "An Nguyen",
+        "docstatus": 0,
+        "workflow_state": state,
+        "company": "GEGE",
+        "work_date": "2026-09-01",
+        "overtime_type": "Post Shift",
+        "requested_hours": 2.0,
+        "reason": "gấp deadline",
     }
 
 
@@ -537,8 +620,12 @@ class TestReturnRequest:
 
     def test_ad11_leave_type_not_returnable(self, approval, store):
         store.docs["LAP-1"] = {
-            "doctype": LEAVE_DT, "name": "LAP-1", "employee": "EMP-2",
-            "employee_name": "Binh", "docstatus": 0, "status": "Open",
+            "doctype": LEAVE_DT,
+            "name": "LAP-1",
+            "employee": "EMP-2",
+            "employee_name": "Binh",
+            "docstatus": 0,
+            "status": "Open",
         }
 
         with pytest.raises(Exception, match="không hỗ trợ trả lại"):
@@ -587,26 +674,44 @@ def _seed_delegation(store, **kw):
 
 
 def _seed_line_manager_matrix(store):
-    store.queries.setdefault("VN Approval Matrix", []).append({
-        "name": "M1", "transaction_type": "Overtime Request",
-        "is_active": 1, "company": "GEGE",
-    })
+    store.queries.setdefault("VN Approval Matrix", []).append(
+        {
+            "name": "M1",
+            "transaction_type": "Overtime Request",
+            "is_active": 1,
+            "company": "GEGE",
+        }
+    )
     store.docs["M1"] = {
-        "doctype": "VN Approval Matrix", "name": "M1", "apply_to": "All",
-        "branch": None, "department": None, "employee_grade": None,
+        "doctype": "VN Approval Matrix",
+        "name": "M1",
+        "apply_to": "All",
+        "branch": None,
+        "department": None,
+        "employee_grade": None,
         "modified": "2026-01-01",
-        "steps": [types.SimpleNamespace(
-            step_no=1, approver_type="Line Manager",
-            approver_user=None, approver_role=None,
-        )],
+        "steps": [
+            types.SimpleNamespace(
+                step_no=1,
+                approver_type="Line Manager",
+                approver_user=None,
+                approver_role=None,
+            )
+        ],
     }
-    store.values.setdefault("Employee", {}).update({
-        "EMP-1": {
-            "name": "EMP-1", "company": "GEGE", "branch": None,
-            "department": None, "grade": None, "reports_to": "EMP-M",
-        },
-        "EMP-M": {"user_id": "mgr@x"},
-    })
+    store.values.setdefault("Employee", {}).update(
+        {
+            "EMP-1": {
+                "name": "EMP-1",
+                "company": "GEGE",
+                "branch": None,
+                "department": None,
+                "grade": None,
+                "reports_to": "EMP-M",
+            },
+            "EMP-M": {"user_id": "mgr@x"},
+        }
+    )
 
 
 class TestDelegation:
@@ -618,7 +723,7 @@ class TestDelegation:
         assert out == ["del@x"]
 
     def test_ad15_expired_wrong_type_inactive_dont_resolve(self, approval, store):
-        _seed_delegation(store, name="DEL-old", to_date="2026-08-31")   # expired
+        _seed_delegation(store, name="DEL-old", to_date="2026-08-31")  # expired
         _seed_delegation(store, name="DEL-type", transaction_type="Leave Application")
         _seed_delegation(store, name="DEL-off", is_active=0)
         _seed_delegation(store, name="DEL-scope", request_name="OR-OTHER")  # different request
@@ -633,7 +738,9 @@ class TestDelegation:
 
         monkeypatch.setattr(emp_utils, "get_user_roles", lambda: ["Employee"])
         doc_dict = {
-            "name": "OR-1", "employee": "EMP-1", "company": "GEGE",
+            "name": "OR-1",
+            "employee": "EMP-1",
+            "company": "GEGE",
             "workflow_state": "Pending Manager",
         }
         # The delegate (del@x) is a plain Employee — only the delegation lets
@@ -642,9 +749,7 @@ class TestDelegation:
         # A random employee still cannot.
         assert approval._user_can_act(doc_dict, OT_TYPE, "rand@x") is False
 
-    def test_ad17_delegate_request_creates_scoped_delegation_and_log(
-        self, approval, store, monkeypatch
-    ):
+    def test_ad17_delegate_request_creates_scoped_delegation_and_log(self, approval, store, monkeypatch):
         from gege_hr.gege_hr.utils import employee as emp_utils
 
         _seed_ot_doc_pending(store, name="OR-2")
@@ -683,9 +788,15 @@ class TestDelegation:
 
         importlib.reload(del_api)
         store.docs["DEL-9"] = {
-            "doctype": DEL_DT, "name": "DEL-9", "from_user": "mgr@x",
-            "to_user": "del@x", "transaction_type": "All", "request_name": "",
-            "from_date": "2026-09-01", "to_date": "2026-09-30", "is_active": 1,
+            "doctype": DEL_DT,
+            "name": "DEL-9",
+            "from_user": "mgr@x",
+            "to_user": "del@x",
+            "transaction_type": "All",
+            "request_name": "",
+            "from_date": "2026-09-01",
+            "to_date": "2026-09-30",
+            "is_active": 1,
         }
         monkeypatch.setattr(emp_utils, "get_current_user", lambda: "other@x")
         monkeypatch.setattr(emp_utils, "get_user_roles", lambda: ["Employee"])
@@ -711,8 +822,7 @@ def followup(monkeypatch, store):
     binding from an earlier test would point at that test's store.
     """
     _install_stub(monkeypatch, store)
-    from gege_hr.gege_hr.api import approval as approval_api
-    from gege_hr.gege_hr.api import approval_followup as fu
+    from gege_hr.gege_hr.api import approval as approval_api, approval_followup as fu
 
     importlib.reload(approval_api)
     importlib.reload(fu)
@@ -720,15 +830,17 @@ def followup(monkeypatch, store):
 
 
 def _seed_pending_ot_query(store, name, creation, employee="EMP-1"):
-    store.queries.setdefault(OT_DT, []).append({
-        "name": name,
-        "employee": employee,
-        "employee_name": "An Nguyen",
-        "docstatus": 0,
-        "creation": creation,
-        "workflow_state": "Pending Manager",
-        "company": "GEGE",
-    })
+    store.queries.setdefault(OT_DT, []).append(
+        {
+            "name": name,
+            "employee": employee,
+            "employee_name": "An Nguyen",
+            "docstatus": 0,
+            "creation": creation,
+            "workflow_state": "Pending Manager",
+            "company": "GEGE",
+        }
+    )
 
 
 class TestFollowup:
@@ -770,11 +882,15 @@ class TestFollowup:
 
     def test_ad22_stale_reminds_holder_and_escalates_hr(self, followup, store):
         self._seed_holder_queue(store)
-        _seed_pending_ot_query(store, "OR-stale", "2026-09-01 08:00:00")   # ~100h → reminder
+        _seed_pending_ot_query(store, "OR-stale", "2026-09-01 08:00:00")  # ~100h → reminder
         _seed_pending_ot_query(store, "OR-urgent", "2026-08-25 08:00:00")  # ~260h → reminder + HR
-        store.mod_queries.setdefault("Has Role", []).append({
-            "role": "HR Manager", "parenttype": "User", "parent": "hr2@x",
-        })
+        store.mod_queries.setdefault("Has Role", []).append(
+            {
+                "role": "HR Manager",
+                "parenttype": "User",
+                "parent": "hr2@x",
+            }
+        )
 
         out = followup.escalate_stale_requests()
 

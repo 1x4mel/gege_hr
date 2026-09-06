@@ -98,14 +98,16 @@ class FakeDB:
             return None
         return None
 
-    def get_all(self, doctype, filters=None, fields=None, order_by=None,
-                pluck=None, limit_page_length=None, **_kw):
+    def get_all(
+        self, doctype, filters=None, fields=None, order_by=None, pluck=None, limit_page_length=None, **_kw
+    ):
         filters = filters or {}
         if doctype == "Leave Application":
             statuses = dict(filters).get("status")
             in_statuses = statuses[1] if isinstance(statuses, tuple) else None
             rows = [
-                r for r in self.leave_rows
+                r
+                for r in self.leave_rows
                 if r.get("docstatus", 0) < 2
                 and (not in_statuses or r.get("status") in in_statuses)
                 and str(r.get("from_date")) <= str(filters.get("from_date")[1])
@@ -115,7 +117,8 @@ class FakeDB:
         if doctype == "Holiday":
             lo, hi = filters.get("holiday_date")[1]
             rows = [
-                h for h in self.holiday_rows
+                h
+                for h in self.holiday_rows
                 if h.get("parent") == filters.get("parent") and lo <= str(h.get("holiday_date")) <= hi
             ]
             return [{k: h.get(k) for k in (fields or [])} for h in rows]
@@ -124,11 +127,13 @@ class FakeDB:
             return names if pluck else [{"name": n} for n in names]
         if doctype == "Employee":
             rows = [
-                r for r in self.employee_rows
+                r
+                for r in self.employee_rows
                 if r.get("status") == filters.get("status", "Active")
                 and (
                     "employee_name" not in filters
-                    or filters["employee_name"][1].strip("%").lower() in str(r.get("employee_name", "")).lower()
+                    or filters["employee_name"][1].strip("%").lower()
+                    in str(r.get("employee_name", "")).lower()
                 )
             ]
             if limit_page_length:
@@ -148,7 +153,7 @@ def make_fake(monkeypatch, roles=("HR Manager",)):
     frappe_stub.PermissionError = _PermissionError
     frappe_stub.session = types.SimpleNamespace(user="hr@test.local")
     frappe_stub.get_roles = lambda user=None: tuple(roles)
-    frappe_stub.whitelist = lambda *a, **k: (lambda f: f)
+    frappe_stub.whitelist = lambda *a, **k: lambda f: f
 
     def _throw(msg, exc=None):
         raise (exc or Exception)(msg)
@@ -161,8 +166,10 @@ def make_fake(monkeypatch, roles=("HR Manager",)):
     frappe_stub.publish_realtime = lambda event, payload=None, **kw: published.append((event, payload))
 
     frappe_stub.get_all = db.get_all
-    frappe_stub.get_doc = lambda arg, *a: _Doc(dict(arg), db) if isinstance(arg, dict) else _Doc(
-        dict(db.cache_rows.get(arg, {"name": arg, "cache_key": arg})), db
+    frappe_stub.get_doc = lambda arg, *a: (
+        _Doc(dict(arg), db)
+        if isinstance(arg, dict)
+        else _Doc(dict(db.cache_rows.get(arg, {"name": arg, "cache_key": arg})), db)
     )
 
     def _delete_doc(doctype, name, **_kw):
@@ -175,7 +182,9 @@ def make_fake(monkeypatch, roles=("HR Manager",)):
 
     frappe_stub.utils = types.ModuleType("frappe.utils")
     frappe_stub.utils.now = lambda: "2026-08-29 12:00:00"
-    frappe_stub.utils.getdate = lambda v=None: dt.date.today() if v in (None, "") else dt.date.fromisoformat(str(v)[:10])
+    frappe_stub.utils.getdate = lambda v=None: (
+        dt.date.today() if v in (None, "") else dt.date.fromisoformat(str(v)[:10])
+    )
     frappe_stub.utils.cint = lambda v, default=0: int(v) if v not in (None, "") else default
     frappe_stub.utils.today = lambda: dt.date.today().isoformat()
 
@@ -193,8 +202,16 @@ def make_fake(monkeypatch, roles=("HR Manager",)):
     return fake
 
 
-def _leave(name, employee="HR-EMP-0001", status="Approved", frm="2026-09-07", to="2026-09-09",
-           leave_type="Annual Leave", docstatus=None, **extra):
+def _leave(
+    name,
+    employee="HR-EMP-0001",
+    status="Approved",
+    frm="2026-09-07",
+    to="2026-09-09",
+    leave_type="Annual Leave",
+    docstatus=None,
+    **extra,
+):
     row = {
         "name": name,
         "employee": employee,
@@ -253,8 +270,17 @@ def test_lc2_payload_v2_multi_status_with_holidays(monkeypatch):
     names = {r["name"] for r in data["leaves"]}
     assert names == {"LA-OPEN", "LA-APPROVED", "LA-REJECTED"}  # Cancelled excluded
     row = data["leaves"][0]
-    for field in ("status", "half_day", "half_day_date", "description", "posting_date",
-                  "department", "branch", "owner", "employee_name"):
+    for field in (
+        "status",
+        "half_day",
+        "half_day_date",
+        "description",
+        "posting_date",
+        "department",
+        "branch",
+        "owner",
+        "employee_name",
+    ):
         assert field in row  # LC12 — drawer/half-day fields ship
     assert data["holidays"][0]["description"] == "Quốc khánh"
     assert data["holidays"][0]["weekly_off"] == 0
@@ -342,17 +368,25 @@ def test_lc7b_no_default_list_ambiguous_returns_empty(monkeypatch):
 def test_lc8_touch_deletes_all_scope_keys_and_publishes(monkeypatch):
     fake = make_fake(monkeypatch)
     fake.db.employee_rows = [
-        {"name": "HR-EMP-0001", "employee_name": "Nguyễn Văn A", "status": "Active",
-         "company": COMPANY, "branch": "HN", "department": "Sale"},
+        {
+            "name": "HR-EMP-0001",
+            "employee_name": "Nguyễn Văn A",
+            "status": "Active",
+            "company": COMPANY,
+            "branch": "HN",
+            "department": "Sale",
+        },
     ]
     # Plant a cache row for every (branch, dept) scope × 3 months.
     months = [("2026", "08"), ("2026", "09"), ("2026", "10")]
     scopes = [(None, None), ("HN", None), (None, "Sale"), ("HN", "Sale")]
-    for (y, m) in months:
+    for y, m in months:
         for b, d in scopes:
             key = cal_utils.build_cache_key(company=COMPANY, branch=b, department=d, year=y, month=m)
             fake.db.cache_rows[key] = {
-                "name": key, "cache_key": key, "data_json": "{}",
+                "name": key,
+                "cache_key": key,
+                "data_json": "{}",
                 "generated_at": "2026-08-29 00:00:00",
                 "expires_at": "2100-01-01 00:00:00",
             }
@@ -389,8 +423,11 @@ def test_lc10_after_decision_calls_touch(monkeypatch):
     calls = []
     monkeypatch.setattr(fake.leave, "_touch_calendar", lambda doc: calls.append(doc))
     doc = types.SimpleNamespace(
-        employee="HR-EMP-0001", name="LA-1", company=COMPANY,
-        from_date="2026-09-01", to_date="2026-09-02",
+        employee="HR-EMP-0001",
+        name="LA-1",
+        company=COMPANY,
+        from_date="2026-09-01",
+        to_date="2026-09-02",
     )
     fake.leave._after_leave_decision(doc, approved=False, reason="thiếu người")
     assert calls == [doc]
@@ -404,12 +441,27 @@ def test_lc10_after_decision_calls_touch(monkeypatch):
 def test_lc11_employee_options_active_search_and_gate(monkeypatch):
     fake = make_fake(monkeypatch)
     fake.db.employee_rows = [
-        {"name": "HR-EMP-0001", "employee_name": "Nguyễn Văn A", "status": "Active",
-         "department": "Sale", "branch": "HN"},
-        {"name": "HR-EMP-0002", "employee_name": "Trần Thị B", "status": "Active",
-         "department": None, "branch": "HCM"},
-        {"name": "HR-EMP-0003", "employee_name": "Nguyễn C", "status": "Left",
-         "department": None, "branch": None},
+        {
+            "name": "HR-EMP-0001",
+            "employee_name": "Nguyễn Văn A",
+            "status": "Active",
+            "department": "Sale",
+            "branch": "HN",
+        },
+        {
+            "name": "HR-EMP-0002",
+            "employee_name": "Trần Thị B",
+            "status": "Active",
+            "department": None,
+            "branch": "HCM",
+        },
+        {
+            "name": "HR-EMP-0003",
+            "employee_name": "Nguyễn C",
+            "status": "Left",
+            "department": None,
+            "branch": None,
+        },
     ]
     out = fake.api.calendar_employee_options(search="ngu")
     assert [o["value"] for o in out] == ["HR-EMP-0001"]  # Active + tên khớp
@@ -417,8 +469,14 @@ def test_lc11_employee_options_active_search_and_gate(monkeypatch):
 
     capped = make_fake(monkeypatch)
     capped.db.employee_rows = [
-        {"name": f"HR-EMP-{i:04d}", "employee_name": f"NV {i}", "status": "Active",
-         "department": None, "branch": None} for i in range(250)
+        {
+            "name": f"HR-EMP-{i:04d}",
+            "employee_name": f"NV {i}",
+            "status": "Active",
+            "department": None,
+            "branch": None,
+        }
+        for i in range(250)
     ]
     assert len(capped.api.calendar_employee_options(limit=999)) == 200  # cap
 
@@ -434,7 +492,8 @@ def test_lc13_legacy_key_row_never_served(monkeypatch):
     fake = make_fake(monkeypatch)
     legacy_key = "Gege Demo-ALL-ALL-2026-09"  # pre-v2 shape (flat array)
     fake.db.cache_rows[legacy_key] = {
-        "name": legacy_key, "cache_key": legacy_key,
+        "name": legacy_key,
+        "cache_key": legacy_key,
         "data_json": '[{"name": "LA-OLD"}]',
         "generated_at": "2026-08-29 00:00:00",
         "expires_at": "2100-01-01 00:00:00",
@@ -451,7 +510,8 @@ def test_lc13b_legacy_array_payload_normalized_by_read_filters(monkeypatch):
     fake = make_fake(monkeypatch)
     key = cal_utils.build_cache_key(company=COMPANY, year=2026, month=9)
     fake.db.cache_rows[key] = {
-        "name": key, "cache_key": key,
+        "name": key,
+        "cache_key": key,
         "data_json": '[{"name": "LA-OLD", "status": "Open", "employee": "HR-EMP-0001", "leave_type": "Annual Leave"}]',
         "generated_at": "2026-08-29 00:00:00",
         "expires_at": "2100-01-01 00:00:00",

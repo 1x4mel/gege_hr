@@ -218,7 +218,9 @@ def _audit(doctype: str, name: str, audit_type: str, description: str, company=N
         frappe.log_error(title="onboarding._audit failed")
 
 
-def _safe_rows(doctype: str, filters, fields: list, order_by: str | None = "creation desc", limit: int = 20) -> list:
+def _safe_rows(
+    doctype: str, filters, fields: list, order_by: str | None = "creation desc", limit: int = 20
+) -> list:
     """Fail-tolerant get_all for the detail-drawer sources (Comment/Version/File)."""
     try:
         return (
@@ -337,7 +339,9 @@ def get_template(name: str) -> dict:
 def delete_template(name: str) -> dict:
     """HR-Manager-only template delete; blocked while referenced (plan §2.4)."""
     _require_hr_manager()
-    refs = frappe.get_all(ONBOARDING_DOCTYPE, filters={"template": name}, fields=["name"], limit_page_length=1)
+    refs = frappe.get_all(
+        ONBOARDING_DOCTYPE, filters={"template": name}, fields=["name"], limit_page_length=1
+    )
     if refs:
         frappe.throw("Template đang được dùng bởi onboarding — không xoá được.")
     frappe.delete_doc(TEMPLATE_DOCTYPE, name)
@@ -897,7 +901,9 @@ def complete_payroll_profile(
 def _payroll_profile(employee: str) -> dict:
     """SSA + bank snapshot for the drawer payroll card (plan-onboarding §2.2)."""
     try:
-        ssa = frappe.db.get_value("Salary Structure Assignment", {"employee": employee, "docstatus": 1}, "name")
+        ssa = frappe.db.get_value(
+            "Salary Structure Assignment", {"employee": employee, "docstatus": 1}, "name"
+        )
     except Exception:
         ssa = None
     try:

@@ -1504,9 +1504,7 @@ def remove_checkout_miss_evidence(name: str, file_url: str) -> dict:
     _require_hr()
     name, doc = _load_ticket(name)
     if (
-        _payroll_state_for(
-            {"work_date": doc.work_date, "employee": doc.employee, "company": doc.company}
-        )
+        _payroll_state_for({"work_date": doc.work_date, "employee": doc.employee, "company": doc.company})
         == "locked"
     ):
         frappe.throw(
@@ -1724,9 +1722,7 @@ def _validate_evidence_caps(name: str, evidence_ref: str | None) -> None:
     urls = [s for s in re.split(r"[,\s]+", str(evidence_ref or "")) if s]
     max_files = int(caps.get("max_evidence_files") or 0)
     if max_files and len(urls) > max_files:
-        frappe.throw(
-            _("Tối đa {0} tệp minh chứng mỗi giải trình (đã gửi {1}).").format(max_files, len(urls))
-        )
+        frappe.throw(_("Tối đa {0} tệp minh chứng mỗi giải trình (đã gửi {1}).").format(max_files, len(urls)))
     max_mb = float(caps.get("max_evidence_mb") or 0)
     if max_mb:
         try:

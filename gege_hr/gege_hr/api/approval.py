@@ -319,8 +319,7 @@ def _user_can_act(doc_dict: dict, transaction_type: str, user: str, _cache: dict
         # VN Approval Matrix for Expense Claim must not HIDE pending claims).
         roles = set(emp_utils.get_user_roles() or [])
         return bool(
-            roles
-            & (emp_utils.HR_MANAGER_ROLES | {"HR User", "Expense Claim Approver", "Line Manager"})
+            roles & (emp_utils.HR_MANAGER_ROLES | {"HR User", "Expense Claim Approver", "Line Manager"})
         )
     if transaction_type in ("Leave Encashment", "Compensatory Leave Request"):
         # Single-step (leave-extra P1c): parity the leave_extra API gate —
@@ -378,9 +377,7 @@ def _user_can_act(doc_dict: dict, transaction_type: str, user: str, _cache: dict
         line_manager_user=attrs.get("line_manager_user"),
         dept_head_user=attrs.get("dept_head_user"),
     ):
-        if user and user in _delegated_users(
-            holder, transaction_type, doc_dict.get("name"), _cache=_cache
-        ):
+        if user and user in _delegated_users(holder, transaction_type, doc_dict.get("name"), _cache=_cache):
             return True
     return False
 
@@ -1145,18 +1142,14 @@ def approve_request(
     if request_type == "Expense Claim":
         return _delegate_expense(name, request_type, comment, approved=True)
     if request_type == "Leave Encashment":
-        return _delegate_leave_extra(
-            name, request_type, comment, approved=True, doctype="Leave Encashment"
-        )
+        return _delegate_leave_extra(name, request_type, comment, approved=True, doctype="Leave Encashment")
     if request_type == "Compensatory Leave Request":
         return _delegate_leave_extra(
             name, request_type, comment, approved=True, doctype="Compensatory Leave Request"
         )
     # services-deskfree P1c — delegate về endpoint self-service (giữ set_user path).
     if request_type == "Employee Grievance":
-        return _delegate_services(
-            name, request_type, comment, approved=True, doctype="Employee Grievance"
-        )
+        return _delegate_services(name, request_type, comment, approved=True, doctype="Employee Grievance")
     if request_type == "Travel Request":
         return _delegate_services(name, request_type, comment, approved=True, doctype="Travel Request")
 
@@ -1303,18 +1296,14 @@ def reject_request(
     if request_type == "Expense Claim":
         return _delegate_expense(name, request_type, comment, approved=False)
     if request_type == "Leave Encashment":
-        return _delegate_leave_extra(
-            name, request_type, comment, approved=False, doctype="Leave Encashment"
-        )
+        return _delegate_leave_extra(name, request_type, comment, approved=False, doctype="Leave Encashment")
     if request_type == "Compensatory Leave Request":
         return _delegate_leave_extra(
             name, request_type, comment, approved=False, doctype="Compensatory Leave Request"
         )
     # services-deskfree P1c — delegate về endpoint self-service (giữ set_user path).
     if request_type == "Employee Grievance":
-        return _delegate_services(
-            name, request_type, comment, approved=False, doctype="Employee Grievance"
-        )
+        return _delegate_services(name, request_type, comment, approved=False, doctype="Employee Grievance")
     if request_type == "Travel Request":
         return _delegate_services(name, request_type, comment, approved=False, doctype="Travel Request")
 
@@ -1757,11 +1746,7 @@ def _actionable_pending_rows(
     except Exception:
         return []
     cache = _cache if _cache is not None else {}
-    return [
-        r
-        for r in rows
-        if _user_can_act(r, ttype, user, _cache=cache) and _matches_search(r, search)
-    ]
+    return [r for r in rows if _user_can_act(r, ttype, user, _cache=cache) and _matches_search(r, search)]
 
 
 def _processed_groups(
@@ -1810,9 +1795,7 @@ def _processed_groups(
         if not t or (request_type and t != request_type):
             continue
         try:
-            rows = frappe.db.get_all(
-                dt, filters={"name": nm}, fields=_row_fields(t), limit_page_length=1
-            )
+            rows = frappe.db.get_all(dt, filters={"name": nm}, fields=_row_fields(t), limit_page_length=1)
         except Exception:
             rows = []
         if not rows:
@@ -1888,9 +1871,7 @@ def filter_options(approver: str | None = None) -> dict:
                 branches.setdefault(er["branch"], er["branch"])
 
     def _opts(d: dict) -> list[dict]:
-        ordered = sorted(
-            d.items(), key=lambda kv: kv[1]["label"] if isinstance(kv[1], dict) else kv[1]
-        )
+        ordered = sorted(d.items(), key=lambda kv: kv[1]["label"] if isinstance(kv[1], dict) else kv[1])
         out: list[dict] = []
         for v, info in ordered:
             if isinstance(info, dict):
@@ -1970,9 +1951,7 @@ def _requester_block(employee: str | None) -> dict:
     out = dict(vals)
     if vals.get("reports_to"):
         try:
-            out["reports_to_name"] = frappe.db.get_value(
-                "Employee", vals["reports_to"], "employee_name"
-            )
+            out["reports_to_name"] = frappe.db.get_value("Employee", vals["reports_to"], "employee_name")
         except Exception:
             out["reports_to_name"] = None
     return out
@@ -2121,9 +2100,7 @@ def _departments_by_employee(employees: list) -> dict:
     if not emps:
         return {}
     try:
-        rows = frappe.db.get_all(
-            "Employee", filters={"name": ["in", emps]}, fields=["name", "department"]
-        )
+        rows = frappe.db.get_all("Employee", filters={"name": ["in", emps]}, fields=["name", "department"])
     except Exception:
         return {}
     return {r["name"]: (r.get("department") or "") for r in rows}

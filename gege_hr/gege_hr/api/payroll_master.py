@@ -779,9 +779,7 @@ def update_leave_period(
 
     new_from = (from_date or "").strip()
     new_to = (to_date or "").strip()
-    dates_change = (new_from and new_from != old["from_date"]) or (
-        new_to and new_to != old["to_date"]
-    )
+    dates_change = (new_from and new_from != old["from_date"]) or (new_to and new_to != old["to_date"])
     if dates_change:
         used = frappe.get_all(
             "Leave Policy Assignment",
@@ -790,9 +788,7 @@ def update_leave_period(
             limit=1,
         )
         if used:
-            frappe.throw(
-                _("Không đổi được ngày của kỳ phép đang có lượt gán chính sách hiệu lực.")
-            )
+            frappe.throw(_("Không đổi được ngày của kỳ phép đang có lượt gán chính sách hiệu lực."))
 
     if new_from:
         doc.from_date = getdate(new_from)
@@ -952,9 +948,7 @@ def save_leave_policy(
     if name and frappe.db.exists("Leave Policy", name):
         doc = frappe.get_doc("Leave Policy", name)
         if int(getattr(doc, "docstatus", 0) or 0) != 0:
-            frappe.throw(
-                _("Chỉ chính sách ở trạng thái Nháp mới sửa được — hãy Hủy và tạo bản thay thế.")
-            )
+            frappe.throw(_("Chỉ chính sách ở trạng thái Nháp mới sửa được — hãy Hủy và tạo bản thay thế."))
         if label != (getattr(doc, "title", "") or ""):
             doc.title = label
         doc.set("leave_policy_details", cleaned)
@@ -1074,11 +1068,7 @@ def _assert_policy_cancel(doc, name: str) -> None:
         doc.cancel()
     except Exception as exc:
         low = str(exc).lower()
-        if (
-            "linkexists" in exc.__class__.__name__.lower()
-            or "linked" in low
-            or "cannot cancel" in low
-        ):
+        if "linkexists" in exc.__class__.__name__.lower() or "linked" in low or "cannot cancel" in low:
             frappe.throw(
                 _("Không hủy được: chính sách đang được gán cho nhân viên. Hãy hủy các lượt gán trước.")
             )
@@ -1490,9 +1480,7 @@ def amend_leave_policy_assignment(
         effective_from=effective_from or str(getattr(old, "effective_from", "") or ""),
         effective_to=effective_to or str(getattr(old, "effective_to", "") or ""),
         company=getattr(old, "company", "") or "",
-        assignment_based_on=assignment_based_on
-        or getattr(old, "assignment_based_on", "")
-        or "Leave Period",
+        assignment_based_on=assignment_based_on or getattr(old, "assignment_based_on", "") or "Leave Period",
         carry_forward=cf,
     )
     payload["amended_from"] = name
@@ -1572,9 +1560,7 @@ def bulk_assign_leave_policy(
                 pass
 
     _audit_admin(
-        _("Gán hàng loạt chính sách {0} cho {1} nhân viên").format(
-            leave_policy, len(assigned)
-        ),
+        _("Gán hàng loạt chính sách {0} cho {1} nhân viên").format(leave_policy, len(assigned)),
         reference_doctype="Leave Policy",
         reference_name=leave_policy,
         new_value={"assigned": len(assigned), "failed": len(failed)},
@@ -1738,8 +1724,6 @@ def save_employee_salary_setting(
     employee = (employee or "").strip()
     if not employee or not frappe.db.exists("Employee", employee):
         frappe.throw(_("Nhân viên không tồn tại."))
-
-    from gege_hr.gege_hr.utils import payroll as pay_calc
 
     old = _setting_for_employee(
         frappe.db.get_value(
@@ -1990,9 +1974,9 @@ def _pp_rethrow_overlap(e: Exception, company: str, start_date, end_date, exclud
     hint = f" ({overlap_name})" if overlap_name else ""
     clean = msg.split("<a")[0].strip()
     frappe.throw(
-        _(
-            "Kỳ lương chuẩn của công ty đã bao trùm khoảng ngày này{0} — chọn khoảng ngày khác. {1}"
-        ).format(hint, clean)
+        _("Kỳ lương chuẩn của công ty đã bao trùm khoảng ngày này{0} — chọn khoảng ngày khác. {1}").format(
+            hint, clean
+        )
     )
 
 
@@ -2102,9 +2086,7 @@ def list_payroll_periods(
         start = _pp_parse_date(r.get("start_date")) if r.get("start_date") else None
         end = _pp_parse_date(r.get("end_date")) if r.get("end_date") else None
         r["is_active_today"] = 1 if (start and end and start <= today <= end) else 0
-        r["usage"] = usage.get(
-            r.get("name"), {"benefit_applications": 0, "tax_declarations": 0}
-        )
+        r["usage"] = usage.get(r.get("name"), {"benefit_applications": 0, "tax_declarations": 0})
     return rows
 
 
@@ -2227,15 +2209,9 @@ def delete_payroll_period(name: str) -> dict:
     if not name or not frappe.db.exists("Payroll Period", name):
         frappe.throw(_("Kỳ lương chuẩn không tồn tại."))
     usage = _pp_usage([name]).get(name, {})
-    used = int(usage.get("benefit_applications", 0)) + int(
-        usage.get("tax_declarations", 0)
-    )
+    used = int(usage.get("benefit_applications", 0)) + int(usage.get("tax_declarations", 0))
     if used:
-        frappe.throw(
-            _("Kỳ chuẩn đang được Benefit/Tax sử dụng ({0} bản ghi) — không xoá được.").format(
-                used
-            )
-        )
+        frappe.throw(_("Kỳ chuẩn đang được Benefit/Tax sử dụng ({0} bản ghi) — không xoá được.").format(used))
     frappe.delete_doc("Payroll Period", name)
     _clear_pp_cache()
     _audit_admin(

@@ -1681,7 +1681,9 @@ def _team_leave_by(emps: list[str], day) -> dict:
 def _publish_team_today(manager_emp: str | None = None) -> None:
     """Best-effort realtime ping cho các tab ``/team/today`` đang mở (§2.6)."""
     try:
-        frappe.publish_realtime("team_today_changed", {"manager": manager_emp or ""}, user=frappe.session.user)
+        frappe.publish_realtime(
+            "team_today_changed", {"manager": manager_emp or ""}, user=frappe.session.user
+        )
     except Exception:
         pass
 
@@ -1825,9 +1827,7 @@ def team_member_day_detail(employee: str | None = None, date_str: str | None = N
         frappe.throw(_("Thiếu nhân viên cần tra cứu."), frappe.ValidationError)
     emp = emp_utils.emp_name(employee)
     if not _can_view_member(manager_emp, is_hr, emp):
-        frappe.throw(
-            _("Bạn chỉ được xem nhân viên trong team của mình."), frappe.PermissionError
-        )
+        frappe.throw(_("Bạn chỉ được xem nhân viên trong team của mình."), frappe.PermissionError)
     day = getdate(date_str) if date_str else tz_utils.now_in_portal().date()
     core = _day_detail_core(emp, day)
     ws = core.get("work_session") or {}

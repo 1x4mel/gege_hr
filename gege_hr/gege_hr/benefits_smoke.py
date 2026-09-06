@@ -89,9 +89,9 @@ def _seed() -> dict:
     }
     for name, flags in comps.items():
         if not frappe.db.exists("Salary Component", name):
-            frappe.get_doc(
-                {"doctype": "Salary Component", "salary_component": name, **flags}
-            ).insert(ignore_permissions=True)
+            frappe.get_doc({"doctype": "Salary Component", "salary_component": name, **flags}).insert(
+                ignore_permissions=True
+            )
         # Idempotent refresh — lần seed cũ có thể còn cap thấp hơn max_benefits.
         frappe.db.set_value(
             "Salary Component", name, "max_benefit_amount", flags.get("max_benefit_amount", 0)
@@ -101,7 +101,9 @@ def _seed() -> dict:
     # autoname = field:designation_name (erpnext)
     for desig in ("Smoke Exec", "Smoke Lead"):
         if not frappe.db.exists("Designation", desig):
-            frappe.get_doc({"doctype": "Designation", "designation_name": desig}).insert(ignore_permissions=True)
+            frappe.get_doc({"doctype": "Designation", "designation_name": desig}).insert(
+                ignore_permissions=True
+            )
 
     # 3) Employee test (DOJ 2020 → ~6 năm kinh nghiệm cho gratuity).
     # Employee dùng naming series (HR-EMP-.####) → __newname bị bỏ qua; resolve
@@ -128,7 +130,9 @@ def _seed() -> dict:
                     "designation": "Smoke Exec",
                     "status": "Active",
                 }
-            ).insert(ignore_permissions=True).name
+            )
+            .insert(ignore_permissions=True)
+            .name
         )
     frappe.db.set_value("Employee", emp, "relieving_date", today())
 
@@ -164,9 +168,7 @@ def _seed() -> dict:
         doc.insert(ignore_permissions=True)
         doc.submit()
 
-    if not frappe.db.exists(
-        "Salary Structure Assignment", {"employee": emp, "salary_structure": ss}
-    ):
+    if not frappe.db.exists("Salary Structure Assignment", {"employee": emp, "salary_structure": ss}):
         ssa = frappe.get_doc(
             {
                 "doctype": "Salary Structure Assignment",
@@ -314,9 +316,7 @@ def _cleanup(seeded: dict) -> list:
         _del("Salary Slip", r, cancel=True)
     _del("Employee", emp)
     _del("Gratuity Rule", seeded.get("gratuity_rule"))
-    for r in frappe.get_all(
-        "Salary Structure Assignment", filters={"employee": emp}, pluck="name"
-    ):
+    for r in frappe.get_all("Salary Structure Assignment", filters={"employee": emp}, pluck="name"):
         _del("Salary Structure Assignment", r, cancel=True)
     _del("Salary Structure", seeded.get("salary_structure"), cancel=True)
     for comp in (f"{P}-MealCard", f"{P}-Fuel", f"{P}-Basic"):
@@ -353,9 +353,11 @@ def run() -> dict:
             names = sorted(c["name"] for c in ctx["components"])
             assert names == sorted([f"{P}-MealCard", f"{P}-Fuel"]), names
             assert ctx["payroll_period"] and ctx["remaining"] > 0, ctx
-            return f"max=12tr remaining={ctx['remaining']} comps={names} period={ctx['payroll_period']['name']}"
+            return (
+                f"max=12tr remaining={ctx['remaining']} comps={names} period={ctx['payroll_period']['name']}"
+            )
 
-        @ _report_step(report, "s2_save_draft")
+        @_report_step(report, "s2_save_draft")
         def _():
             out = api.save_benefit_application(
                 {
@@ -371,13 +373,13 @@ def run() -> dict:
             assert out["status"] == "Draft" and out["total_amount"] == 800_000, out
             return out
 
-        @ _report_step(report, "s3_submit_hr")
+        @_report_step(report, "s3_submit_hr")
         def _():
             out = api.set_benefit_application_action(created["app"], "submit")
             assert out["docstatus"] == 1, out
             return out
 
-        @ _report_step(report, "s4_duplicate_guard")
+        @_report_step(report, "s4_duplicate_guard")
         def _():
             try:
                 api.save_benefit_application(
@@ -392,7 +394,7 @@ def run() -> dict:
                 assert "đăng ký" in str(e), str(e)
                 return f"bị chặn đúng: {e}"
 
-        @ _report_step(report, "s5_claim_ok")
+        @_report_step(report, "s5_claim_ok")
         def _():
             out = api.save_benefit_claim(
                 {"employee": EMP, "earning_component": f"{P}-MealCard", "claimed_amount": 200_000}
@@ -403,7 +405,7 @@ def run() -> dict:
             assert act["docstatus"] == 1, act
             return out
 
-        @ _report_step(report, "s6_claim_wrong_component")
+        @_report_step(report, "s6_claim_wrong_component")
         def _():
             try:
                 api.save_benefit_claim(
@@ -414,13 +416,13 @@ def run() -> dict:
                 assert "hoàn Từ" in str(e), str(e)
                 return f"bị chặn đúng: {e}"
 
-        @ _report_step(report, "s7_get_application_can")
+        @_report_step(report, "s7_get_application_can")
         def _():
             out = api.get_benefit_application(created["app"])
             assert out["can"]["cancel"] is True and out["can"]["edit"] is False, out
             return {k: v for k, v in out.items() if k in ("name", "status", "can")}
 
-        @ _report_step(report, "s8_idor_plain_user")
+        @_report_step(report, "s8_idor_plain_user")
         def _():
             frappe.set_user(seeded["user"])
             try:
@@ -434,16 +436,14 @@ def run() -> dict:
             finally:
                 frappe.set_user("Administrator")
 
-        @ _report_step(report, "s9_gratuity_preview")
+        @_report_step(report, "s9_gratuity_preview")
         def _():
-            out = api.preview_gratuity(
-                {"employee": EMP, "gratuity_rule": seeded["gratuity_rule"]}
-            )
+            out = api.preview_gratuity({"employee": EMP, "gratuity_rule": seeded["gratuity_rule"]})
             assert "current_work_experience" in out and "amount" in out, out
             assert out["amount"] > 0, f"amount={out['amount']} — slip chưa cộng vào applicable earnings?"
             return out
 
-        @ _report_step(report, "s10_gratuity_create_submit")
+        @_report_step(report, "s10_gratuity_create_submit")
         def _():
             out = api.create_gratuity(
                 {
@@ -469,7 +469,7 @@ def run() -> dict:
             assert asal, "Additional Salary chưa sinh ra"
             return {"gratuity": act, "additional_salary": asal}
 
-        @ _report_step(report, "s11_promotion_submit_updates_employee")
+        @_report_step(report, "s11_promotion_submit_updates_employee")
         def _():
             out = api.save_promotion(
                 {"employee": EMP, "details": [{"fieldname": "designation", "new_value": "Smoke Lead"}]}
@@ -481,7 +481,7 @@ def run() -> dict:
             assert designation == "Smoke Lead", designation
             return f"Employee.designation → {designation}"
 
-        @ _report_step(report, "s12_amend_flow")
+        @_report_step(report, "s12_amend_flow")
         def _():
             api.set_benefit_application_action(created["app"], "cancel")
             out = api.set_benefit_application_action(created["app"], "amend")
@@ -503,9 +503,10 @@ def run() -> dict:
             report["cleanup_error"] = str(e)
         frappe.set_user(prev_user)
 
-    ok = all(
-        v.get("ok") for k, v in report.items() if k.startswith("s") and isinstance(v, dict)
-    ) and "fatal" not in report
+    ok = (
+        all(v.get("ok") for k, v in report.items() if k.startswith("s") and isinstance(v, dict))
+        and "fatal" not in report
+    )
     report["ALL_OK"] = ok
     print(f"[SMOKE] ALL_OK={ok}")
     for k, v in report.items():

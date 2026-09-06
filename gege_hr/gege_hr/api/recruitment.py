@@ -636,9 +636,7 @@ def set_job_offer_status(name=None, status=None, create_onboarding=False):
             ob.job_applicant = applicant
             # Mandatory on this site: job_offer / employee_name / joining dates.
             ob.job_offer = name
-            ob.employee_name = frappe.db.get_value(
-                APPLICANT_DOCTYPE, applicant, "applicant_name"
-            ) or ""
+            ob.employee_name = frappe.db.get_value(APPLICANT_DOCTYPE, applicant, "applicant_name") or ""
             ob.designation = getattr(doc, "designation", "") or ""
             ob.company = getattr(doc, "company", "") or ""
             join_date = getattr(doc, "offer_date", None) or _today()

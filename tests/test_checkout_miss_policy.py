@@ -61,9 +61,7 @@ def test_cm2_b1_1_resolve_waive_sends_email_when_enabled(api, monkeypatch):
 
 
 def test_cm2_b1_2_disabled_setting_sends_nothing(api, monkeypatch):
-    stub, mod = api(
-        tickets=[_ticket(status="Explained"), _ticket("CM-0002")], settings={}
-    )
+    stub, mod = api(tickets=[_ticket(status="Explained"), _ticket("CM-0002")], settings={})
     calls = []
     _inject_sendmail(monkeypatch, calls)
     mod.resolve_checkout_miss("CM-0001", "waive")

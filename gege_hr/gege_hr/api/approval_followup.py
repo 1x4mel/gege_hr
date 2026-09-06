@@ -121,8 +121,7 @@ def send_pending_digests() -> dict:
             if not slot["oldest"] or created < slot["oldest"]:
                 slot["oldest"] = created
                 slot["oldest_label"] = (
-                    f"{row.get('employee_name') or row.get('employee') or '?'}"
-                    f" · {ttype} {row.get('name')}"
+                    f"{row.get('employee_name') or row.get('employee') or '?'} · {ttype} {row.get('name')}"
                 )
     sent = 0
     for user, slot in agg.items():

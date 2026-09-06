@@ -318,7 +318,9 @@ def test_all_goals_requires_manager(mod):
 # ── G1–G7: get_goal ─────────────────────────────────────────────────────────
 def test_g1_get_goal_own_full_shape(mod):
     m, stub = mod
-    doc = _seed_goal(stub, name="G-100", employee="HR-EMP-1", kra="Sale", start_date="2026-01-01", end_date="2026-06-30")
+    doc = _seed_goal(
+        stub, name="G-100", employee="HR-EMP-1", kra="Sale", start_date="2026-01-01", end_date="2026-06-30"
+    )
     res = m.get_goal("G-100")
     assert res["name"] == "G-100"
     assert res["goal_name"] == doc.goal_name

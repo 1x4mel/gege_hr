@@ -98,17 +98,11 @@ class _FakeDB:
         filters = kw.get("filters")
         eq: dict = {}
         if isinstance(filters, list):
-            eq = {
-                f[0]: f[2]
-                for f in filters
-                if isinstance(f, (list, tuple)) and len(f) == 3 and f[1] == "="
-            }
+            eq = {f[0]: f[2] for f in filters if isinstance(f, (list, tuple)) and len(f) == 3 and f[1] == "="}
         elif isinstance(filters, dict):
             eq = {k: v for k, v in filters.items() if not isinstance(v, (list, tuple))}
         if eq:
-            base = [
-                r for r in base if not isinstance(r, dict) or all(r.get(k) == v for k, v in eq.items())
-            ]
+            base = [r for r in base if not isinstance(r, dict) or all(r.get(k) == v for k, v in eq.items())]
         pluck = kw.get("pluck")
         if pluck:
             return [r[pluck] if isinstance(r, dict) else r for r in base]
@@ -913,9 +907,7 @@ def test_list_work_location_without_employee_field(admin):
     mod, stub, db = admin
     stub._meta["Shift Assignment"] = ["vn_work_location"]
     stub._meta["Employee"] = []  # default_work_location NOT migrated
-    db.rows["Shift Assignment"] = [
-        {"name": "SA-1", "employee": "E-1", "docstatus": 1, "status": "Active"}
-    ]
+    db.rows["Shift Assignment"] = [{"name": "SA-1", "employee": "E-1", "docstatus": 1, "status": "Active"}]
     rows = mod.list_shift_assignments()
     assert rows[0]["work_location"] == ""
     assert rows[0]["work_location_source"] == ""

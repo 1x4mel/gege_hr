@@ -142,6 +142,10 @@ def cm(monkeypatch):
         # sys.modules, not just as an attribute on frappe.
         monkeypatch.setitem(sys.modules, "frappe", frappe_mod)
         monkeypatch.setitem(sys.modules, "frappe.utils", utils)
+        # `_db` binds `frappe` at import time (module-level `import frappe`);
+        # if an earlier test imported it under its own stub, that stale
+        # reference would swallow our guarded-UPDATE claims. Reload it first.
+        importlib.reload(importlib.import_module("gege_hr.gege_hr.utils._db"))
         # reload so the (now stubbed) frappe.utils symbols are re-bound.
         mod = importlib.reload(importlib.import_module("gege_hr.gege_hr.utils.checkout_miss"))
         return stub, mod

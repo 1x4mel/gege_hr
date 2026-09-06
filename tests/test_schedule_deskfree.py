@@ -65,13 +65,7 @@ class _RecDoc:
             return
         for r in self._db.rows.get(self._doctype, []):
             if isinstance(r, dict) and r.get("name") == self.name:
-                r.update(
-                    {
-                        k: v
-                        for k, v in self.__dict__.items()
-                        if not k.startswith("_") and k in r
-                    }
-                )
+                r.update({k: v for k, v in self.__dict__.items() if not k.startswith("_") and k in r})
                 break
 
     def insert(self, **k):
@@ -282,9 +276,7 @@ def shift(monkeypatch):
     monkeypatch.setattr(mod, "frappe", stub)
     # Session-employee + audit/notify seams (audit lazy-imports the real audit
     # module — out of scope here, record instead).
-    monkeypatch.setattr(
-        mod.emp_utils, "get_employee_for_user", lambda user=None: stub._viewer_emp
-    )
+    monkeypatch.setattr(mod.emp_utils, "get_employee_for_user", lambda user=None: stub._viewer_emp)
     audit_calls: list = []
     notify_calls: list = []
     monkeypatch.setattr(mod, "_audit_schedule", lambda *a, **k: audit_calls.append((a, k)))
@@ -304,9 +296,7 @@ def shift(monkeypatch):
             is_overnight=lambda s, e: False,
         ),
     )
-    return types.SimpleNamespace(
-        mod=mod, stub=stub, db=db, audit=audit_calls, notify=notify_calls
-    )
+    return types.SimpleNamespace(mod=mod, stub=stub, db=db, audit=audit_calls, notify=notify_calls)
 
 
 @pytest.fixture
@@ -511,9 +501,7 @@ def test_create_my_shift_request_date_order(shift):
     """B9: to_date < from_date → throw."""
     _seed_create_ok(shift.db)
     with pytest.raises(Exception, match="Ngày kết thúc"):
-        shift.mod.create_my_shift_request(
-            shift_type="Day", from_date=_future(5), to_date=_future(3)
-        )
+        shift.mod.create_my_shift_request(shift_type="Day", from_date=_future(5), to_date=_future(3))
 
 
 def test_create_my_shift_request_overlap_blocked(shift):
@@ -673,7 +661,7 @@ def _seed_override(db, stub, *, start=None, end=None, shift="Day", extra=None):
     stub._doc_map[("Shift Assignment", "SA-1")] = doc
     if extra:
         db.rows["Shift Assignment"].extend(extra)
-        for i, ex in enumerate(extra):
+        for ex in extra:
             stub._doc_map[("Shift Assignment", ex["name"])] = _RecDoc(dict(ex), db=db)
     return doc
 
@@ -708,9 +696,7 @@ def test_override_day_middle(admin, backfill_recorder):
     assert one_day.shift_type == "Evening" and one_day.start_date == one_day.end_date
     tail = created_docs[0]
     assert tail.shift_type == "Day"
-    assert str(tail.start_date) == str(
-        datetime.date.fromisoformat(day) + datetime.timedelta(days=1)
-    )
+    assert str(tail.start_date) == str(datetime.date.fromisoformat(day) + datetime.timedelta(days=1))
     # Day's instance materialised immediately.
     assert len(backfill_recorder) == 1
 
@@ -764,9 +750,7 @@ def test_override_day_conflict_from_second_assignment(admin, backfill_recorder):
     """B20: a SECOND overlapping SA (not the one being adjusted) blocks the
     1-day insert when its clock timings clash with the new shift."""
     mod, stub, db = admin.mod, admin.stub, admin.db
-    db.exists_set.update(
-        {("Employee", "E-1"), ("Shift Type", "Day"), ("Shift Type", "Clash")}
-    )
+    db.exists_set.update({("Employee", "E-1"), ("Shift Type", "Day"), ("Shift Type", "Clash")})
     db.settings[("HR Settings", "allow_multiple_shift_assignments")] = 0
     db.values[("Shift Type", "Day")] = {"start_time": _dt(9), "end_time": _dt(17)}
     db.values[("Shift Type", "Clash")] = {"start_time": _dt(10), "end_time": _dt(18)}

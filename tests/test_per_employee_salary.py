@@ -101,9 +101,7 @@ def fake_frappe(monkeypatch):
 # PS1–PS5 — resolver chain
 # --------------------------------------------------------------------------- #
 def test_ps1_employee_rate_wins(fake_frappe):
-    fake_frappe.db.register(
-        "Employee", [{"name": "EMP-1", "department": "D1", "vn_hourly_rate": 30000}]
-    )
+    fake_frappe.db.register("Employee", [{"name": "EMP-1", "department": "D1", "vn_hourly_rate": 30000}])
     fake_frappe.db.register("Department", [{"name": "D1", "vn_hourly_rate": 25000}])
     rate, source = P.resolve_hourly_rate_detail("EMP-1")
     assert rate == 30000
@@ -112,9 +110,7 @@ def test_ps1_employee_rate_wins(fake_frappe):
 
 
 def test_ps2_department_fallback(fake_frappe):
-    fake_frappe.db.register(
-        "Employee", [{"name": "EMP-1", "department": "D1", "vn_hourly_rate": 0}]
-    )
+    fake_frappe.db.register("Employee", [{"name": "EMP-1", "department": "D1", "vn_hourly_rate": 0}])
     fake_frappe.db.register("Department", [{"name": "D1", "vn_hourly_rate": 25000}])
     rate, source = P.resolve_hourly_rate_detail("EMP-1")
     assert rate == 25000

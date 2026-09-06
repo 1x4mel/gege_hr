@@ -340,12 +340,8 @@ def _publish_advance(doc=None) -> None:
                 "doctype": DOCTYPE,
                 "name": getattr(doc, "name", None) if doc is not None else None,
                 "employee": getattr(doc, "employee", None) if doc is not None else None,
-                "workflow_state": getattr(doc, "workflow_state", None)
-                if doc is not None
-                else None,
-                "payment_status": getattr(doc, "payment_status", None)
-                if doc is not None
-                else None,
+                "workflow_state": getattr(doc, "workflow_state", None) if doc is not None else None,
+                "payment_status": getattr(doc, "payment_status", None) if doc is not None else None,
             },
         )
     except Exception:
@@ -498,9 +494,7 @@ def all_advance_requests(
             "total_requested": round(sum(_f(r.get("requested_amount")) for r in filtered), 2),
             "total_approved": round(sum(_f(r.get("approved_amount")) for r in filtered), 2),
         }
-    return pagination.paginate_filtered(
-        filtered, page=page, page_size=page_size, summary=summary
-    )
+    return pagination.paginate_filtered(filtered, page=page, page_size=page_size, summary=summary)
 
 
 @frappe.whitelist()
@@ -705,23 +699,15 @@ def _linked_meta(doc) -> dict:
     try:
         ad = (getattr(doc, "linked_additional_salary", "") or "").strip()
         if ad:
-            out["additional_salary_status"] = frappe.db.get_value(
-                "Additional Salary", ad, "status"
-            )
-            out["additional_salary_docstatus"] = frappe.db.get_value(
-                "Additional Salary", ad, "docstatus"
-            )
+            out["additional_salary_status"] = frappe.db.get_value("Additional Salary", ad, "status")
+            out["additional_salary_docstatus"] = frappe.db.get_value("Additional Salary", ad, "docstatus")
     except Exception:
         pass
     try:
         pe = (getattr(doc, "linked_payment_entry", "") or "").strip()
         if pe:
-            out["payment_entry_status"] = frappe.db.get_value(
-                "Payment Entry", pe, "status"
-            )
-            out["payment_entry_docstatus"] = frappe.db.get_value(
-                "Payment Entry", pe, "docstatus"
-            )
+            out["payment_entry_status"] = frappe.db.get_value("Payment Entry", pe, "status")
+            out["payment_entry_docstatus"] = frappe.db.get_value("Payment Entry", pe, "docstatus")
     except Exception:
         pass
     return out
@@ -790,9 +776,7 @@ def update_advance_request(
     old_reason = doc.reason or ""
     old_date = doc.posting_date
     changed = False
-    if requested_amount not in (None, "") and str(requested_amount) != str(
-        doc.requested_amount
-    ):
+    if requested_amount not in (None, "") and str(requested_amount) != str(doc.requested_amount):
         doc.requested_amount = requested_amount
         changed = True
     if reason is not None and (reason or "") != old_reason:

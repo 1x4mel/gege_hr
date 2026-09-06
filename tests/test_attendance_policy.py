@@ -246,7 +246,12 @@ def test_save_policy_create_with_penalty_rows(fake):  # P1
 
 def test_save_policy_legacy_kwargs_style(fake):  # HrSalaryStructureView call shape
     doc = _register(fake, name="LIVE", policy_name="Live", is_active=1)
-    fake.api.save_policy(name="LIVE", penalty_rules=[{"from_minutes": 1, "to_minutes": 5, "penalty_type": "Per Minute", "penalty_value": 2000}])
+    fake.api.save_policy(
+        name="LIVE",
+        penalty_rules=[
+            {"from_minutes": 1, "to_minutes": 5, "penalty_type": "Per Minute", "penalty_value": 2000}
+        ],
+    )
     assert doc.saved == 1
     assert len(doc.penalty_rules) == 1
     assert doc.penalty_rules[0].penalty_type == "Per Minute"
@@ -295,13 +300,24 @@ def test_save_policy_penalty_rows_validated(fake):  # P7
     with pytest.raises(_FrappeError, match="lớn hơn"):
         fake.api.save_policy(
             {"policy_name": "X", "company": "GeGe Vietnam"},
-            penalty_rules=[{"from_minutes": 30, "to_minutes": 20, "penalty_type": "Fixed Amount", "penalty_value": 1}],
+            penalty_rules=[
+                {"from_minutes": 30, "to_minutes": 20, "penalty_type": "Fixed Amount", "penalty_value": 1}
+            ],
         )
 
 
 def test_save_policy_penalty_none_keeps_rows(fake):  # P8
     doc = _register(fake, name="D2", policy_name="Draft2")
-    doc.penalty_rules = [types.SimpleNamespace(from_minutes=1, to_minutes=2, penalty_type="Per Minute", penalty_value=1, salary_component=None, name="r1")]
+    doc.penalty_rules = [
+        types.SimpleNamespace(
+            from_minutes=1,
+            to_minutes=2,
+            penalty_type="Per Minute",
+            penalty_value=1,
+            salary_component=None,
+            name="r1",
+        )
+    ]
     fake.api.save_policy({"name": "D2", "grace_late_minutes": 9})
     assert len(doc.penalty_rules) == 1  # untouched
 
@@ -366,10 +382,42 @@ def test_delete_policy_missing_returns_deleted_false(fake):
 
 def test_list_policies_engine_pick(fake):  # P14
     fake.list_rows = [
-        dict(name="b", policy_name="B", company="C1", is_active=0, is_locked=0, version=1, modified="2026-08-02"),
-        dict(name="a", policy_name="A", company="C1", is_active=1, is_locked=0, version=2, modified="2026-08-03"),
-        dict(name="c", policy_name="C", company="C2", is_active=1, is_locked=0, version=1, modified="2026-08-01"),
-        dict(name="d", policy_name="D", company="C1", is_active=1, is_locked=0, version=1, modified="2026-08-01"),
+        dict(
+            name="b",
+            policy_name="B",
+            company="C1",
+            is_active=0,
+            is_locked=0,
+            version=1,
+            modified="2026-08-02",
+        ),
+        dict(
+            name="a",
+            policy_name="A",
+            company="C1",
+            is_active=1,
+            is_locked=0,
+            version=2,
+            modified="2026-08-03",
+        ),
+        dict(
+            name="c",
+            policy_name="C",
+            company="C2",
+            is_active=1,
+            is_locked=0,
+            version=1,
+            modified="2026-08-01",
+        ),
+        dict(
+            name="d",
+            policy_name="D",
+            company="C1",
+            is_active=1,
+            is_locked=0,
+            version=1,
+            modified="2026-08-01",
+        ),
     ]
     rows = fake.api.list_policies()
     picks = {r["name"] for r in rows if r["is_engine_pick"]}

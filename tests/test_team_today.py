@@ -243,7 +243,9 @@ def env(monkeypatch):
         "emp_utils",
         types.SimpleNamespace(
             get_employee_for_user=lambda: state["emp"],
-            emp_name=lambda e: e if isinstance(e, str) else ((e or {}).get("name") if isinstance(e, dict) else e),
+            emp_name=lambda e: (
+                e if isinstance(e, str) else ((e or {}).get("name") if isinstance(e, dict) else e)
+            ),
             get_user_roles=lambda: list(state["roles"]),
             HR_MANAGER_ROLES={"HR Manager", "System Manager"},
         ),
@@ -262,7 +264,9 @@ def env(monkeypatch):
 
     audits = []
     monkeypatch.setattr(
-        att, "audit_api", types.SimpleNamespace(log=lambda action, **kw: audits.append((action, kw)) or "AUD-1")
+        att,
+        "audit_api",
+        types.SimpleNamespace(log=lambda action, **kw: audits.append((action, kw)) or "AUD-1"),
     )
 
     rl = {"n": 0, "keys": []}
@@ -285,11 +289,41 @@ def env(monkeypatch):
 # --------------------------------------------------------------------------- #
 def _seed_team(fr):
     emps = {
-        "M1": {"name": "M1", "employee_name": "Trưởng Phương", "status": "Active", "reports_to": None, "designation": "Trưởng nhóm"},
-        "E1": {"name": "E1", "employee_name": "An Nguyễn", "status": "Active", "reports_to": "M1", "designation": "Sale"},
-        "E2": {"name": "E2", "employee_name": "Bình Trần", "status": "Active", "reports_to": "M1", "designation": "Kỹ thuật"},
-        "E3": {"name": "E3", "employee_name": "Cường Lê", "status": "Active", "reports_to": "M2", "designation": "Kế toán"},
-        "E4": {"name": "E4", "employee_name": "Dũng Phạm", "status": "Active", "reports_to": "M1", "designation": "Thực tập"},
+        "M1": {
+            "name": "M1",
+            "employee_name": "Trưởng Phương",
+            "status": "Active",
+            "reports_to": None,
+            "designation": "Trưởng nhóm",
+        },
+        "E1": {
+            "name": "E1",
+            "employee_name": "An Nguyễn",
+            "status": "Active",
+            "reports_to": "M1",
+            "designation": "Sale",
+        },
+        "E2": {
+            "name": "E2",
+            "employee_name": "Bình Trần",
+            "status": "Active",
+            "reports_to": "M1",
+            "designation": "Kỹ thuật",
+        },
+        "E3": {
+            "name": "E3",
+            "employee_name": "Cường Lê",
+            "status": "Active",
+            "reports_to": "M2",
+            "designation": "Kế toán",
+        },
+        "E4": {
+            "name": "E4",
+            "employee_name": "Dũng Phạm",
+            "status": "Active",
+            "reports_to": "M1",
+            "designation": "Thực tập",
+        },
     }
     fr.stores.setdefault("Employee", {}).update(emps)
 
@@ -358,19 +392,44 @@ def _seed_ws(fr):
 
 def _seed_requests(fr):
     fr.stores.setdefault(CR_DT, {})["CR-E1"] = {
-        "name": "CR-E1", "employee": "E1", "work_date": DAY, "workflow_state": "Pending HR", "docstatus": 0,
+        "name": "CR-E1",
+        "employee": "E1",
+        "work_date": DAY,
+        "workflow_state": "Pending HR",
+        "docstatus": 0,
     }
     fr.stores[CR_DT]["CR-E1-DONE"] = {
-        "name": "CR-E1-DONE", "employee": "E1", "work_date": DAY, "workflow_state": "Approved", "docstatus": 1,
+        "name": "CR-E1-DONE",
+        "employee": "E1",
+        "work_date": DAY,
+        "workflow_state": "Approved",
+        "docstatus": 1,
     }
     fr.stores.setdefault(OT_DT, {})["OT-E1"] = {
-        "name": "OT-E1", "employee": "E1", "work_date": DAY, "workflow_state": "Pending HR", "docstatus": 0, "from_datetime": f"{DAY} 18:00:00",
+        "name": "OT-E1",
+        "employee": "E1",
+        "work_date": DAY,
+        "workflow_state": "Pending HR",
+        "docstatus": 0,
+        "from_datetime": f"{DAY} 18:00:00",
     }
     fr.stores.setdefault("Leave Application", {})["LA-E2"] = {
-        "name": "LA-E2", "employee": "E2", "from_date": DAY, "to_date": DAY, "status": "Open", "docstatus": 0, "leave_type": "Nghỉ phép",
+        "name": "LA-E2",
+        "employee": "E2",
+        "from_date": DAY,
+        "to_date": DAY,
+        "status": "Open",
+        "docstatus": 0,
+        "leave_type": "Nghỉ phép",
     }
     fr.stores["Leave Application"]["LA-E1-APPROVED"] = {
-        "name": "LA-E1-APPROVED", "employee": "E1", "from_date": DAY, "to_date": DAY, "status": "Approved", "docstatus": 1, "leave_type": "Nghỉ phép",
+        "name": "LA-E1-APPROVED",
+        "employee": "E1",
+        "from_date": DAY,
+        "to_date": DAY,
+        "status": "Approved",
+        "docstatus": 1,
+        "leave_type": "Nghỉ phép",
     }
 
 
@@ -378,23 +437,41 @@ def _seed_shift_and_miss(fr):
     fr.stores.setdefault("Shift Assignment", {}).update(
         {
             "SA-E1": {
-                "name": "SA-E1", "employee": "E1", "status": "Active", "docstatus": 1,
-                "shift_type": "Ca hành chính", "start_date": "2026-09-01", "end_date": "2026-12-31",
+                "name": "SA-E1",
+                "employee": "E1",
+                "status": "Active",
+                "docstatus": 1,
+                "shift_type": "Ca hành chính",
+                "start_date": "2026-09-01",
+                "end_date": "2026-12-31",
             },
             "SA-E1-OLD": {
-                "name": "SA-E1-OLD", "employee": "E1", "status": "Active", "docstatus": 1,
-                "shift_type": "Ca cũ", "start_date": "2026-01-01", "end_date": "2026-08-31",
+                "name": "SA-E1-OLD",
+                "employee": "E1",
+                "status": "Active",
+                "docstatus": 1,
+                "shift_type": "Ca cũ",
+                "start_date": "2026-01-01",
+                "end_date": "2026-08-31",
             },
         }
     )
     fr.stores.setdefault(MISS_DT, {})["CM-E2"] = {
-        "name": "CM-E2", "employee": "E2", "work_date": DAY, "status": "Pending", "docstatus": 0,
+        "name": "CM-E2",
+        "employee": "E2",
+        "work_date": DAY,
+        "status": "Pending",
+        "docstatus": 0,
     }
 
 
 def _seed_locked(fr):
     fr.stores.setdefault(PERIOD_DT, {})["MAP-2609"] = {
-        "name": "MAP-2609", "from_date": "2026-09-01", "to_date": "2026-09-30", "status": "Locked", "docstatus": 1,
+        "name": "MAP-2609",
+        "from_date": "2026-09-01",
+        "to_date": "2026-09-30",
+        "status": "Locked",
+        "docstatus": 1,
     }
 
 
@@ -496,9 +573,20 @@ def test_tt08_team_member_day_detail_full_shape(_env_for_roster):
     env.state["emp"] = "M1"
     res = env.att.team_member_day_detail(employee="E1", date_str=DAY)
     for key in (
-        "work_date", "locked", "work_session", "punches", "corrections",
-        "overtime_requests", "attendance", "employee", "status",
-        "shift", "leave_application", "checkout_miss", "pending_approvals", "can",
+        "work_date",
+        "locked",
+        "work_session",
+        "punches",
+        "corrections",
+        "overtime_requests",
+        "attendance",
+        "employee",
+        "status",
+        "shift",
+        "leave_application",
+        "checkout_miss",
+        "pending_approvals",
+        "can",
     ):
         assert key in res, key
     assert res["work_session"]["name"] == "WS-E1"
@@ -537,16 +625,37 @@ def test_tt10_team_day_can_pure(env):
     assert f(status="Present", locked=False, is_hr=True, is_lm_of=False)["open_360"] is True
     assert f(status="Present", locked=False, is_hr=False, is_lm_of=True)["open_360"] is False
     # override_shift chỉ hôm nay
-    assert f(status="Present", locked=False, is_hr=True, is_lm_of=False, is_today=True)["override_shift"] is True
-    assert f(status="Present", locked=False, is_hr=True, is_lm_of=False, is_today=False)["override_shift"] is False
+    assert (
+        f(status="Present", locked=False, is_hr=True, is_lm_of=False, is_today=True)["override_shift"] is True
+    )
+    assert (
+        f(status="Present", locked=False, is_hr=True, is_lm_of=False, is_today=False)["override_shift"]
+        is False
+    )
     # nudge checkout-miss
-    assert f(status="Present", locked=False, is_hr=False, is_lm_of=True, ws={"missing_checkout": True})["nudge"] is True
-    assert f(status="Present", locked=False, is_hr=False, is_lm_of=True, ws={"missing_checkout": False})["nudge"] is False
+    assert (
+        f(status="Present", locked=False, is_hr=False, is_lm_of=True, ws={"missing_checkout": True})["nudge"]
+        is True
+    )
+    assert (
+        f(status="Present", locked=False, is_hr=False, is_lm_of=True, ws={"missing_checkout": False})["nudge"]
+        is False
+    )
     assert f(status="Absent", locked=False, is_hr=False, is_lm_of=True)["nudge"] is False
     # plain employee (không HR, không LM) — không có quyền gì trừ view
     can = f(status="Present", locked=False, is_hr=False, is_lm_of=False)
     assert can["view_detail"] is True
-    assert not any(can[k] for k in ("fix_punch", "mark_attendance", "request_correction", "override_shift", "open_360", "export"))
+    assert not any(
+        can[k]
+        for k in (
+            "fix_punch",
+            "mark_attendance",
+            "request_correction",
+            "override_shift",
+            "open_360",
+            "export",
+        )
+    )
     # export cho cả HR và LM
     assert f(status="Present", locked=False, is_hr=False, is_lm_of=True)["export"] is True
 
@@ -599,7 +708,13 @@ def test_tt14_my_day_detail_no_regression(_env_for_roster):
     env = _env_for_roster
     res = env.att.my_day_detail(employee="E1", work_date=DAY)
     assert set(res) == {
-        "work_date", "locked", "work_session", "punches", "corrections", "overtime_requests", "attendance"
+        "work_date",
+        "locked",
+        "work_session",
+        "punches",
+        "corrections",
+        "overtime_requests",
+        "attendance",
     }
     assert res["work_session"]["name"] == "WS-E1"
     assert res["attendance"]["name"] == "ATT-E1"

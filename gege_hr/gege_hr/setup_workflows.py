@@ -256,7 +256,7 @@ def _cm_transitions() -> list[tuple]:
         ("Closed", "Reopen", "Pending"),
     ]
     rows = []
-    for (s, a, nxt) in moves:
+    for s, a, nxt in moves:
         for role in (_EMP, _HRU, _HRM, _PAY):
             rows.append((s, a, nxt, role))
     return rows

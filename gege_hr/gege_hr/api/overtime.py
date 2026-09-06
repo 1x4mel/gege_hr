@@ -47,6 +47,7 @@ def _normalize_input_dt(value):
         return value
     return f"{m.group(1)} {int(m.group(2)):02d}:{m.group(3)}:00"
 
+
 # Row shape returned to the SPA — kept stable/flat so the list renders without
 # a second lookup (matches ``hr-ui/src/api/index.js`` OT request row docstring).
 _LIST_FIELDS = [
@@ -678,15 +679,11 @@ def all_overtime_requests(
         filters["employee"] = emp_utils.emp_name(employee)
     elif department:
         try:
-            emps = frappe.db.get_all(
-                "Employee", filters={"department": department}, pluck="name"
-            )
+            emps = frappe.db.get_all("Employee", filters={"department": department}, pluck="name")
         except Exception:
             emps = []
         if not emps:
-            return pagination.paginate_filtered(
-                [], page=page, page_size=page_size, summary=empty_summary
-            )
+            return pagination.paginate_filtered([], page=page, page_size=page_size, summary=empty_summary)
         filters["employee"] = ["in", emps]
 
     rows = frappe.db.get_all(

@@ -81,6 +81,7 @@ class _FakeDoc:
 
 def _apply_filters(rows, filters):
     """Simple AND filter eval (dict form incl. operator lists + 'not in'/'<'/>='/'!=')."""
+
     def _cmp(a, b):
         # Coerce to str when the types differ (posting_date str vs date object).
         if a is None:
@@ -104,9 +105,7 @@ def _apply_filters(rows, filters):
                     ok = False
                 elif op == ">=" and not _cmp(val, operand):
                     ok = False
-                elif op == "between" and not (
-                    operand[0] <= str(val or "") <= operand[1]
-                ):
+                elif op == "between" and not (operand[0] <= str(val or "") <= operand[1]):
                     ok = False
             elif val != v:
                 ok = False
@@ -215,15 +214,13 @@ class _Stub:
 
 def _utils():
     utils = types.ModuleType("frappe.utils")
-    utils.getdate = lambda v=None: (TODAY if v in (None, "") else datetime.date.fromisoformat(str(v)[:10]))
+    utils.getdate = lambda v=None: TODAY if v in (None, "") else datetime.date.fromisoformat(str(v)[:10])
     utils.nowdate = lambda: TODAY.isoformat()
     return utils
 
 
 def _seed_common(db):
-    db.tables.update(
-        {DOCTYPE, "VN Salary Advance Policy", "Comment", "File", "Employee"}
-    )
+    db.tables.update({DOCTYPE, "VN Salary Advance Policy", "Comment", "File", "Employee"})
     db.rows["Employee"] = [
         {"name": "E-1", "user_id": "emp@gege.test", "status": "Active", "company": "CO-1"},
         {"name": "E-2", "user_id": "other@gege.test", "status": "Active", "company": "CO-1"},
@@ -340,8 +337,7 @@ def test_get_paid_request_can_reverse_and_linked(advance):
     doc = _register(
         stub,
         db,
-        _mk_sar("SAR-1", workflow_state="Paid", payment_status="Paid",
-                linked_additional_salary="AD-1"),
+        _mk_sar("SAR-1", workflow_state="Paid", payment_status="Paid", linked_additional_salary="AD-1"),
     )
     # manager session
     stub.roles["emp@gege.test"] = ["HR Manager"]
@@ -349,18 +345,36 @@ def test_get_paid_request_can_reverse_and_linked(advance):
     db.rows["Additional Salary"] = [{"name": "AD-1", "docstatus": 1, "status": "Submitted"}]
     db.values[("Additional Salary", "AD-1")] = {"docstatus": 1, "status": "Submitted"}
     db.rows["VN Approval Log"] = [
-        {"reference_doctype": DOCTYPE, "reference_name": "SAR-1", "action": "Approve",
-         "from_state": "Pending HR", "to_state": "Approved", "actor": "hr@gege.test",
-         "comment": "ok", "action_at": "2026-09-02 10:00:00"}
+        {
+            "reference_doctype": DOCTYPE,
+            "reference_name": "SAR-1",
+            "action": "Approve",
+            "from_state": "Pending HR",
+            "to_state": "Approved",
+            "actor": "hr@gege.test",
+            "comment": "ok",
+            "action_at": "2026-09-02 10:00:00",
+        }
     ]
     db.rows["VN Audit Event"] = [
-        {"reference_doctype": DOCTYPE, "reference_name": "SAR-1", "audit_type": "Advance Submit",
-         "actor": "emp@gege.test", "description": "Draft → Pending Manager",
-         "old_value": None, "new_value": None, "created_at": "2026-09-01 09:00:00"}
+        {
+            "reference_doctype": DOCTYPE,
+            "reference_name": "SAR-1",
+            "audit_type": "Advance Submit",
+            "actor": "emp@gege.test",
+            "description": "Draft → Pending Manager",
+            "old_value": None,
+            "new_value": None,
+            "created_at": "2026-09-01 09:00:00",
+        }
     ]
     res = mod.get_advance_request("SAR-1")
     assert res["can"] == {
-        "edit": False, "cancel": False, "mark_paid": False, "reverse": True, "resubmit": False,
+        "edit": False,
+        "cancel": False,
+        "mark_paid": False,
+        "reverse": True,
+        "resubmit": False,
     }
     assert res["linked"]["additional_salary_docstatus"] == 1
     assert len(res["timeline"]["approval_logs"]) == 1
@@ -374,12 +388,26 @@ def test_get_timeline_merges_sorted_desc(advance):
     _register(stub, db, _mk_sar("SAR-2"))
     db.tables.update({"VN Approval Log", "VN Audit Event"})
     db.rows["VN Approval Log"] = [
-        {"reference_doctype": DOCTYPE, "reference_name": "SAR-2", "action": "Approve",
-         "from_state": "Pending Manager", "to_state": "Pending HR", "actor": "mgr@gege.test",
-         "comment": "", "action_at": "2026-09-02 08:00:00"},
-        {"reference_doctype": DOCTYPE, "reference_name": "SAR-2", "action": "Submit",
-         "from_state": "Draft", "to_state": "Pending Manager", "actor": "emp@gege.test",
-         "comment": "", "action_at": "2026-09-01 08:00:00"},
+        {
+            "reference_doctype": DOCTYPE,
+            "reference_name": "SAR-2",
+            "action": "Approve",
+            "from_state": "Pending Manager",
+            "to_state": "Pending HR",
+            "actor": "mgr@gege.test",
+            "comment": "",
+            "action_at": "2026-09-02 08:00:00",
+        },
+        {
+            "reference_doctype": DOCTYPE,
+            "reference_name": "SAR-2",
+            "action": "Submit",
+            "from_state": "Draft",
+            "to_state": "Pending Manager",
+            "actor": "emp@gege.test",
+            "comment": "",
+            "action_at": "2026-09-01 08:00:00",
+        },
     ]
     res = mod.get_advance_request("SAR-2")
     logs = res["timeline"]["approval_logs"]
@@ -392,9 +420,7 @@ def test_get_timeline_merges_sorted_desc(advance):
 def test_update_pending_request_revalidates_and_publishes(advance):
     mod, stub, db, rec = advance
     doc = _register(stub, db, _mk_sar("SAR-3"))
-    res = mod.update_advance_request(
-        "SAR-3", requested_amount=2500000, reason="Sửa số tiền"
-    )
+    res = mod.update_advance_request("SAR-3", requested_amount=2500000, reason="Sửa số tiền")
     assert doc.saved is True
     assert doc.requested_amount == 2500000
     assert doc.reason == "Sửa số tiền"
@@ -495,9 +521,7 @@ def test_approve_amount_ignored_for_other_types(approval):
     )
     stub._doc_map[("VN Overtime Request", "OT-1")] = doc
     db.rows["VN Overtime Request"] = [doc.as_dict()]
-    res = mod.approve_request(
-        name="OT-1", request_type="Overtime Request", approved_amount=123
-    )
+    res = mod.approve_request(name="OT-1", request_type="Overtime Request", approved_amount=123)
     assert res["status"]  # no crash; param ignored
     assert getattr(doc, "approved_amount", None) in (None, 0)
 
@@ -505,9 +529,7 @@ def test_approve_amount_ignored_for_other_types(approval):
 def test_reject_request_publishes_advance_realtime(approval):
     mod, stub, db = approval
     _register(stub, db, _mk_sar("SAR-C", workflow_state="Pending HR"))
-    res = mod.reject_request(
-        name="SAR-C", request_type="Salary Advance Request", comment="thiếu chứng từ"
-    )
+    res = mod.reject_request(name="SAR-C", request_type="Salary Advance Request", comment="thiếu chứng từ")
     assert res["status"] == "Rejected"
     assert any(ev[0] == "advance_updated" for ev in stub.events)
 
@@ -517,18 +539,42 @@ def test_reject_request_publishes_advance_realtime(approval):
 # --------------------------------------------------------------------------- #
 def _seed_list(db):
     db.rows[DOCTYPE] = [
-        {"name": "SAR-L1", "employee": "E-1", "employee_name": "Employee One",
-         "posting_date": "2026-09-01", "requested_amount": 3000000,
-         "approved_amount": 0, "workflow_state": "Paid", "payment_status": "Paid",
-         "docstatus": 0, "reason": "a"},
-        {"name": "SAR-L2", "employee": "E-1", "employee_name": "Employee One",
-         "posting_date": "2026-08-20", "requested_amount": 1500000,
-         "approved_amount": 0, "workflow_state": "Approved", "payment_status": "Unpaid",
-         "docstatus": 0, "reason": "b"},
-        {"name": "SAR-L3", "employee": "E-1", "employee_name": "Employee One",
-         "posting_date": "2026-08-05", "requested_amount": 500000,
-         "approved_amount": 0, "workflow_state": "Rejected", "payment_status": "Unpaid",
-         "docstatus": 0, "reason": "c"},
+        {
+            "name": "SAR-L1",
+            "employee": "E-1",
+            "employee_name": "Employee One",
+            "posting_date": "2026-09-01",
+            "requested_amount": 3000000,
+            "approved_amount": 0,
+            "workflow_state": "Paid",
+            "payment_status": "Paid",
+            "docstatus": 0,
+            "reason": "a",
+        },
+        {
+            "name": "SAR-L2",
+            "employee": "E-1",
+            "employee_name": "Employee One",
+            "posting_date": "2026-08-20",
+            "requested_amount": 1500000,
+            "approved_amount": 0,
+            "workflow_state": "Approved",
+            "payment_status": "Unpaid",
+            "docstatus": 0,
+            "reason": "b",
+        },
+        {
+            "name": "SAR-L3",
+            "employee": "E-1",
+            "employee_name": "Employee One",
+            "posting_date": "2026-08-05",
+            "requested_amount": 500000,
+            "approved_amount": 0,
+            "workflow_state": "Rejected",
+            "payment_status": "Unpaid",
+            "docstatus": 0,
+            "reason": "c",
+        },
     ]
 
 
@@ -567,15 +613,33 @@ def test_all_requests_denied_for_plain_employee(advance):
 def test_preview_reports_quota_exhausted(advance):
     mod, stub, db, _ = advance
     db.rows["VN Salary Advance Policy"] = [
-        {"name": "POL-1", "company": "CO-1", "is_active": 1, "max_percentage": 30,
-         "max_fixed_amount": 0, "min_working_days": 0, "max_requests_per_month": 2,
-         "cutoff_day": 25, "modified": "2026-08-01"},
+        {
+            "name": "POL-1",
+            "company": "CO-1",
+            "is_active": 1,
+            "max_percentage": 30,
+            "max_fixed_amount": 0,
+            "min_working_days": 0,
+            "max_requests_per_month": 2,
+            "cutoff_day": 25,
+            "modified": "2026-08-01",
+        },
     ]
     db.rows[DOCTYPE] = [
-        {"name": "SAR-Q1", "employee": "E-1", "workflow_state": "Approved",
-         "docstatus": 0, "posting_date": "2026-09-01"},
-        {"name": "SAR-Q2", "employee": "E-1", "workflow_state": "Paid",
-         "docstatus": 0, "posting_date": "2026-09-02"},
+        {
+            "name": "SAR-Q1",
+            "employee": "E-1",
+            "workflow_state": "Approved",
+            "docstatus": 0,
+            "posting_date": "2026-09-01",
+        },
+        {
+            "name": "SAR-Q2",
+            "employee": "E-1",
+            "workflow_state": "Paid",
+            "docstatus": 0,
+            "posting_date": "2026-09-02",
+        },
     ]
     res = mod.preview_eligibility(employee="E-1", requested_amount=1000000)
     assert res["policy"] == "POL-1"
@@ -656,7 +720,8 @@ def test_mark_paid_uses_sanctioned_amount(advance):
     mod, stub, db, _ = advance
     stub.roles["emp@gege.test"] = ["HR Manager"]
     doc = _register(
-        stub, db,
+        stub,
+        db,
         _mk_sar("SAR-P", workflow_state="Approved", approved_amount=1500000),
     )
     res = mod.mark_paid("SAR-P")
@@ -697,7 +762,8 @@ def test_reverse_paid_returns_to_approved(advance):
     mod, stub, db, _ = advance
     stub.roles["emp@gege.test"] = ["HR Manager"]
     doc = _register(
-        stub, db,
+        stub,
+        db,
         _mk_sar("SAR-R3", workflow_state="Paid", payment_status="Paid"),
     )
     doc._reverse_advance_deduction = lambda force=False: False  # no deduction row
