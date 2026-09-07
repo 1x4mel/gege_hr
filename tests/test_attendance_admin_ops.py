@@ -186,6 +186,11 @@ class _Frappe:
         if not (self._roles & set(roles)):
             raise _PermErr("not allowed")
 
+    def get_roles(self, user=None):
+        # WP4 (plan-team-attendance-desk-free): the LM-scope gates read
+        # ``frappe.get_roles()`` — mirror the constructor roles.
+        return tuple(self._roles)
+
     def delete_doc(self, doctype, name):
         self.deleted.append((doctype, name))
         self.stores.get(doctype, {}).pop(name, None)
@@ -636,8 +641,14 @@ def test_all_endpoints_deny_plain_employee(env, monkeypatch):
         lambda: m.approve_session_overtime(work_session="WS-1"),
     ]
     for call in calls:
-        with pytest.raises(_PermErr):
+        # WP4 (plan-team-attendance-desk-free): the punch endpoints now deny via
+        # ``frappe.throw(..., PermissionError)`` (the LM-scope gate) instead of
+        # ``only_for`` — the stub surfaces that as ``_Thrown(kind="Permission")``.
+        # Both denial paths are acceptable; anything else must fail.
+        with pytest.raises((_PermErr, _Thrown)) as ei:
             call()
+        if isinstance(ei.value, _Thrown):
+            assert ei.value.kind == "Permission"
 
 
 def test_approve_ot_requires_hr_manager_or_system(env):

@@ -257,7 +257,15 @@ def _utils():
     def _add_days(v, days):
         return utils.getdate(v) + datetime.timedelta(days=days)
 
+    def _flt(v, precision=None):
+        try:
+            out = float(v) if v not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+        return round(out, precision) if precision is not None else out
+
     utils.add_days = _add_days
+    utils.flt = _flt
     return utils
 
 
@@ -780,3 +788,323 @@ def test_override_day_conflict_from_second_assignment(admin, backfill_recorder):
     )
     with pytest.raises(Exception, match="trùng giờ"):
         mod.override_day_shift_assignment("E-1", day, "Clash")
+
+
+# =========================================================================== #
+# C-cases — /hr/team/schedule desk-free grid (plans/plan-team-schedule-desk-free.md §5.1)
+# tz stub pins "today" at 2026-09-02; grid windows below use mid-September.
+# =========================================================================== #
+_TODAY = "2026-09-02"
+
+
+def _seed_team(db, stub):
+    """LM E-1 with direct reports E-2/E-3 + foreign E-9 (common C-case setup)."""
+    db.rows["Employee"] = [
+        {"name": "E-2", "employee_name": "Member Two", "department": "Sales", "reports_to": "E-1", "status": "Active"},
+        {"name": "E-3", "employee_name": "Member Three", "department": "Ops", "reports_to": "E-1", "status": "Active"},
+        {"name": "E-9", "employee_name": "Foreign Nine", "department": "IT", "reports_to": "X-1", "status": "Active"},
+    ]
+    db.values[("Shift Type", "Day")] = {"start_time": datetime.time(9, 0), "end_time": datetime.time(17, 0)}
+    db.values[("Shift Type", "Evening")] = {"start_time": datetime.time(18, 0), "end_time": datetime.time(22, 0)}
+
+
+def test_c1_team_schedule_line_manager_scope(shift):
+    """C1: Line Manager opens team_schedule — own reports only, no 403."""
+    mod, stub, db = shift.mod, shift.stub, shift.db
+    stub._roles = {"Line Manager"}
+    _seed_team(db, stub)
+    rows = mod.team_schedule()
+    assert {r["name"] for r in rows} == {"E-2", "E-3"}  # E-9 excluded
+
+
+def test_c2_team_schedule_plain_employee_denied(shift):
+    """C2: plain Employee → PermissionError (their surface is /hr/schedule)."""
+    shift.stub._roles = {"Employee"}
+    with pytest.raises(PermissionError):
+        shift.mod.team_schedule()
+
+
+def test_c3_team_schedule_hr_company_scope(shift):
+    """C3: HR Manager without reports → company-wide scope (E-9 visible)."""
+    mod, stub, db = shift.mod, shift.stub, shift.db
+    stub._roles = {"HR Manager"}
+    _seed_team(db, stub)
+    rows = mod.team_schedule()
+    assert "E-9" in {r["name"] for r in rows}
+
+
+def test_c4_context_line_manager_matrix(shift):
+    """C4: LM context — assign/override/approve yes, bulk no, scope=team."""
+    mod, stub, db = shift.mod, shift.stub, shift.db
+    stub._roles = {"Line Manager"}
+    _seed_team(db, stub)
+    ctx = mod.team_schedule_context()
+    assert ctx["scope"]["mode"] == "team"
+    assert ctx["can"]["assign"] is True
+    assert ctx["can"]["override_day"] is True
+    assert ctx["can"]["approve_requests"] is True
+    assert ctx["can"]["export"] is True
+    assert ctx["can"]["bulk"] is False  # bulk stays HR Manager / System Manager
+
+
+def test_c5_context_plain_employee_denied(shift):
+    """C5: plain Employee on the team context → PermissionError."""
+    shift.stub._roles = {"Employee"}
+    with pytest.raises(PermissionError):
+        shift.mod.team_schedule_context()
+
+
+def test_c6_pending_approvals_scoped(shift):
+    """C6: pending count = in-window Draft SRs of SCOPE only (2 own + 1 foreign → 2)."""
+    mod, stub, db = shift.mod, shift.stub, shift.db
+    stub._roles = {"Line Manager"}
+    _seed_team(db, stub)
+    db.rows["Shift Request"] = [
+        {"name": "SR-1", "employee": "E-2", "docstatus": 0, "status": "Draft", "from_date": "2026-09-03", "to_date": "2026-09-03"},
+        {"name": "SR-2", "employee": "E-3", "docstatus": 0, "status": "Draft", "from_date": "2026-09-04", "to_date": "2026-09-04"},
+        {"name": "SR-9", "employee": "E-9", "docstatus": 0, "status": "Draft", "from_date": "2026-09-04", "to_date": "2026-09-04"},
+    ]
+    ctx = mod.team_schedule_context("2026-09-03", "2026-09-05")
+    assert ctx["pending_approvals"]["count"] == 2
+
+
+_GRID_DOCTYPES = (
+    "Employee",
+    "Shift Assignment",
+    "VN Employee Shift Instance",
+    "Leave Application",
+    "VN Attendance Work Session",
+    "Shift Request",
+)
+
+
+def test_c7_grid_batched_no_n_plus_1(shift):
+    """C7: exactly ONE query per doctype per grid request (batched read)."""
+    mod, stub, db = shift.mod, shift.stub, shift.db
+    stub._roles = {"Line Manager"}
+    _seed_team(db, stub)
+    db.calls.clear()
+    grid = mod.team_schedule_grid("2026-09-10", "2026-09-16")
+    assert grid["members"]  # team rendered
+    for dt in _GRID_DOCTYPES:
+        assert sum(1 for c in db.calls if c["doctype"] == dt) == 1, f"N+1 leak on {dt}"
+
+
+def test_c8_grid_instance_status_beats_assignment(shift):
+    """C8: a Skipped VESI shows through even with an active covering SA."""
+    mod, stub, db = shift.mod, shift.stub, shift.db
+    stub._roles = {"Line Manager"}
+    _seed_team(db, stub)
+    db.rows["Shift Assignment"] = [
+        {"name": "SA-1", "employee": "E-2", "status": "Active", "docstatus": 1,
+         "shift_type": "Day", "start_date": "2026-09-10", "end_date": "2026-09-12"},
+    ]
+    db.rows["VN Employee Shift Instance"] = [
+        {"name": "VESI-1", "employee": "E-2", "work_date": "2026-09-11", "shift_type": "Day", "status": "Skipped"},
+    ]
+    grid = mod.team_schedule_grid("2026-09-10", "2026-09-12")
+    cell = next(c for c in grid["members"][0]["days"] if c["date"] == "2026-09-11")
+    assert cell["instance"] == "VESI-1"
+    assert cell["instance_status"] == "Skipped"
+    assert cell["shift_assignment"] == "SA-1"
+
+
+def test_c9_grid_leave_chip(shift):
+    """C9: approved leave renders as a chip beside the shift."""
+    mod, stub, db = shift.mod, shift.stub, shift.db
+    stub._roles = {"Line Manager"}
+    _seed_team(db, stub)
+    db.rows["Shift Assignment"] = [
+        {"name": "SA-1", "employee": "E-2", "status": "Active", "docstatus": 1,
+         "shift_type": "Day", "start_date": "2026-09-10", "end_date": "2026-09-12"},
+    ]
+    db.rows["Leave Application"] = [
+        {"name": "LA-1", "employee": "E-2", "leave_type": "Annual Leave",
+         "from_date": "2026-09-11", "to_date": "2026-09-11", "status": "Approved", "docstatus": 1},
+    ]
+    grid = mod.team_schedule_grid("2026-09-10", "2026-09-12")
+    cell = next(c for c in grid["members"][0]["days"] if c["date"] == "2026-09-11")
+    assert cell["leave"]["type"] == "Annual Leave"
+
+
+def test_c10_grid_coverage_gap(shift):
+    """C10: empty non-leave future day flagged unassigned + counted in summary."""
+    mod, stub, db = shift.mod, shift.stub, shift.db
+    stub._roles = {"Line Manager"}
+    _seed_team(db, stub)  # E-3 has no SA at all
+    grid = mod.team_schedule_grid("2026-09-10", "2026-09-11")
+    e3 = next(m for m in grid["members"] if m["employee"] == "E-3")
+    assert all(c.get("unassigned") for c in e3["days"])
+    assert grid["summary"]["unassigned_days"] >= 2
+
+
+def test_c11_grid_window_clamp(shift):
+    """C11: >31-day window → ValidationError."""
+    mod, stub = shift.mod, shift.stub
+    stub._roles = {"Line Manager"}
+    stub.ValidationError = type("ValidationError", (Exception,), {})
+    with pytest.raises(Exception):
+        mod.team_schedule_grid("2026-09-01", "2026-10-15")
+
+
+def test_c12_cell_can_past_day_readonly(shift):
+    """C12: past dates are read-only (mutations false, view_detail true)."""
+    can = shift.mod._grid_cell_can(
+        is_hr=True, is_lm_of=True, day="2026-08-01", today="2026-09-02",
+        has_assignment=True, has_instance=True, instance_status="Scheduled",
+    )
+    assert can["view_detail"] is True
+    assert not any(can[k] for k in ("assign", "override", "skip", "amend", "end", "approve"))
+
+
+def test_c13_cell_can_active_instance_engine_owned(shift):
+    """C13: Active/Completed instances are engine-owned — no manual mutations."""
+    can = shift.mod._grid_cell_can(
+        is_hr=True, is_lm_of=True, day="2026-09-10", today="2026-09-02",
+        has_assignment=True, has_instance=True, instance_status="Active",
+    )
+    assert not any(can[k] for k in ("assign", "override", "skip", "amend", "end"))
+
+
+def test_c14_cell_can_line_manager_scope(shift):
+    """C14: a non-report member gets no mutation flags for an LM."""
+    can = shift.mod._grid_cell_can(
+        is_hr=False, is_lm_of=False, day="2026-09-10", today="2026-09-02",
+        has_assignment=True, has_instance=True, instance_status="Scheduled",
+    )
+    assert not any(can[k] for k in ("assign", "override", "skip", "amend", "end", "approve"))
+    ok = shift.mod._grid_cell_can(
+        is_hr=False, is_lm_of=True, day="2026-09-10", today="2026-09-02",
+        has_assignment=True, has_instance=True, instance_status="Scheduled",
+    )
+    assert ok["override"] is True and ok["skip"] is True
+
+
+def _patch_real_emp_utils(monkeypatch, me):
+    import gege_hr.gege_hr.utils.employee as emp_utils_real
+
+    monkeypatch.setattr(emp_utils_real, "get_employee_for_user", lambda user=None: me)
+
+
+def test_c15_list_shift_requests_lm_team_scope(admin, monkeypatch):
+    """C15: LM list_shift_requests → only own team's drafts."""
+    mod, stub, db = admin.mod, admin.stub, admin.db
+    stub._roles = {"Line Manager"}
+    _patch_real_emp_utils(monkeypatch, "LM-1")
+    db.rows["Employee"] = [
+        {"name": "E-2", "status": "Active", "reports_to": "LM-1"},
+        {"name": "E-9", "status": "Active", "reports_to": "OTHER"},
+    ]
+    db.rows["Shift Request"] = [
+        {"name": "SR-1", "employee": "E-2", "docstatus": 0, "status": "Draft", "from_date": "2026-09-10", "to_date": "2026-09-10"},
+        {"name": "SR-9", "employee": "E-9", "docstatus": 0, "status": "Draft", "from_date": "2026-09-10", "to_date": "2026-09-10"},
+    ]
+    rows = mod.list_shift_requests(scope="team")
+    assert {r["employee"] for r in rows} == {"E-2"}
+
+
+def test_c16_lm_approve_foreign_denied(admin, monkeypatch):
+    """C16: LM approving a non-report member's SR → PermissionError."""
+    mod, stub, db = admin.mod, admin.stub, admin.db
+    stub._roles = {"Line Manager"}
+    stub.session = types.SimpleNamespace(user="lm@gege.test")
+    _patch_real_emp_utils(monkeypatch, "LM-1")
+    db.exists_set.add(("Shift Request", "SR-X"))
+    db.values[("Employee", "E-9")] = {"reports_to": "OTHER"}
+    stub._doc_map[("Shift Request", "SR-X")] = _RecDoc(
+        {"employee": "E-9", "approver": None, "status": "Draft"}, name="SR-X", db=db, doctype="Shift Request"
+    )
+    with pytest.raises(PermissionError):
+        mod.reject_shift_request("SR-X")
+
+
+def test_c17_configured_approver_can_approve(admin):
+    """C17: the SR's configured approver (any role) may approve; SA is created."""
+    mod, stub, db = admin.mod, admin.stub, admin.db
+    stub._roles = {"Employee"}  # NOT an HR role — only the approver check lets them in
+    stub.session = types.SimpleNamespace(user="boss@gege.test")
+    db.exists_set.update({("Shift Request", "SR-A"), ("Employee", "E-2"), ("Shift Type", "Day")})
+    stub._doc_map[("Shift Request", "SR-A")] = _RecDoc(
+        {"employee": "E-2", "approver": "boss@gege.test", "status": "Draft", "company": None,
+         "shift_type": "Day", "from_date": "2026-09-10", "to_date": "2026-09-10"},
+        name="SR-A", db=db, doctype="Shift Request",
+    )
+    res = mod.approve_shift_request("SR-A")
+    assert res["shift_assignment"]
+
+
+def test_c18_swap_same_instance_pair_denied(admin):
+    """C18: swapping a day with itself → ValidationError."""
+    mod, stub, db = admin.mod, admin.stub, admin.db
+    stub._roles = {"HR Manager"}
+    stub.ValidationError = type("ValidationError", (Exception,), {})
+    db.values[("VN Employee Shift Instance", "V-1")] = {
+        "employee": "E-1", "work_date": "2026-09-10", "shift_type": "Day"
+    }
+    with pytest.raises(Exception):
+        mod.swap_shift_days("V-1", "V-1")
+
+
+def test_c19_swap_happy_path(admin):
+    """C19: two-cell swap → both overrides applied, union result, audit row."""
+    mod, stub, db = admin.mod, admin.stub, admin.db
+    stub._roles = {"HR Manager"}
+    db.exists_set.update({("Employee", "E-1"), ("Employee", "E-2"), ("Shift Type", "Day"), ("Shift Type", "Evening")})
+    db.values[("VN Employee Shift Instance", "V-1")] = {
+        "employee": "E-1", "work_date": "2026-09-10", "shift_type": "Day"
+    }
+    db.values[("VN Employee Shift Instance", "V-2")] = {
+        "employee": "E-2", "work_date": "2026-09-11", "shift_type": "Evening"
+    }
+    res = mod.swap_shift_days("V-1", "V-2")
+    assert len(res["created"]) == 2  # one 1-day SA per side
+    assert res["adjusted"] == [] and res["cancelled"] == []
+
+
+def test_c20_copy_week_partial_safe(admin):
+    """C20: mid-batch conflict on E-1 is recorded; E-2 still copies fine."""
+    mod, stub, db = admin.mod, admin.stub, admin.db
+    stub._roles = {"HR Manager"}
+    db.exists_set.update({("Employee", "E-1"), ("Employee", "E-2"), ("Shift Type", "Day"), ("Shift Type", "Evening")})
+    db.values[("Shift Type", "Day")] = {"start_time": _dt(9), "end_time": _dt(17)}
+    db.values[("Shift Type", "Evening")] = {"start_time": _dt(18), "end_time": _dt(22)}
+    db.rows["Shift Assignment"] = [
+        {"name": "SA-SRC", "employee": "E-1", "status": "Active", "docstatus": 1,
+         "shift_type": "Day", "start_date": "2026-09-07", "end_date": "2026-09-07"},
+        # Blocker shares the SAME shift (Day) on the target day → genuine G5
+        # conflict (a disjoint-timing Evening would be legitimately allowed).
+        {"name": "SA-BLK", "employee": "E-1", "status": "Active", "docstatus": 1,
+         "shift_type": "Day", "start_date": "2026-09-14", "end_date": "2026-09-14"},
+        {"name": "SA-E2", "employee": "E-2", "status": "Active", "docstatus": 1,
+         "shift_type": "Evening", "start_date": "2026-09-08", "end_date": "2026-09-08"},
+    ]
+    res = mod.copy_week_schedule("2026-09-07", "2026-09-14", ["E-1", "E-2"])
+    assert res["enqueued"] is False
+    by_emp = {r["employee"]: r for r in res["results"]}
+    # Per-weekday replay: E-1's only pattern day (Mon Day) is blocked on the
+    # target Monday → created 0 + conflict recorded; E-2's Tue Evening copies.
+    assert by_emp["E-1"]["created"] == 0 and by_emp["E-1"]["conflict"]
+    assert by_emp["E-2"]["created"] == 1 and by_emp["E-2"]["conflict"] is None
+
+
+def test_c21_export_denied_for_employee(shift):
+    """C21: export is manager/HR only — plain Employee → PermissionError."""
+    shift.stub._roles = {"Employee"}
+    with pytest.raises(PermissionError):
+        shift.mod.team_schedule_export("2026-09-10", "2026-09-16")
+
+
+def test_c22_ics_token_gate(shift):
+    """C22: bad token → PermissionError; valid token → VCALENDAR feed."""
+    mod, stub, db = shift.mod, shift.stub, shift.db
+    stub._roles = {"Employee"}  # ics is role-free (token-gated, not session-gated)
+    with pytest.raises(PermissionError):
+        mod.team_schedule_ics(employee="E-2", token="forged")
+    _seed_team(db, stub)
+    db.rows["Shift Assignment"] = [
+        {"name": "SA-1", "employee": "E-2", "status": "Active", "docstatus": 1,
+         "shift_type": "Day", "start_date": "2026-09-10", "end_date": "2026-09-12"},
+    ]
+    out = mod.team_schedule_ics(employee="E-2", token=mod._schedule_ics_token("E-2"))
+    assert out.startswith("BEGIN:VCALENDAR")
+    assert "SUMMARY:Day" in out and out.endswith("END:VCALENDAR")

@@ -2165,6 +2165,87 @@ def get_shift_assignment_options() -> dict:
     }
 
 
+SCHEDULE_EDITOR_ROLES = {"HR Manager", "System Manager", "HR User"}
+
+
+def _session_roles() -> set | None:
+    """Session roles as a set; ``None`` when the frappe surface can't answer
+    (stub benches without ``get_roles`` — defer to the classic only_for gate)."""
+    try:
+        return set(frappe.get_roles() or [])
+    except Exception:
+        return None
+
+
+def _sa_employee_or_empty(name: str) -> str:
+    """Employee of a Shift Assignment ("" when unknown) — lets the permission
+    gate run BEFORE any existence check so unauthorized callers can't probe
+    which names exist."""
+    try:
+        return frappe.db.get_value("Shift Assignment", name, "employee") or ""
+    except Exception:
+        return ""
+
+
+def _require_schedule_editor_for(employee: str) -> None:
+    """Permission gate for the /hr/team/schedule mutation endpoints
+    (plans/plan-team-schedule-desk-free.md §3.5 role matrix).
+
+    HR Manager / System Manager / HR User may edit anyone (the company roster
+    is their scope). ``Line Manager`` may only act on employees whose
+    ``reports_to`` is them — preventing cross-team privilege escalation
+    (same shape as :func:`_require_attendance_editor_for`).
+    """
+    roles = _session_roles()
+    if roles is None:
+        frappe.only_for(list(SCHEDULE_EDITOR_ROLES))
+        return
+    if roles & SCHEDULE_EDITOR_ROLES:
+        return
+    if roles & {"Line Manager"}:
+        from gege_hr.gege_hr.utils import employee as emp_utils
+
+        me = emp_utils.get_employee_for_user()
+        if me:
+            reports_to = frappe.db.get_value("Employee", employee, "reports_to")
+            if reports_to == me:
+                return
+        frappe.throw(
+            _("Bạn chỉ được thao tác lịch làm việc của nhân viên trong team của mình."),
+            frappe.PermissionError,
+        )
+    frappe.throw(_("Bạn không có quyền thao tác lịch làm việc."), frappe.PermissionError)
+
+
+def _require_schedule_approver_for(employee: str, approver: str | None = None) -> None:
+    """Gate cho approve/reject Shift Request từ /hr/team/schedule (plan §4 WP4).
+
+    HR roles pass; ngoài ra (i) Line Manager của chính employee đó, hoặc
+    (ii) user được cấu hình làm ``approver`` trên request — đều được duyệt.
+    """
+    roles = _session_roles()
+    if roles is None:
+        frappe.only_for(list(SCHEDULE_EDITOR_ROLES))
+        return
+    if roles & SCHEDULE_EDITOR_ROLES:
+        return
+    if approver and getattr(frappe.session, "user", None) == approver:
+        return
+    if roles & {"Line Manager"}:
+        from gege_hr.gege_hr.utils import employee as emp_utils
+
+        me = emp_utils.get_employee_for_user()
+        if me:
+            reports_to = frappe.db.get_value("Employee", employee, "reports_to")
+            if reports_to == me:
+                return
+        frappe.throw(
+            _("Bạn chỉ được duyệt yêu cầu của nhân viên trong team của mình."),
+            frappe.PermissionError,
+        )
+    frappe.throw(_("Bạn không có quyền duyệt yêu cầu đổi ca."), frappe.PermissionError)
+
+
 @frappe.whitelist()
 def create_shift_assignment(
     employee: str,
@@ -2183,8 +2264,33 @@ def create_shift_assignment(
 
     Conflict check: rejects overlapping Active assignments for the same
     employee (plan risk §9 — prevents double-booking).
+
+    Gate: schedule-editor matrix (plan §3.5) — HR roles anyone, Line Manager
+    own team only.
     """
-    _require_hr_admin()
+    _require_schedule_editor_for((employee or "").strip())
+    return _create_shift_assignment_core(
+        employee=employee,
+        shift_type=shift_type,
+        start_date=start_date,
+        end_date=end_date,
+        status=status,
+        work_location=work_location,
+        shift_request=shift_request,
+    )
+
+
+def _create_shift_assignment_core(
+    employee: str,
+    shift_type: str,
+    start_date: str,
+    end_date: str | None = None,
+    status: str = "Active",
+    work_location: str | None = None,
+    shift_request: str | None = None,
+) -> dict:
+    """Ungated core of :func:`create_shift_assignment` (internal reuse only —
+    e.g. :func:`approve_shift_request` already holds the approver gate)."""
     employee = (employee or "").strip()
     shift_type = (shift_type or "").strip()
     start_date = (start_date or "").strip()
@@ -2251,8 +2357,8 @@ def end_shift_assignment(name: str, end_date: str) -> dict:
     Cancelling (rather than just setting status) is the Frappe convention for
     submittable docs and frees the employee for a new assignment.
     """
-    _require_hr_admin()
     name = (name or "").strip()
+    _require_schedule_editor_for(_sa_employee_or_empty(name))
     if not name or not frappe.db.exists("Shift Assignment", name):
         frappe.throw(_("Ca làm việc không tồn tại."))
     if not end_date:
@@ -2343,8 +2449,8 @@ def update_shift_assignment(
     triggers the native ``on_update_after_submit`` hook which re-validates
     overlapping shifts, so extending a span stays conflict-safe.
     """
-    _require_hr_admin()
     name = (name or "").strip()
+    _require_schedule_editor_for(_sa_employee_or_empty(name))
     if not name or not frappe.db.exists("Shift Assignment", name):
         frappe.throw(_("Ca làm việc không tồn tại."))
     doc = frappe.get_doc("Shift Assignment", name)
@@ -2405,8 +2511,8 @@ def amend_shift_assignment(
     as a friendly error), then insert + submit a fresh doc with ``amended_from``
     set. From an already-cancelled doc it simply creates the amended copy.
     """
-    _require_hr_admin()
     name = (name or "").strip()
+    _require_schedule_editor_for(_sa_employee_or_empty(name))
     if not name or not frappe.db.exists("Shift Assignment", name):
         frappe.throw(_("Ca làm việc không tồn tại."))
     old = frappe.get_doc("Shift Assignment", name)
@@ -2733,8 +2839,8 @@ def override_day_shift_assignment(
     covering assignment simply gets the 1-day shift. The day's VN Employee
     Shift Instance is materialised immediately (no scheduler wait).
     """
-    _require_hr_admin()
     employee = (employee or "").strip()
+    _require_schedule_editor_for(employee)
     date = (date or "").strip()
     shift_type = (shift_type or "").strip()
     if not employee or not frappe.db.exists("Employee", employee):
@@ -2833,12 +2939,40 @@ def list_shift_requests(
     from_date: str | None = None,
     to_date: str | None = None,
     search: str | None = None,
+    scope: str | None = None,
     limit: int = 100,
     page: int = 1,
     page_size: int = 0,
 ) -> list[dict] | dict:
-    """List Shift Requests (Draft / Approved / Rejected) — HR view."""
-    _require_hr_admin()
+    """List Shift Requests (Draft / Approved / Rejected) — HR view.
+
+    Line Managers are force-scoped to their own ``reports_to`` team
+    (plans/plan-team-schedule-desk-free.md §4 WP4) regardless of ``scope``;
+    ``scope="team"`` is accepted for SPA symmetry and is a no-op for HR.
+    """
+    roles = _session_roles()
+    team_only: set[str] | None = None
+    if roles is None or not roles & SCHEDULE_EDITOR_ROLES:
+        from gege_hr.gege_hr.utils import employee as emp_utils
+
+        if roles is not None and roles & {"Line Manager"}:
+            pass  # LM → team scope below
+        else:
+            # Everyone else (and stub surfaces that can't answer get_roles)
+            # falls back to the classic HR-admin gate → PermissionError.
+            _require_hr_admin()
+        me = emp_utils.get_employee_for_user()
+        team_only = set()
+        if me:
+            try:
+                _rows = frappe.db.get_all(
+                    "Employee",
+                    filters={"status": "Active", "reports_to": me},
+                    fields=["name"],
+                )
+                team_only = {r.get("name") for r in _rows or []}
+            except Exception:
+                team_only = set()
     filters = []
     if employee:
         filters.append(["employee", "=", employee])
@@ -2872,6 +3006,23 @@ def list_shift_requests(
         "department",
         "docstatus",
     ]
+    if team_only is not None:
+        # LM path: fetch un-paged then narrow in Python (teams are small; the
+        # stub harness has no ``in`` filter support — plan §4 WP4).
+        try:
+            _rows = (
+                frappe.get_all(
+                    "Shift Request",
+                    filters=filters,
+                    fields=fields,
+                    order_by="modified desc",
+                    limit_page_length=pagination.clamp_limit(limit, default=100),
+                )
+                or []
+            )
+        except Exception:
+            _rows = []
+        return [r for r in _rows if getattr(r, "employee", None) in team_only]
     if page_size:
         total = pagination.count_all("Shift Request", filters=filters, or_filters=or_filters)
         page = max(1, pagination.as_int(page, 1))
@@ -2957,14 +3108,14 @@ def approve_shift_request(name: str) -> dict:
     """Approve a Shift Request → create + submit a Shift Assignment linked back
     to the request (overlap-aware via create_shift_assignment), then mark Approved.
     """
-    _require_hr_admin()
     name = (name or "").strip()
     if not name or not frappe.db.exists("Shift Request", name):
         frappe.throw(_("Yêu cầu đổi ca không tồn tại."))
     req = frappe.get_doc("Shift Request", name)
+    _require_schedule_approver_for(req.employee, getattr(req, "approver", None))
     if req.status == "Approved":
         frappe.throw(_("Yêu cầu này đã được duyệt."))
-    assignment = create_shift_assignment(
+    assignment = _create_shift_assignment_core(
         employee=req.employee,
         shift_type=req.shift_type,
         start_date=str(req.from_date),
@@ -2989,11 +3140,11 @@ def approve_shift_request(name: str) -> dict:
 @frappe.whitelist()
 def reject_shift_request(name: str, reason: str | None = None) -> dict:
     """Reject a Shift Request (no Shift Assignment is created)."""
-    _require_hr_admin()
     name = (name or "").strip()
     if not name or not frappe.db.exists("Shift Request", name):
         frappe.throw(_("Yêu cầu đổi ca không tồn tại."))
     req = frappe.get_doc("Shift Request", name)
+    _require_schedule_approver_for(req.employee, getattr(req, "approver", None))
     req.status = "Rejected"
     req.save()
     _audit_admin(
@@ -3114,8 +3265,8 @@ def set_shift_assignment_status(name: str, status: str) -> dict:
     the native "Inactive" action. Inactive stops the shift applying; setting back
     to Active re-validates overlap.
     """
-    _require_hr_admin()
     name = (name or "").strip()
+    _require_schedule_editor_for(_sa_employee_or_empty(name))
     status = (status or "").strip()
     if status not in ("Active", "Inactive"):
         frappe.throw(_("Trạng thái không hợp lệ (chỉ Active/Inactive)."))
@@ -3135,6 +3286,177 @@ def set_shift_assignment_status(name: str, status: str) -> dict:
         new_value={"status": status},
     )
     return {"name": name, "status": status}
+
+
+# --------------------------------------------------------------------------- #
+# /hr/team/schedule compositions (plans/plan-team-schedule-desk-free.md §4 WP5).
+# Both reuse the hardened day-override / create primitives so every validate
+# hook, conflict guard and audit row keeps firing — no raw SQL shortcuts.
+# --------------------------------------------------------------------------- #
+@frappe.whitelist()
+def swap_shift_days(instance_a: str, instance_b: str) -> dict:
+    """Transactionally swap two shift days between employees (grid drag-drop).
+
+    ``instance_a`` / ``instance_b`` are VN Employee Shift Instance names. Each
+    side is applied via :func:`override_day_shift_assignment` (gate: schedule
+    editor of BOTH employees), so a failure on either side rolls the whole
+    request back — no half-applied swap. Past days are refused.
+    """
+    a = _shift_instance_brief(instance_a)
+    b = _shift_instance_brief(instance_b)
+    if not a or not b:
+        frappe.throw(_("Không tìm thấy phiên ca cần hoán đổi."))
+    if a["employee"] == b["employee"] and str(a["work_date"]) == str(b["work_date"]):
+        frappe.throw(_("Hai phiên ca phải khác nhau."), frappe.ValidationError)
+    today = getdate()
+    if getdate(a["work_date"]) < today or getdate(b["work_date"]) < today:
+        frappe.throw(_("Không thể hoán đổi ca của ngày đã qua."), frappe.ValidationError)
+
+    res_a = override_day_shift_assignment(
+        employee=a["employee"], date=str(a["work_date"]), shift_type=b["shift_type"]
+    )
+    res_b = override_day_shift_assignment(
+        employee=b["employee"], date=str(b["work_date"]), shift_type=a["shift_type"]
+    )
+    _audit_admin(
+        _("Hoán đổi ca {0} ({1}) ↔ {2} ({3})").format(
+            a["employee"], a["work_date"], b["employee"], b["work_date"]
+        ),
+        reference_doctype="VN Employee Shift Instance",
+        reference_name=instance_a,
+        company=_company_for_employee(a["employee"]),
+        employee=a["employee"],
+        new_value={"swapped_with": instance_b},
+    )
+    _notify_schedule_updated_admin(a["employee"])
+    _notify_schedule_updated_admin(b["employee"])
+    return {
+        "created": (res_a.get("created") or []) + (res_b.get("created") or []),
+        "adjusted": (res_a.get("adjusted") or []) + (res_b.get("adjusted") or []),
+        "cancelled": (res_a.get("cancelled") or []) + (res_b.get("cancelled") or []),
+    }
+
+
+def _shift_instance_brief(name: str) -> dict | None:
+    """employee / work_date / shift_type of one VN Employee Shift Instance."""
+    name = (name or "").strip()
+    if not name:
+        return None
+    try:
+        row = frappe.db.get_value(
+            "VN Employee Shift Instance", name, ["employee", "work_date", "shift_type"], as_dict=True
+        )
+    except Exception:
+        return None
+    if not row:
+        return None
+    return {
+        "employee": getattr(row, "employee", None),
+        "work_date": str(getattr(row, "work_date", "") or "")[:10],
+        "shift_type": getattr(row, "shift_type", None),
+    }
+
+
+@frappe.whitelist()
+def copy_week_schedule(
+    from_week_start: str,
+    to_week_start: str,
+    employees=None,
+) -> dict:
+    """Copy one week's shift pattern onto another week (partial-safe).
+
+    For every employee × day with an ACTIVE Shift Assignment in the source
+    week, the same shift is created on the mirrored day of the target week
+    (conflict-guarded per cell via :func:`_create_shift_assignment_core`).
+    Result rows are per-employee ``{employee, created, conflict}`` — one bad
+    employee never aborts the batch. ``>5`` employees enqueues the job
+    (short queue) and returns ``{"enqueued": true}`` for SPA polling.
+    """
+    _require_hr_admin()
+    src = getdate(from_week_start) if from_week_start else None
+    dst = getdate(to_week_start) if to_week_start else None
+    if not src or not dst:
+        frappe.throw(_("Cần tuần nguồn và tuần đích."), frappe.ValidationError)
+    if dst <= src:
+        frappe.throw(_("Tuần đích phải sau tuần nguồn."), frappe.ValidationError)
+    if isinstance(employees, str):
+        employees = [e for e in employees.split(",") if e.strip()]
+    employees = [str(e).strip() for e in (employees or []) if str(e).strip()]
+    if not employees:
+        frappe.throw(_("Cần ít nhất một nhân viên."), frappe.ValidationError)
+
+    if len(employees) > 5:
+        frappe.enqueue(
+            "gege_hr.gege_hr.api.admin._copy_week_schedule_job",
+            queue="short",
+            timeout=300,
+            src=src.isoformat(),
+            dst=dst.isoformat(),
+            employees=employees,
+        )
+        return {"enqueued": True, "employees": len(employees)}
+    return _copy_week_schedule_job(src.isoformat(), dst.isoformat(), employees)
+
+
+def _copy_week_schedule_job(src: str, dst: str, employees: list[str]) -> dict:
+    """Bench job behind :func:`copy_week_schedule` (also the sync path ≤5 emp)."""
+    from frappe.utils import add_days
+
+    src_d, dst_d = getdate(src), getdate(dst)
+    results: list[dict] = []
+    try:
+        rows = frappe.db.get_all(
+            "Shift Assignment",
+            filters={"status": "Active", "docstatus": 1},
+            fields=["name", "employee", "shift_type", "start_date", "end_date"],
+        )
+    except Exception:
+        rows = []
+    emp_set = set(employees)
+    # Per-WEEKDAY pattern: {employee: {weekday_index: {shift_types}}} — so a
+    # Mon-Fri Day + Sat Evening week replays on the matching weekdays only.
+    pattern: dict[str, dict[int, set]] = {}
+    for r in rows or []:
+        emp = getattr(r, "employee", None)
+        if emp not in emp_set:
+            continue
+        s = str(getattr(r, "start_date", "") or "")[:10]
+        e = str(getattr(r, "end_date", "") or "2999-12-31")[:10]
+        for i in range(7):
+            day = add_days(src_d, i).isoformat()
+            if s <= day <= e:
+                pattern.setdefault(emp, {}).setdefault(i, set()).add(getattr(r, "shift_type", None))
+    for emp in employees:
+        if not pattern.get(emp):
+            results.append({"employee": emp, "created": 0, "conflict": None})
+            continue
+        created = 0
+        conflict = None
+        for i in range(7):
+            src_day = add_days(src_d, i)
+            dst_day = add_days(dst_d, i)
+            if dst_day < getdate():
+                continue
+            for st in sorted(x for x in pattern[emp].get(i, set()) if x):
+                try:
+                    _create_shift_assignment_core(
+                        employee=emp, shift_type=st,
+                        start_date=dst_day.isoformat(), end_date=dst_day.isoformat(),
+                    )
+                    created += 1
+                except Exception as exc:
+                    # Partial-safe: record the FIRST conflict and keep going.
+                    conflict = conflict or str(getattr(exc, "message", None) or exc)
+        if created:
+            _notify_schedule_updated_admin(emp)
+        results.append({"employee": emp, "created": created, "conflict": conflict})
+    _audit_admin(
+        _("Sao chép lịch tuần {0} → {1} cho {2} nhân viên").format(src, dst, len(employees)),
+        reference_doctype="Shift Assignment",
+        reference_name="-",
+        new_value={"results": results},
+    )
+    return {"enqueued": False, "results": results}
 
 
 # --------------------------------------------------------------------------- #
@@ -3365,5 +3687,16 @@ def admin_custom_checkin(
             "time_out": time_out,
         },
     )
+
+    # Best-effort realtime ping for open /hr/team/attendance tabs
+    # (plan-team-attendance-desk-free WP9) — never fails the mutation.
+    try:
+        from gege_hr.gege_hr.api import attendance as _att_api
+
+        _pub = getattr(_att_api, "_publish_team_attendance", None)
+        if _pub:
+            _pub(employee, None)
+    except Exception:
+        pass
 
     return {"status": "ok", "msg": "Đã cập nhật chấm công.", "touched": touched}

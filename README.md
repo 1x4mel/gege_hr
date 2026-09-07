@@ -23,7 +23,8 @@ gege_hr/
         ├── api/              # one file per domain (RPC endpoints)
         │   ├── auth.py       # get_csrf_token / login / logout / me
         │   ├── attendance.py # today_status / mobile_checkin / my_logs / my_monthly_summary
-        │   ├── shift.py      # my_schedule / shift_type_options / team_schedule (+hook stubs)
+        │   ├── shift.py      # my_schedule / team_schedule grid (context/grid/export/ics) + shift-request
+        │   │                 # self-service + daily instance materialiser (plans/plan-team-schedule-desk-free.md)
         │   └── leave.py      # leave_type_options / my_leave_balance / my_applications (+hook stubs)
         ├── utils/            # tz, employee resolver, rate-limit, naming
         └── doctype/          # DocType definitions (JSON + Python)
@@ -53,3 +54,19 @@ bench --site <site> migrate
 
 Frontend calls these via `gege_hr.gege_hr.api.<domain>.<fn>`
 (see [`../hr-ui/src/api/index.js`](../hr-ui/src/api/index.js)).
+
+## Desk-free `/hr/team/attendance` (plan-team-attendance-desk-free)
+
+The manager grid is fully operable without the Desk — every day-cell carries a
+**server-driven `can` matrix** (the FE renders buttons from it only) plus lock
+state; see [`plans/plan-team-attendance-desk-free.md`](plans/plan-team-attendance-desk-free.md).
+Key endpoints in [`gege_hr/api/attendance.py`](gege_hr/gege_hr/api/attendance.py):
+
+| Endpoint | Purpose |
+|---|---|
+| `team_attendance_context` | viewer scope + `can` matrix + period lock + pending counts + filters |
+| `team_attendance` | range grid — batched reads, per-cell `can`/`locked`/`work_session`/`open_checkout_miss`, member `pending` badges, server-side search/filter/paging (window ≤ 62 days) |
+| `team_attendance_export_csv` | CSV (UTF-8 BOM) of the current grid view — export == grid |
+| `team_member_day_detail` | 360° member-day drawer (any date; reused from Team-Today) |
+| `attendance_admin_ops.*` | punch CRUD + `mark_attendance_bulk` + `approve_session_overtime` — Line Manager unlocked on own `reports_to` scope |
+| realtime `gege_hr:team_attendance_updated` | published after every grid mutation → open tabs refetch |

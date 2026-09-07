@@ -1760,6 +1760,54 @@ def team_day_can(*, status, locked, is_hr, is_lm_of, ws=None, is_today=False) ->
     }
 
 
+def _team_att_cell_can(
+    *,
+    is_hr: bool,
+    is_lm_of: bool,
+    locked: bool = False,
+    is_future: bool = False,
+    has_punch: bool = False,
+    raw_ot: float = 0.0,
+    open_cm: bool = False,
+    is_ot_approver: bool = False,
+) -> dict:
+    """Pure — per-day-cell action matrix cho /hr/team/attendance (plan
+    plan-team-attendance-desk-free.md §4 WP2).
+
+    Mirror semantics của :func:`team_day_can` (Team-Today drawer) nhưng cho
+    RANGE grid: mỗi ô (member × day) mang một khối ``can`` riêng do BE tính từ
+    role + scope + lock state + day state. FE chỉ render nút theo matrix —
+    BE là nguồn sự thật duy nhất; lock-guard phía server vẫn là cổng cuối.
+
+    Rules (plan §4 WP2):
+      * ``locked``  → mọi cờ mutation = false với MỌI role;
+      * ``is_future`` → fix_punch / delete_punch / mark_attendance /
+        create_request = false (chưa đến ngày, không có gì để sửa);
+      * Line Manager chỉ được thao tác trên member ``reports_to`` mình
+        (``is_lm_of``) — member ngoài team mọi cờ manage = false;
+      * ``approve_ot`` yêu cầu role OT approver (HR Manager / System Manager,
+        parity ``OT_APPROVER_ROLES``) VÀ session có raw OT > 0;
+      * ``resolve_checkout_miss`` yêu cầu HR + ticket đang mở.
+    """
+    manage = bool(is_hr or is_lm_of)
+    writable_day = manage and not bool(locked) and not bool(is_future)
+    try:
+        raw_ot_hours = float(raw_ot or 0)
+    except (TypeError, ValueError):
+        raw_ot_hours = 0.0
+    return {
+        "view_detail": True,
+        "fix_punch": writable_day,
+        "delete_punch": writable_day and bool(has_punch),
+        "mark_attendance": bool(is_hr) and not bool(locked) and not bool(is_future),
+        "create_request": writable_day,
+        "approve_ot": bool(is_ot_approver) and raw_ot_hours > 0 and not bool(locked),
+        "resolve_checkout_miss": bool(is_hr) and bool(open_cm) and not bool(locked),
+        "recalc": bool(is_hr) and not bool(locked),
+        "nudge": manage,
+    }
+
+
 def _shift_meta_one(employee: str, day) -> dict | None:
     """Shift Assignment covering ``day`` of ONE member (drawer meta)."""
     for r in _covering_shift_assignments([employee], day):
@@ -1963,17 +2011,102 @@ def export_team_day_csv(
     }
 
 
+TEAM_ATTENDANCE_MAX_DAYS = 62
+
+
+def _locked_days_between(start, end) -> tuple[set[str], dict]:
+    """Days of ``[start, end]`` covered by a **Locked** ``VN Monthly Attendance
+    Period`` + the header period block (plan-team-attendance-desk-free §4 WP1/WP2).
+
+    Returns ``({locked iso dates}, {"name", "status"} | {})`` — a Locked row
+    wins the header slot, otherwise the newest overlapping period shows.
+    Best-effort: never raises (bench stubs / missing doctype → empty).
+    """
+    locked: set[str] = set()
+    try:
+        rows = frappe.db.get_all(
+            "VN Monthly Attendance Period",
+            filters={"from_date": ["<=", end], "to_date": [">=", start]},
+            fields=["name", "from_date", "to_date", "status"],
+            order_by="from_date desc",
+        )
+    except Exception:
+        return locked, {}
+    rows = rows or []
+    first_any: dict = rows[0] if rows else {}
+    for row in rows:
+        if str(row.get("status") or "") != "Locked":
+            continue
+        d = max(getdate(row.get("from_date")), start)
+        stop = min(getdate(row.get("to_date")), end)
+        while d <= stop:
+            locked.add(str(d))
+            d += timedelta(days=1)
+    header = next(
+        (r for r in rows if str(r.get("status") or "") == "Locked"),
+        first_any,
+    )
+    return locked, ({"name": header.get("name"), "status": header.get("status")} if header else {})
+
+
+def _member_matches_status_token(member_row: dict, token: str) -> bool:
+    """Pure — does any day of a built member row match the SPA status token
+    (OnTime / Late / Early / Overtime / Missing / Leave)? Mirrors the FE
+    ``metaMatchesStatus`` semantics in ``useTeamMatrix.js`` — overlapping by
+    design (a Late day with OT matches both tokens)."""
+    t = (token or "").strip()
+    if not t:
+        return True
+    for day in member_row.get("days") or []:
+        status = str(day.get("status") or "")
+        late = int(day.get("late_minutes") or 0)
+        early = int(day.get("early_leave_minutes") or 0)
+        ot = float(day.get("approved_overtime_hours") or 0)
+        if t == "OnTime":
+            if status == "Present" and late <= 0:
+                return True
+        elif t == "Late":
+            if late > 0 or status == "Late":
+                return True
+        elif t == "Early":
+            if early > 0:
+                return True
+        elif t == "Overtime":
+            if ot > 0:
+                return True
+        elif t == "Missing":
+            if status in ("Not marked", "Absent"):
+                return True
+        elif t == "Leave":
+            if status in ("On Leave", "Half Day"):
+                return True
+    return False
+
+
 @frappe.whitelist()
 def team_attendance(
     manager: str = "",
     from_date: str = "",
     to_date: str = "",
+    search: str = "",
+    status_filter: str = "",
+    shift_type: str = "",
+    page: int = 1,
+    page_size: int = 60,
 ) -> dict:
     """Plan §10.2 / §13 — manager's team attendance across a date range.
 
     Returns one member row carrying per-day presence plus a period summary.
     Honours Frappe role permissions (HR / Line Manager); reads ``Employee`` and
     ``Attendance`` only. Defaults to the current month when no range is given.
+
+    Desk-free enhancements (plans/plan-team-attendance-desk-free.md §4 WP2):
+    every day-cell additionally carries ``locked`` / ``work_session`` /
+    ``open_checkout_miss`` / a server-driven ``can`` matrix; every member row
+    carries ``pending`` badges; ``locked_dates`` + ``period`` describe the
+    monthly-attendance-period lock state. ``search`` / ``shift_type`` /
+    ``status_filter`` / ``page`` / ``page_size`` are optional server-side
+    filters (backward compatible — the legacy response keys are unchanged).
     """
     frappe.only_for(["HR Manager", "HR User", "System Manager", "Line Manager"])
     # HR Manager / System Manager oversee the whole company, so they see every
@@ -1983,6 +2116,14 @@ def team_attendance(
     # depends on ``reports_to``.
     caller_roles = set(frappe.get_roles())
     is_company_wide = bool(caller_roles & {"HR Manager", "System Manager"})
+    # Capability-matrix role facts (plan §4 WP2). ``is_hr`` mirrors the manage
+    # roles of ``admin._require_attendance_editor_for``; OT approval follows
+    # ``attendance_admin_ops.OT_APPROVER_ROLES`` (HR Manager / System Manager).
+    is_hr = bool(caller_roles & {"HR Manager", "System Manager", "HR User"})
+    is_ot_approver = bool(caller_roles & {"HR Manager", "System Manager"})
+    # Non-company-wide viewers (Line Manager / HR User) only ever see their own
+    # reports → every roster member is "lm_of" by construction.
+    lm_of_roster = not is_company_wide
 
     # IDOR fix: a company-wide caller may inspect any manager's team; everyone
     # else (Line Manager / HR User) is pinned to their OWN reports — a forged
@@ -1997,13 +2138,20 @@ def team_attendance(
     if manager_emp and not frappe.db.exists("Employee", manager_emp):
         resolved = emp_utils.get_employee_for_user(manager_emp)
         manager_emp = resolved or emp_utils.get_employee_for_user() or manager_emp
+    today_portal = tz_utils.now_in_portal().date()
     if from_date and to_date:
         start = getdate(from_date)
         end = getdate(to_date)
     else:
-        today = tz_utils.now_in_portal().date()
-        start = today.replace(day=1)
-        end = today
+        start = today_portal.replace(day=1)
+        end = today_portal
+    # Window clamp (plan WP2): a range grid must stay bounded — week views that
+    # roll into the next month stay covered while absurd windows are rejected.
+    if (end - start).days > TEAM_ATTENDANCE_MAX_DAYS:
+        frappe.throw(
+            _("Khoảng thời gian tối đa là {0} ngày.").format(TEAM_ATTENDANCE_MAX_DAYS),
+            frappe.ValidationError,
+        )
 
     # Scope the roster to the manager's company when it can be resolved, so the
     # company-wide view does not leak cross-company employees in multi-company
@@ -2094,6 +2242,24 @@ def team_attendance(
     roster = set(primary_shift.keys()) | set(att_shifts.keys())
     members = [m for m in members if m["name"] in roster]
 
+    # Desk-free filter (plan WP2): free-text search over the roster identity.
+    q = (search or "").strip().lower()
+    if q:
+        members = [
+            m
+            for m in members
+            if q in str(m.get("employee_name") or "").lower()
+            or q in str(m.get("name") or "").lower()
+            or q in str(m.get("designation") or "").lower()
+        ]
+
+    # Server-driven badges + lock context (plan WP2). All batched — one query
+    # per source, never per member.
+    emp_names = [m["name"] for m in members]
+    pending_counts = _team_pending_counts(emp_names) if emp_names else {}
+    checkout_miss_by = _team_checkout_miss_by(emp_names) if emp_names else {}
+    locked_dates, period_info = _locked_days_between(start, end)
+
     # Approved Leave Applications per member/day — so leave days show correctly
     # even when the Work Session's has_leave flag isn't set by the engine.
     leave_by_emp_date: dict[str, dict[str, str]] = {}
@@ -2146,28 +2312,40 @@ def team_attendance(
     summary = {"present": 0, "late": 0, "early": 0, "overtime": 0, "absent": 0, "on_leave": 0}
     grouped: dict[str, list] = {sn: [] for sn in shift_names}
     out_members = []
-    for m in members:
-        rows = frappe.db.get_all(
+
+    # BATCHED window reads (plan WP2 — kills the per-member N+1): one
+    # Attendance query + one Work-Session query for the whole roster, grouped
+    # in Python. The day derivation below is byte-identical to the legacy loop.
+    att_by_emp: dict[str, dict] = {}
+    if members:
+        for r in frappe.db.get_all(
             "Attendance",
             filters={
-                "employee": m.name,
+                "employee": ["in", emp_names],
                 "attendance_date": ["between", [start, end]],
                 "docstatus": 1,
             },
-            fields=["attendance_date", "status", "shift", "in_time", "out_time", "late_entry", "early_exit"],
-            order_by="attendance_date asc",
-        )
-        by_date = {str(r.attendance_date): r for r in rows}
-        # Work Session is the portal's source of truth for the PAIRED IN/OUT:
-        # calc.py matches punches to the shift's planned window, so overnight
-        # checkouts land on the correct (start-day) row. The core Attendance
-        # in_time/out_time is frequently scrambled for overnight shifts (previous
-        # night's OUT, or a 1-day offset), so prefer the Work Session for the
-        # displayed times + late/early and only fall back to Attendance below.
-        ws_rows = frappe.db.get_all(
-            "VN Attendance Work Session",
-            filters={"employee": m.name, "work_date": ["between", [start, end]]},
             fields=[
+                "employee",
+                "attendance_date",
+                "status",
+                "shift",
+                "in_time",
+                "out_time",
+                "late_entry",
+                "early_exit",
+            ],
+            order_by="attendance_date asc",
+        ):
+            att_by_emp.setdefault(r.employee, {})[str(r.attendance_date)] = r
+    ws_by_emp: dict[str, dict] = {}
+    if members:
+        for r in frappe.db.get_all(
+            "VN Attendance Work Session",
+            filters={"employee": ["in", emp_names], "work_date": ["between", [start, end]]},
+            fields=[
+                "name",
+                "employee",
                 "work_date",
                 "actual_checkin",
                 "actual_checkout",
@@ -2178,13 +2356,46 @@ def team_attendance(
                 "missing_checkout",
                 "vn_auto_checkout",
             ],
-        )
-        ws_map = {str(r.work_date): r for r in ws_rows}
+        ):
+            ws_by_emp.setdefault(r.employee, {})[str(r.work_date)] = r
+
+    for m in members:
+        by_date = att_by_emp.get(m["name"], {})
+        # Work Session is the portal's source of truth for the PAIRED IN/OUT:
+        # calc.py matches punches to the shift's planned window, so overnight
+        # checkouts land on the correct (start-day) row. The core Attendance
+        # in_time/out_time is frequently scrambled for overnight shifts (previous
+        # night's OUT, or a 1-day offset), so prefer the Work Session for the
+        # displayed times + late/early and only fall back to Attendance below.
+        ws_map = ws_by_emp.get(m["name"], {})
         days = []
         cur = start
         while cur <= end:
             att = by_date.get(str(cur))
             ws = ws_map.get(str(cur))
+            # Server-driven cell context (plan WP2): lock flag, engine refs and
+            # the capability matrix for THIS (member × day) cell.
+            cur_locked = str(cur) in locked_dates
+            cm_row = checkout_miss_by.get(m["name"])
+            cm_open_today = bool(
+                cm_row and str(getattr(cm_row, "work_date", "") or "") == str(cur)
+            )
+            cell_can = _team_att_cell_can(
+                is_hr=is_hr,
+                is_lm_of=lm_of_roster,
+                locked=cur_locked,
+                is_future=cur > today_portal,
+                has_punch=bool(ws and (ws.actual_checkin or ws.actual_checkout)),
+                raw_ot=flt(getattr(ws, "raw_overtime_hours", 0) or 0, 4) if ws else 0.0,
+                open_cm=cm_open_today,
+                is_ot_approver=is_ot_approver,
+            )
+            cell_extras = {
+                "locked": cur_locked,
+                "work_session": getattr(ws, "name", None) if ws else None,
+                "open_checkout_miss": cm_row.get("name") if cm_open_today else None,
+                "can": cell_can,
+            }
             if not att and not ws:
                 days.append(
                     {
@@ -2194,6 +2405,7 @@ def team_attendance(
                         "checkout_time": None,
                         "late_minutes": 0,
                         "early_leave_minutes": 0,
+                        **cell_extras,
                     }
                 )
                 cur += timedelta(days=1)
@@ -2212,6 +2424,7 @@ def team_attendance(
                         "late_minutes": 0,
                         "early_leave_minutes": 0,
                         "raw_overtime_hours": 0.0,
+                        **cell_extras,
                     }
                 )
                 summary["on_leave"] += 1
@@ -2289,6 +2502,7 @@ def team_attendance(
                     # masks that OUT time as '--:--' and renders orange.
                     "missing_checkout": bool(ws and ws.missing_checkout),
                     "vn_auto_checkout": bool(ws and ws.vn_auto_checkout),
+                    **cell_extras,
                 }
             )
             # Summary chips: count by the DERIVED late/early/OT values (not just
@@ -2309,9 +2523,38 @@ def team_attendance(
             if ot_hours > 0:
                 summary["overtime"] += 1
             cur += timedelta(days=1)
-        out = {**m, "days": days, "shift_type": member_shift[m["name"]]}
+        pc = pending_counts.get(m["name"], {}) or {}
+        pending_badges = {
+            "corrections": int(pc.get("corrections") or 0),
+            "overtime": int(pc.get("overtime") or 0),
+            "leaves": int(pc.get("leaves") or 0),
+            "checkout_misses": 1 if checkout_miss_by.get(m["name"]) else 0,
+        }
+        out = {**m, "days": days, "shift_type": member_shift[m["name"]], "pending": pending_badges}
         out_members.append(out)
-        grouped.setdefault(out["shift_type"], []).append(out)
+
+    # Post-build filters (plan WP2): shift group + derived status token over
+    # the built day set, then member paging — ``summary`` above stays computed
+    # on the FULL filtered set (DNA §6.6 A parity).
+    if shift_type:
+        out_members = [o for o in out_members if o.get("shift_type") == shift_type]
+    if status_filter:
+        token = status_filter.strip()
+        out_members = [o for o in out_members if _member_matches_status_token(o, token)]
+    try:
+        page_i = max(1, int(page or 1))
+    except (TypeError, ValueError):
+        page_i = 1
+    try:
+        size = int(page_size or 60)
+    except (TypeError, ValueError):
+        size = 60
+    size = max(1, min(size, 200))
+    total_members = len(out_members)
+    out_members = out_members[(page_i - 1) * size : page_i * size]
+    grouped = {sn: [] for sn in shift_names}
+    for o in out_members:
+        grouped.setdefault(o["shift_type"], []).append(o)
 
     # Build one group per shift, preserving the sorted shift order so the UI is
     # deterministic. Empty shifts (no member after Attendance filtering) are
@@ -2334,6 +2577,200 @@ def team_attendance(
         "groups": groups,
         "members": out_members,
         "summary": summary,
+        # Desk-free additions (plan WP2) — additive, legacy keys untouched.
+        "locked_dates": sorted(locked_dates),
+        "period": period_info,
+        "page": page_i,
+        "page_size": size,
+        "total_members": total_members,
+    }
+
+
+@frappe.whitelist()
+def team_attendance_context(manager: str = "", from_date: str = "", to_date: str = "") -> dict:
+    """plans/plan-team-attendance-desk-free.md §4 WP1 — viewer context for the
+    ``/hr/team/attendance`` toolbar: scope, capability matrix, period-lock
+    state, pending-approval counts and filter options. One round-trip before
+    the grid loads; the FE renders chrome (lock banner, buttons) from this
+    payload only — BE là nguồn sự thật duy nhất.
+    """
+    frappe.only_for(["HR Manager", "HR User", "System Manager", "Line Manager"])
+    caller_roles = set(frappe.get_roles())
+    is_company_wide = bool(caller_roles & {"HR Manager", "System Manager"})
+    is_hr = bool(caller_roles & {"HR Manager", "System Manager", "HR User"})
+    is_lm = bool(caller_roles & {"Line Manager"})
+    is_ot_approver = bool(caller_roles & {"HR Manager", "System Manager"})
+
+    # IDOR-safe viewer resolution — identical semantics to team_attendance().
+    if manager and is_company_wide:
+        manager_emp = emp_utils.emp_name(manager)
+    else:
+        manager_emp = emp_utils.get_employee_for_user()
+    if manager_emp and not frappe.db.exists("Employee", manager_emp):
+        resolved = emp_utils.get_employee_for_user(manager_emp)
+        manager_emp = resolved or emp_utils.get_employee_for_user() or manager_emp
+
+    today_portal = tz_utils.now_in_portal().date()
+    start = getdate(from_date) if from_date else today_portal.replace(day=1)
+    end = getdate(to_date) if to_date else today_portal
+    if end < start:
+        start, end = end, start
+
+    # Roster in scope — the same filters the grid itself applies.
+    if is_company_wide:
+        member_filters = {"status": "Active"}
+        company = (
+            frappe.db.get_value("Employee", manager_emp, "company")
+            if manager_emp and frappe.db.exists("Employee", manager_emp)
+            else None
+        )
+        if company:
+            member_filters["company"] = company
+        members = frappe.db.get_all("Employee", filters=member_filters, fields=["name"])
+        if manager_emp:
+            members = [m for m in members if m.get("name") != manager_emp]
+        scope_mode = "company"
+    else:
+        members = frappe.db.get_all(
+            "Employee",
+            filters={"status": "Active", "reports_to": manager_emp},
+            fields=["name"],
+        )
+        scope_mode = "team"
+    emps = [m.get("name") for m in members]
+
+    # Pending approvals within the viewer's scope (plan WP1).
+    pending_counts = _team_pending_counts(emps) if emps else {}
+    checkout_miss_by = _team_checkout_miss_by(emps) if emps else {}
+    pending_approvals = {
+        "corrections": sum(int(v.get("corrections") or 0) for v in pending_counts.values()),
+        "overtime": sum(int(v.get("overtime") or 0) for v in pending_counts.values()),
+        "leaves": sum(int(v.get("leaves") or 0) for v in pending_counts.values()),
+        "checkout_misses": len(checkout_miss_by),
+    }
+
+    locked_dates, period_info = _locked_days_between(start, end)
+
+    # Filter options for the gear popover (shift types + departments).
+    shift_types = sorted(
+        str(r.get("name") or "")
+        for r in frappe.db.get_all("Shift Type", fields=["name"])
+        if r.get("name")
+    )
+    departments = sorted(
+        {
+            str(r.get("department") or "").strip()
+            for r in frappe.db.get_all("Employee", filters={"status": "Active"}, fields=["department"])
+            if str(r.get("department") or "").strip()
+        }
+    )
+
+    can = {
+        "view_grid": True,
+        "fix_punch": bool(is_hr or is_lm),
+        "delete_punch": bool(is_hr or is_lm),
+        "mark_attendance": bool(is_hr or is_lm),
+        "create_request": bool(is_hr or is_lm),
+        "approve_ot": is_ot_approver,
+        "resolve_checkout_miss": is_hr,
+        "recalc": is_hr,
+        "generate": is_hr,
+        "nudge": True,
+        "export": True,
+        "manage_period": bool(caller_roles & {"HR Manager", "System Manager"}),
+    }
+    return {
+        "viewer_employee": manager_emp,
+        "scope": {"mode": scope_mode, "member_count": len(emps)},
+        "can": can,
+        "period": period_info,
+        "locked_dates": sorted(locked_dates),
+        "pending_approvals": pending_approvals,
+        "filters": {"shift_types": shift_types, "departments": departments},
+        "window": {
+            "from_date": str(start),
+            "to_date": str(end),
+            "max_days": TEAM_ATTENDANCE_MAX_DAYS,
+        },
+    }
+
+
+def _publish_team_attendance(employee: str | None = None, work_date=None) -> None:
+    """Best-effort realtime ping (plan WP9) — open ``/hr/team/attendance`` tabs
+    refetch the affected member row (event ``gege_hr:team_attendance_updated``).
+    NEVER raises into the mutation flow. Pattern: ``_publish_team_today``."""
+    try:
+        frappe.publish_realtime(
+            "gege_hr:team_attendance_updated",
+            {"employee": employee, "work_date": str(work_date or "")},
+        )
+    except Exception:
+        pass
+
+
+@frappe.whitelist()
+def team_attendance_export_csv(
+    manager: str = "",
+    from_date: str = "",
+    to_date: str = "",
+    search: str = "",
+    status_filter: str = "",
+    shift_type: str = "",
+) -> dict:
+    """Plan WP9 — CSV (UTF-8 BOM) of the CURRENT grid view. Export == grid:
+    the endpoint walks ``team_attendance`` itself (single source of truth),
+    so the file can never drift from what the manager sees. Gate + scope ride
+    the grid endpoint's own checks (HR/LM only)."""
+    res = team_attendance(
+        manager=manager,
+        from_date=from_date,
+        to_date=to_date,
+        search=search,
+        status_filter=status_filter,
+        shift_type=shift_type,
+        page=1,
+        page_size=200,
+    )
+    header = [
+        "Mã NV",
+        "Tên",
+        "Ca",
+        "Ngày",
+        "Trạng thái",
+        "Giờ vào",
+        "Giờ ra",
+        "Muộn (phút)",
+        "Về sớm (phút)",
+        "OT duyệt (h)",
+        "Khoá",
+    ]
+    lines = [",".join(header)]
+    for g in res["groups"]:
+        for m in g["members"]:
+            for d in m.get("days", []):
+                lines.append(
+                    ",".join(
+                        _csv_cell(c)
+                        for c in (
+                            m.get("name"),
+                            m.get("employee_name"),
+                            g.get("shift_type"),
+                            d.get("work_date"),
+                            d.get("status"),
+                            d.get("checkin_time") or "",
+                            d.get("checkout_time") or "",
+                            d.get("late_minutes"),
+                            d.get("early_leave_minutes"),
+                            d.get("approved_overtime_hours") or 0,
+                            "Locked" if d.get("locked") else "",
+                        )
+                    )
+                )
+    month = str(res.get("from_date") or "")[:7] or "export"
+    return {
+        "filename": f"team-attendance-{month}.csv",
+        "csv": "\ufeff" + "\n".join(lines),
+        "rows": len(lines) - 1,
     }
 
 
@@ -3115,15 +3552,31 @@ def _is_hr_manager() -> bool:
 
 
 def _assert_own_correction(employee: str) -> None:
-    """HR/Manager may read anyone; a plain Employee only their own row."""
+    """HR/Manager may read anyone; a plain Employee only their own row.
+
+    WP5 (plans/plan-team-attendance-desk-free.md): a ``Line Manager`` may also
+    create/read on behalf of their OWN ``reports_to`` members — the inline
+    "Tạo giải trình" quick-action in the team-attendance drawer. Cross-team
+    on-behalf stays refused.
+    """
     if _is_hr_manager():
         return
     own = emp_utils.get_employee_for_user()
-    if own != emp_utils.emp_name(employee):
-        frappe.throw(
-            _("Bạn không có quyền truy cập dữ liệu của nhân viên khác."),
-            frappe.PermissionError,
-        )
+    target = emp_utils.emp_name(employee)
+    if own == target:
+        return
+    roles = set(emp_utils.get_user_roles() or [])
+    if roles & {"Line Manager"}:
+        try:
+            reports_to = frappe.db.get_value("Employee", target, "reports_to")
+        except Exception:
+            reports_to = None
+        if reports_to and reports_to == own:
+            return
+    frappe.throw(
+        _("Bạn không có quyền truy cập dữ liệu của nhân viên khác."),
+        frappe.PermissionError,
+    )
 
 
 def _filter_correction_rows(rows: list[dict], search: str | None, fields: tuple[str, ...]) -> list[dict]:
@@ -3199,8 +3652,13 @@ def submit_correction_request(**kwargs) -> dict:
 
     employee = (kwargs.get("employee") or "").strip()
     if employee:
+        # WP5: the ownership gate here (HR ∪ LM-of-own ∪ self) is stricter than
+        # the generic ``_resolve_employee`` pinning — resolve plainly afterwards
+        # so a Line Manager may file on behalf of their own report.
         _assert_own_correction(employee)
-    emp = _resolve_employee(employee)
+        emp = emp_utils.emp_name(employee)
+    else:
+        emp = _resolve_employee(None)
 
     doc = frappe.new_doc(CR_DOCTYPE)
     doc.update(

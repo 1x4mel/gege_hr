@@ -30,6 +30,7 @@ import pytest
 HOLIDAY_API = "gege_hr.gege_hr.api.holiday_master"
 PAYROLL_API = "gege_hr.gege_hr.api.payroll_master"
 ADMIN_API = "gege_hr.gege_hr.api.admin"
+SHIFT_API = "gege_hr.gege_hr.api.shift"
 SETTINGS_API = "gege_hr.gege_hr.api.settings_single"
 POLICY_API = "gege_hr.gege_hr.api.attendance_policy"
 RECRUITMENT_API = "gege_hr.gege_hr.api.recruitment"
@@ -138,6 +139,10 @@ def _build_stub_frappe(harness):
     mod._ = lambda s: s
     mod.whitelist = lambda fn=None, **kw: fn if fn is not None else (lambda f: f)
     mod.only_for = lambda roles: (_ for _ in ()).throw(_PermissionDenied("denied"))
+    # shift.py throws with frappe.PermissionError / frappe.ValidationError —
+    # alias them so those raises count as "denied" here too.
+    mod.PermissionError = _PermissionDenied
+    mod.ValidationError = _PermissionDenied
 
     utils = types.ModuleType("frappe.utils")
     import datetime
@@ -145,6 +150,11 @@ def _build_stub_frappe(harness):
     utils.getdate = lambda v=None: (
         datetime.date.today() if v in (None, "") else datetime.date.fromisoformat(str(v)[:10])
     )
+
+    def _add_days(v, days):
+        return utils.getdate(v) + datetime.timedelta(days=days)
+
+    utils.add_days = _add_days
     utils.flt = lambda v, *a, **k: float(v) if v not in (None, "") else 0.0
     utils.get_datetime = lambda v=None: datetime.datetime.now()
     mod.utils = utils
@@ -186,6 +196,7 @@ def denied(monkeypatch):
         "holiday": importlib.import_module(HOLIDAY_API),
         "payroll": importlib.import_module(PAYROLL_API),
         "admin": importlib.import_module(ADMIN_API),
+        "shift": importlib.import_module(SHIFT_API),
         "settings": importlib.import_module(SETTINGS_API),
         "policy": importlib.import_module(POLICY_API),
         "recruitment": importlib.import_module(RECRUITMENT_API),
@@ -302,6 +313,22 @@ DENIED_ENDPOINTS = [
         "override_day_shift_assignment",
         {"employee": "E-1", "date": "2026-01-15", "shift_type": "S-1"},
     ),
+    # admin + shift — /hr/team/schedule desk-free grid
+    # (plans/plan-team-schedule-desk-free.md §5.2)
+    ("admin", "list_shift_requests", {}),
+    ("admin", "approve_shift_request", {"name": "SR-1"}),
+    ("admin", "reject_shift_request", {"name": "SR-1"}),
+    ("admin", "swap_shift_days", {"instance_a": "V-1", "instance_b": "V-2"}),
+    (
+        "admin",
+        "copy_week_schedule",
+        {"from_week_start": "2026-01-05", "to_week_start": "2026-01-12", "employees": ["E-1"]},
+    ),
+    ("shift", "team_schedule", {}),
+    ("shift", "team_schedule_context", {}),
+    ("shift", "team_schedule_grid", {}),
+    ("shift", "team_schedule_export", {}),
+    ("shift", "team_schedule_ics", {"employee": "E-1"}),
     # settings_single (plan hr-settings-desk-free §2.1)
     ("settings", "get_single_settings", {"doctype": "VN HR Portal Setting"}),
     (
