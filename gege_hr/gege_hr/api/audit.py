@@ -15,6 +15,8 @@ SPA contract:
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import frappe
 from frappe import _
 from frappe.utils import getdate
@@ -90,9 +92,88 @@ def _audit_search_or_filters(search: str | None) -> list | None:
     return [[field, "like", like] for field in _AUDIT_SEARCH_FIELDS]
 
 
+# Sortable columns (Desk list-view parity, plan audit-center B1). ``order_by``
+# is whitelisted here — a raw client string must never reach ``order_by``
+# (SQL injection surface).
+_SORTABLE_FIELDS = {"created_at", "audit_type", "actor", "employee", "work_date", "company"}
+
+
+def _order_clause(order_by: str | None, order_dir: str | None) -> str:
+    """Safe ``order_by`` clause built from whitelisted (field, direction)."""
+    field = order_by if order_by in _SORTABLE_FIELDS else "created_at"
+    direction = "asc" if str(order_dir or "").strip().lower() == "asc" else "desc"
+    return f"{field} {direction}, name desc"
+
+
+def _build_filters(
+    *,
+    company: str | None = None,
+    employee: str | None = None,
+    audit_type: str | None = None,
+    category: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    actor: str | None = None,
+    reference_doctype: str | None = None,
+    reference_name: str | None = None,
+) -> dict:
+    """Shared filter dict for the audit list / export / stats read paths.
+
+    Single source of truth so the three endpoints can never drift
+    (plan audit-center B1/B3/B5). Reference filters double as the
+    "audit for one document" reader (parity checkout-miss timeline).
+    """
+    filters: dict = {}
+    if company:
+        filters["company"] = company
+    if employee:
+        filters["employee"] = employee
+    if actor:
+        filters["actor"] = actor
+    if reference_doctype:
+        filters["reference_doctype"] = reference_doctype
+    if reference_name:
+        filters["reference_name"] = reference_name
+    # Category expands to its member types.
+    if category and not audit_type:
+        types = audit_utils.AUDIT_CATEGORIES.get(category)
+        if types:
+            filters["audit_type"] = ("in", list(types))
+    elif audit_type:
+        filters["audit_type"] = audit_type
+    if from_date or to_date:
+        window = _date_window(from_date, to_date)
+        if window:
+            filters["work_date"] = window
+    return filters
+
+
 # WP11 — CSV export ceiling: 10k rows keeps the response bounded even for a
 # noisy month (a full audit export can be re-run per-month window).
 EXPORT_MAX_ROWS = 10000
+
+
+def _stamp_export(*, company, first_company, filters: dict, rows: int, truncated: bool) -> None:
+    """Best-effort audit row for the export itself (Access Log parity, plan
+    audit-center B5).
+
+    Uses ``Manual Override`` — the 21-value vocabulary stays untouched.
+    ``record()`` requires a company; fall back to the first exported row's
+    company so single-company sites without a filter still get stamped.
+    """
+    try:
+        record(
+            audit_type="Manual Override",
+            company=company or first_company,
+            description=_("Xuất CSV nhật ký kiểm toán: {0} dòng (truncated={1})").format(rows, truncated),
+            new_value={
+                "filters": {k: v for k, v in (filters or {}).items()},
+                "rows": rows,
+                "truncated": truncated,
+            },
+        )
+    except Exception:
+        frappe.log_error(title="audit.export stamp failed")
 
 
 @frappe.whitelist()
@@ -104,6 +185,9 @@ def export_audit_csv(
     from_date: str | None = None,
     to_date: str | None = None,
     search: str | None = None,
+    actor: str | None = None,
+    reference_doctype: str | None = None,
+    reference_name: str | None = None,
     download: int = 0,
 ) -> dict:
     """WP11 — export filtered audit events as an Excel-safe CSV.
@@ -118,21 +202,17 @@ def export_audit_csv(
     if not _table_ready():
         return empty
 
-    filters: dict = {}
-    if company:
-        filters["company"] = company
-    if employee:
-        filters["employee"] = employee
-    if category and not audit_type:
-        types = audit_utils.AUDIT_CATEGORIES.get(category)
-        if types:
-            filters["audit_type"] = ("in", list(types))
-    elif audit_type:
-        filters["audit_type"] = audit_type
-    if from_date or to_date:
-        window = _date_window(from_date, to_date)
-        if window:
-            filters["work_date"] = window
+    filters = _build_filters(
+        company=company,
+        employee=employee,
+        audit_type=audit_type,
+        category=category,
+        from_date=from_date,
+        to_date=to_date,
+        actor=actor,
+        reference_doctype=reference_doctype,
+        reference_name=reference_name,
+    )
     or_filters = _audit_search_or_filters(search)
 
     rows = (
@@ -148,6 +228,17 @@ def export_audit_csv(
     )
     truncated = len(rows) > EXPORT_MAX_ROWS
     rows = rows[:EXPORT_MAX_ROWS]
+
+    # Access-Log parity: the export itself is a sensitive read — stamp it
+    # (best-effort; never blocks the file response).
+    _stamp_export(
+        company=company,
+        first_company=(rows[0].get("company") if rows else None),
+        filters=filters,
+        rows=len(rows),
+        truncated=truncated,
+    )
+
     csv_text = audit_utils.build_audit_csv([audit_utils.audit_row(r) for r in rows])
 
     if download:
@@ -204,12 +295,19 @@ def audit_events(
     from_date: str | None = None,
     to_date: str | None = None,
     search: str | None = None,
+    actor: str | None = None,
+    reference_doctype: str | None = None,
+    reference_name: str | None = None,
+    order_by: str | None = None,
+    order_dir: str | None = None,
     limit: int = 200,
     page: int = 1,
     page_size: int = 0,
 ) -> list[dict] | dict:
-    """HR/System read. Filter by type, coarse category, employee, date window,
-    or a free-text ``search`` (OR-matched across the row's text fields).
+    """HR/System read. Filter by type, coarse category, employee, actor,
+    reference doc, date window, or a free-text ``search`` (OR-matched across
+    the row's text fields). Sort via the whitelisted ``order_by``/``order_dir``
+    pair (default ``created_at desc`` — unchanged for legacy callers).
 
     Pagination is **opt-in** (DNA §6.6 A): pass ``page`` + a positive
     ``page_size`` to receive ``{"data": [...], "total": int, "summary": {...}}``
@@ -223,23 +321,19 @@ def audit_events(
         if page_size:
             return {"data": [], "total": 0, "summary": _audit_summary([])}
         return []
-    filters: dict = {}
-    if company:
-        filters["company"] = company
-    if employee:
-        filters["employee"] = employee
-    # Category expands to its member types.
-    if category and not audit_type:
-        types = audit_utils.AUDIT_CATEGORIES.get(category)
-        if types:
-            filters["audit_type"] = ("in", list(types))
-    elif audit_type:
-        filters["audit_type"] = audit_type
-    if from_date or to_date:
-        window = _date_window(from_date, to_date)
-        if window:
-            filters["work_date"] = window
+    filters = _build_filters(
+        company=company,
+        employee=employee,
+        audit_type=audit_type,
+        category=category,
+        from_date=from_date,
+        to_date=to_date,
+        actor=actor,
+        reference_doctype=reference_doctype,
+        reference_name=reference_name,
+    )
     or_filters = _audit_search_or_filters(search)
+    order_clause = _order_clause(order_by, order_dir)
 
     if page_size:
         # Server-side summary over the full filtered set (not just the page).
@@ -261,7 +355,7 @@ def audit_events(
                     filters=filters,
                     or_filters=or_filters,
                     fields=_LIST_FIELDS,
-                    order_by="created_at desc, name desc",
+                    order_by=order_clause,
                     limit_start=start,
                     limit_page_length=page_size,
                 )
@@ -282,7 +376,7 @@ def audit_events(
             filters=filters,
             or_filters=or_filters,
             fields=_LIST_FIELDS,
-            order_by="created_at desc, name desc",
+            order_by=order_clause,
             limit_page_length=pagination.clamp_limit(limit, default=200),
         )
     except Exception:
@@ -340,6 +434,123 @@ def approval_logs(
     return rows
 
 
+# Whitelisted values for audit_distinct / audit_stats group_by (plan
+# audit-center B2/B3). Unknown values are thrown out — never interpolated
+# into a query.
+_DISTINCT_FIELDS = ("actor", "company", "employee")
+_STATS_GROUP_BY = ("audit_type", "actor", "employee", "company")
+
+
+@frappe.whitelist()
+def audit_distinct(
+    field: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    """Distinct values of one audit column (``actor`` / ``company`` /
+    ``employee``) ranked by frequency desc.
+
+    Feeds the SPA filter selects (Desk link-field filter parity). Read via
+    ``pagination.all_rows`` — pure get_all, no raw SQL.
+    """
+    _require_hr()
+    field = (field or "").strip()
+    if field not in _DISTINCT_FIELDS:
+        frappe.throw(_("Trường lọc không hợp lệ."), frappe.PermissionError)
+    if not _table_ready():
+        return []
+    rows = pagination.all_rows(DOCTYPE, fields=[field]) or []
+    q = (search or "").strip().lower()
+    counter: dict = {}
+    for r in rows:
+        value = r.get(field)
+        if value in (None, ""):
+            continue
+        value = str(value).strip()
+        if not value:
+            continue
+        if q and q not in value.lower():
+            continue
+        counter[value] = counter.get(value, 0) + 1
+    ranked = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+    cap = pagination.clamp_limit(limit, default=100)
+    return [{"value": value, "count": count} for value, count in ranked[:cap]]
+
+
+@frappe.whitelist()
+def audit_stats(
+    company: str | None = None,
+    employee: str | None = None,
+    audit_type: str | None = None,
+    category: str | None = None,
+    actor: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    search: str | None = None,
+    group_by: str | None = "audit_type",
+    days: int = 30,
+) -> dict:
+    """Aggregate view over the audit trail (Report Builder parity, B3).
+
+    Same filter contract as :func:`audit_events` (minus reference filters —
+    they make little sense for aggregates). Returns ``{"total", "groups"
+    (top 20 by count desc), "series" (dense per-day counts for the last
+    ``days`` days, clamped to [7, 90])}``. Aggregation is Python-side over
+    light rows — parity :func:`_audit_summary`, no raw SQL.
+    """
+    _require_hr()
+    key = (group_by or "audit_type").strip()
+    if key not in _STATS_GROUP_BY:
+        frappe.throw(_("Kiểu thống kê không hợp lệ."), frappe.PermissionError)
+    if not _table_ready():
+        return {"total": 0, "groups": [], "series": []}
+    window = max(7, min(pagination.as_int(days, 30), 90))
+    filters = _build_filters(
+        company=company,
+        employee=employee,
+        audit_type=audit_type,
+        category=category,
+        from_date=from_date,
+        to_date=to_date,
+        actor=actor,
+    )
+    or_filters = _audit_search_or_filters(search)
+    rows = (
+        pagination.all_rows(
+            DOCTYPE,
+            fields=[key, "created_at"],
+            filters=filters,
+            or_filters=or_filters,
+        )
+        or []
+    )
+
+    group_counter: dict = {}
+    day_counter: dict = {}
+    for r in rows:
+        label = r.get(key) or "—"
+        group_counter[label] = group_counter.get(label, 0) + 1
+        created = r.get("created_at")
+        if created:
+            try:
+                day = getdate(created).isoformat()
+                day_counter[day] = day_counter.get(day, 0) + 1
+            except Exception:
+                pass
+
+    groups = [
+        {"label": label, "count": count}
+        for label, count in sorted(group_counter.items(), key=lambda kv: (-kv[1], kv[0]))
+    ][:20]
+
+    today = getdate()
+    series = []
+    for i in range(window - 1, -1, -1):
+        day = (today - timedelta(days=i)).isoformat()
+        series.append({"date": day, "count": day_counter.get(day, 0)})
+    return {"total": len(rows), "groups": groups, "series": series}
+
+
 def _date_window(from_date: str | None, to_date: str | None):
     frm = getdate(from_date) if from_date else None
     to = getdate(to_date) if to_date else None
@@ -358,6 +569,35 @@ def _date_window(from_date: str | None, to_date: str | None):
 # NOT whitelisted on purpose: the audit trail is legal evidence (NĐ 13/2023).
 # A whitelisted record() let any logged-in user forge audit events with an
 # arbitrary ``actor``; internal callers use log()/record() directly in code.
+def _publish_created(
+    name: str | None,
+    *,
+    audit_type: str | None,
+    company: str | None,
+    actor: str | None,
+    employee: str | None = None,
+) -> None:
+    """Best-effort realtime ping so an open /hr/audit tab can offer a refresh
+    (plan audit-center B4). Payload is deliberately light — no old/new values.
+
+    Broadcast pattern mirrors ``checkout_miss._publish``; only the HR-gated
+    audit view subscribes.
+    """
+    try:
+        frappe.publish_realtime(
+            "audit_event_created",
+            {
+                "name": name,
+                "audit_type": audit_type,
+                "company": company,
+                "actor": actor,
+                "employee": employee,
+            },
+        )
+    except Exception:
+        frappe.log_error(title="audit.publish_realtime failed")
+
+
 def record(
     audit_type: str,
     company: str,
@@ -399,6 +639,13 @@ def record(
         # Privileged system audit trail — must always persist regardless of the
         # acting user's role; an audit write must never block a business op.
         doc.insert(ignore_permissions=True)
+        _publish_created(
+            doc.name,
+            audit_type=audit_type,
+            company=company,
+            actor=payload.get("actor") or frappe.session.user,
+            employee=employee,
+        )
         return doc.name
     except Exception:
         frappe.log_error(title="audit.record failed")

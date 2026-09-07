@@ -23,6 +23,19 @@ def get_csrf_token() -> dict:
 
 
 @frappe.whitelist(allow_guest=True)
+def get_site_name() -> dict:
+    """Site name for the SPA's realtime socket namespace.
+
+    Frappe publishes site events (``publish_realtime`` without a room → room
+    ``all``) to the socket.io namespace ``/<sitename>``, and the node realtime
+    auto-joins every authenticated System User socket into room ``all``. The
+    SPA therefore must connect to ``/<sitename>`` — this endpoint lets it
+    resolve the name once at runtime (``VITE_FRAPPE_SITE`` short-circuits it).
+    """
+    return {"site": frappe.local.site}
+
+
+@frappe.whitelist(allow_guest=True)
 def login(usr: str = None, pwd: str = None) -> dict:
     """Authenticate a Frappe user and return the identity payload (mirrors ``me``).
 
@@ -87,7 +100,9 @@ def me() -> dict:
         "roles": roles,
         "role": portal_role,
         "employee": employee,
-        "portal_timezone": tz_utils.get_portal_timezone(),
+        # Per-user override (plan-profile-desk-free §2.2 P1): the user's own
+        # User.time_zone wins; the portal-wide default stays the fallback.
+        "portal_timezone": getattr(user_doc, "time_zone", None) or tz_utils.get_portal_timezone(),
         "home_page": _home_page_for_role(portal_role),
     }
 

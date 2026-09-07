@@ -14,6 +14,7 @@
   {"fieldname": "col1", "fieldtype": "Column Break"},
   {"fieldname": "company", "fieldtype": "Link", "label": "Company", "options": "Company", "reqd": 1},
   {"fieldname": "status", "default": "Draft", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Status", "options": "Draft\nConfirmed\nAdjusted\nApproved"},
+  {"fieldname": "payroll_mode", "fieldtype": "Select", "in_standard_filter": 1, "label": "Payroll Mode", "options": "\nHourly\nMonthly", "read_only": 1},
   {"fieldname": "salary_break", "fieldtype": "Section Break", "label": "Salary Breakdown"},
   {"fieldname": "base_salary", "default": "0", "fieldtype": "Currency", "in_list_view": 1, "label": "Base Salary", "options": "Company:company:default_currency", "read_only": 1},
   {"fieldname": "payable_days", "default": "0", "fieldtype": "Float", "label": "Payable Days", "precision": "2", "read_only": 1},

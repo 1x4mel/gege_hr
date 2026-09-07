@@ -80,6 +80,21 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
     "Holiday List": {  # holiday_master.py: HR Manager CRUD (child-table master)
         HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},
     },
+    # plan-hr-settings-desk-free §2.3 — extra flat masters for the settings
+    # catalogs (Employee Grade is a stock HRMS master; Grievance Type /
+    # Purpose of Travel were previously seeded ad-hoc by employee_services).
+    "Employee Grade": {
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},
+        HR_USER: {"read": 1},
+    },
+    "Grievance Type": {
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},
+        HR_USER: {"read": 1},
+    },
+    "Purpose of Travel": {
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},
+        HR_USER: {"read": 1},
+    },
     # --- User & role management (api/admin.py) -------------------------------
     "User": {
         # create_user (create), assign/remove_roles + enable/disable (write),
@@ -87,6 +102,22 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
         HR_MANAGER: {"read": 1, "write": 1, "create": 1},
     },
     "Has Role": {  # loadUserRoles() lists Has Role rows directly via REST
+        HR_MANAGER: {"read": 1},
+    },
+    # --- User 360° parity (api/user_profile.py, plan-user-frontend-parity) ---
+    "Comment": {  # timeline reads + HR notes attached to User docs
+        HR_MANAGER: {"read": 1},
+    },
+    "Version": {  # "ai sửa gì khi nào" timeline source (User changes)
+        HR_MANAGER: {"read": 1},
+    },
+    "Activity Log": {  # "Đăng nhập" tab — recent Login/Logout operations
+        HR_MANAGER: {"read": 1},
+    },
+    "User Permission": {  # data-scope CRUD (allow-listed to safe masters)
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},
+    },
+    "Role Profile": {  # picker + assignment (master stays Desk/System Manager)
         HR_MANAGER: {"read": 1},
     },
     # --- Shift management (api/admin.py + useAdmin shift helpers) ------------
@@ -128,6 +159,62 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
         HR_USER: {"read": 1, "create": 1},
         HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},
     },
+    # --- Benefits desk-free (benefits_admin.py — plan-benefits-desk-free §3.3)
+    # HRMS đã cấp native perm trên các submittable này (Employee: create/write
+    # nhưng KHÔNG submit → chỉ soạn draft; HR Manager/User: full). Mirror ở đây
+    # để grant idempotent + hiển thị trong diagnose_permissions.
+    "Employee Benefit Application": {
+        EMPLOYEE: {"read": 1, "write": 1, "create": 1},
+        HR_MANAGER: {
+            "read": 1,
+            "write": 1,
+            "create": 1,
+            "delete": 1,
+            "submit": 1,
+            "cancel": 1,
+            "amend": 1,
+            "share": 1,
+        },
+        HR_USER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1, "amend": 1},
+    },
+    "Employee Benefit Claim": {
+        EMPLOYEE: {"read": 1, "write": 1, "create": 1},
+        HR_MANAGER: {
+            "read": 1,
+            "write": 1,
+            "create": 1,
+            "delete": 1,
+            "submit": 1,
+            "cancel": 1,
+            "amend": 1,
+            "share": 1,
+        },
+        HR_USER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1, "amend": 1},
+    },
+    "Gratuity": {  # submit tạo Additional Salary/GL — HR Manager duyệt
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1, "submit": 1, "cancel": 1},
+        HR_USER: {"read": 1},
+    },
+    "Employee Promotion": {  # submit cập nhật Employee master
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1, "submit": 1, "cancel": 1, "amend": 1},
+        HR_USER: {"read": 1},
+    },
+    # read-only masters cho dropdown / preview (plan §2.1 options + context)
+    "Gratuity Rule": {
+        HR_MANAGER: {"read": 1},
+        HR_USER: {"read": 1},
+    },
+    # plan-payroll-periods-desk-free §3.4 — CRUD ngay trên SPA (trước đây chỉ
+    # read: hết năm tài chính / công ty mới buộc HR vào Desk tạo kỳ chuẩn →
+    # benefit_context trả payroll_period=null → form Benefits tự khoá).
+    "Payroll Period": {
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},
+        HR_USER: {"read": 1},
+    },
+    "Salary Component": {
+        HR_MANAGER: {"read": 1},
+        HR_USER: {"read": 1},
+    },
     # --- Org / attendance masters the HR screens list directly via REST -------
     # getList('/api/resource/<doctype>') enforces DocType role perms; these core
     # masters are NOT granted to the gege_hr HR roles by default → 403. Granting
@@ -146,6 +233,55 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
         HR_USER: {"read": 1},
         "Line Manager": {"read": 1},
     },
+    # --- Report engine (api/reports.py → frappe.desk.query_report.run) ---------
+    # query_report.run gates on frappe.has_permission(ref_doctype, "report").
+    # B0 survey (2026-08-29): standard DocPerm already grants report=1 to both
+    # HR roles on Attendance, Employee, Leave Application, Leave Ledger Entry,
+    # Expense Claim, Appraisal and Staffing Plan — those are NOT repeated here.
+    # Only the three ref_doctypes below were missing it on this site.
+    "VN Monthly Attendance Period": {  # VN Chấm công theo nhân viên (Script Report)
+        HR_MANAGER: {"report": 1},
+        HR_USER: {"report": 1},
+    },
+    "VN Checkout Miss": {  # VN Checkout Miss by Employee (deskfree-complete B4)
+        HR_MANAGER: {"report": 1},
+        HR_USER: {"report": 1},
+    },
+    "Employee Advance": {  # Employee Advance Summary (HRMS) — no standard grant
+        HR_MANAGER: {"read": 1, "report": 1},
+        HR_USER: {"read": 1, "report": 1},
+    },
+    "Exit Interview": {  # Employee Exits (HRMS) — System Manager only by default
+        HR_MANAGER: {"read": 1, "report": 1},
+    },
+    "Skill": {  # auto-created when an Interview Round defaults its skillset
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1},
+        HR_USER: {"read": 1},
+    },
+    # --- Recruitment lifecycle (recruitment.py: no-desk plan §3.2) ------------
+    "Job Opening": {  # browse for everyone, admin for HR (save/close/delete)
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},
+        HR_USER: {"read": 1, "write": 1, "create": 1},
+        EMPLOYEE: {"read": 1},
+    },
+    "Job Applicant": {  # pipeline management is HR-only (apply flow bypasses)
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},
+        HR_USER: {"read": 1, "write": 1},
+    },
+    "Interview Round": {
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},
+        HR_USER: {"read": 1, "write": 1, "create": 1},
+    },
+    "Interview": {  # submittable; feedback goes through db_set (allow_on_submit)
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1, "submit": 1, "cancel": 1},
+        HR_USER: {"read": 1, "write": 1, "create": 1, "submit": 1},
+    },
+    "Job Offer": {  # status is allow_on_submit — db_set keeps it safe
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},
+    },
+    "Employee Onboarding": {  # created on offer-accept (set_job_offer_status)
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1},
+    },
     # --- Payroll masters (payroll_master.py: HR Manager admin) --------------
     "Salary Structure": {
         HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},
@@ -157,9 +293,24 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
         HR_MANAGER: {"read": 1, "write": 1, "create": 1},
     },
     "Leave Policy": {
-        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},
+        # Full docstatus lifecycle (plan leave-policy-frontend-crud): without
+        # submit/cancel/amend an HR Manager cannot Duyệt/Huỷ/Thay thế a policy.
+        HR_MANAGER: {
+            "read": 1,
+            "write": 1,
+            "create": 1,
+            "delete": 1,
+            "submit": 1,
+            "cancel": 1,
+            "amend": 1,
+        },
     },
     "Leave Policy Assignment": {
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1, "amend": 1},
+    },
+    "Leave Allocation": {
+        # cancel_leave_policy_assignment cascades-cancel the allocations granted
+        # by the assignment; list_leave_allocations reads them for the drawer.
         HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
     },
     # --- Payroll closing (payroll.py: HR / Payroll Manager) ------------------
@@ -183,6 +334,11 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
     "VN Attendance Correction Request": {
         HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
         HR_USER: {"read": 1},
+        # Employee self-service (plans/correction-deskfree-complete E1): create /
+        # write (read) on their own correction requests. Ownership is enforced at
+        # the app layer (correction._assert_own / attendance._assert_own_correction)
+        # — every employee is scoped to their own docs, parity with OT above.
+        EMPLOYEE: {"read": 1, "write": 1, "create": 1},
     },
     "VN Overtime Request": {
         HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
@@ -296,7 +452,18 @@ def _upsert_perm(doctype: str, role: str, ptypes: dict[str, int]) -> None:
         )
 
     # Reset every standard ptype, then apply the granted ones (least-privilege).
-    for ptype in ("read", "write", "create", "delete", "submit", "cancel", "amend"):
+    # ``report`` is the query_report.run gate (api/reports.py) — it must be part
+    # of the reset loop or a {"report": 1} matrix grant would be silently dropped.
+    for ptype in (
+        "read",
+        "write",
+        "create",
+        "delete",
+        "submit",
+        "cancel",
+        "amend",
+        "report",
+    ):
         doc.set(ptype, ptypes.get(ptype, 0))
     doc.flags.ignore_permissions = True
     doc.save()

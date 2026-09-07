@@ -310,6 +310,7 @@ class VNSalaryAdvanceRequest(Document):
                     "min_working_days",
                     "max_requests_per_month",
                     "cutoff_day",
+                    "is_active",
                     "modified",
                 ],
             )

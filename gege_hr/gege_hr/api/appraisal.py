@@ -5,9 +5,18 @@ DocTypes (no duplicate doctype) and exposes a DNA-compliant surface to the
 portal: an employee lists/creates/tracks their Goals (progress → auto status) and
 reads their Appraisals; an HR/Manager lists cycles + everyone's goals/appraisals.
 Pure helpers are split out for unit testing (no frappe).
+
+Desk-free extensions (plans/goals-frontend-crud.md): full Goal CRUD —
+``get_goal`` (detail + ``can`` matrix), ``update_goal``, ``delete_goal``,
+``set_goal_status`` (bulk Archived/Closed/Completed/Unarchive/Reopen) and a
+``update_goal_progress`` FIX that now saves via ``doc.save()`` so the native
+NestedSet hooks run (parent roll-up + Appraisal goal score). ``submit_goal``
+grows ``is_group`` / ``parent_goal`` / cycle start-date fallback per hrms rules.
 """
 
 from __future__ import annotations
+
+import json
 
 import frappe
 
@@ -28,6 +37,17 @@ _GOAL_FIELDS = [
     "end_date",
     "appraisal_cycle",
     "kra",
+    "is_group",
+    "parent_goal",
+]
+_GOAL_DETAIL_FIELDS = _GOAL_FIELDS + [
+    "description",
+    "company",
+    "user",
+    "created_by",
+    "modified",
+    "modified_by",
+    "owner",
 ]
 _CYCLE_FIELDS = ["name", "cycle_name", "company", "start_date", "end_date", "status"]
 _APPRAISAL_FIELDS = [
@@ -119,6 +139,61 @@ def _summarize_goals(rows) -> dict:
         "pending": counts["Pending"],
         "completion": completion,
     }
+
+
+def _to_bool(value) -> bool:
+    """Truthy coercion for HTTP form params (``1`` / ``"1"`` / ``true``)."""
+    return value in (True, 1, "1", "true", "True", "on")
+
+
+def _assert_cycle_open(cycle: str | None) -> None:
+    """A goal inside a Completed/Cancelled cycle is frozen (hrms standard)."""
+    if not cycle:
+        return
+    cyc_status = frappe.db.get_value(CYCLE_DOCTYPE, cycle, "status")
+    if cyc_status in ("Completed", "Cancelled"):
+        frappe.throw("Chu kỳ đánh giá đã đóng — không thể cập nhật mục tiêu.")
+
+
+def _goal_doc_or_throw(name: str | None):
+    if not name or not frappe.db.exists(GOAL_DOCTYPE, name):
+        frappe.throw("Mục tiêu không tồn tại.")
+    return frappe.get_doc(GOAL_DOCTYPE, name)
+
+
+def goal_can(status: str | None, is_group, children_total: int = 0) -> dict:
+    """Pure ``can`` action matrix for a Goal (plans/goals-frontend-crud.md §2.1).
+
+    Mirrors hrms rules: progress is read-only for group goals & sticky states
+    (Archived/Closed); a group with children cannot be deleted.
+    """
+    sticky = status in ("Archived", "Closed")
+    group = _to_bool(is_group)
+    return {
+        "edit": True,
+        "delete": not children_total,
+        "set_progress": (not group) and not sticky,
+        "archive": not sticky,
+        "unarchive": status == "Archived",
+        "close": not sticky,
+        "reopen": status == "Closed",
+    }
+
+
+def _friendly_goal_error(exc: Exception) -> str | None:
+    """Map the most common native hrms Goal validation messages to Vietnamese."""
+    lowered = str(exc).lower()
+    if "from date" in lowered or "to date" in lowered:
+        return "Ngày kết thúc không được trước ngày bắt đầu."
+    if "same employee" in lowered:
+        return "Mục tiêu con phải cùng nhân viên với mục tiêu cha."
+    if "same kra" in lowered or "aligned with the same kra" in lowered:
+        return "Mục tiêu phải cùng KRA với mục tiêu cha."
+    if "same appraisal cycle" in lowered:
+        return "Mục tiêu phải cùng Kỳ đánh giá với mục tiêu cha."
+    if "progress percentage cannot be more than 100" in lowered:
+        return "Tiến độ không được vượt quá 100%."
+    return None
 
 
 @frappe.whitelist()
@@ -269,15 +344,35 @@ def submit_goal(
     end_date: str | None = None,
     cycle: str | None = None,
     description: str | None = None,
+    is_group=False,
+    parent_goal: str | None = None,
 ) -> dict:
     emp = _resolve(employee)
     _assert_own(emp)
-    if cycle:
-        cyc_status = frappe.db.get_value("Appraisal Cycle", cycle, "status")
-        if cyc_status in ("Completed", "Cancelled"):
-            frappe.throw("Chu kỳ đánh giá đã đóng — không thể thêm mục tiêu.")
     if not (goal_name or "").strip():
         frappe.throw("Cần tên mục tiêu.")
+
+    group_flag = _to_bool(is_group)
+    parent = None
+    if parent_goal and not group_flag:  # a group is always a root — ignore any parent
+        parent = _goal_doc_or_throw(parent_goal)
+        if getattr(parent, "employee", None) != emp:
+            frappe.throw("Mục tiêu con phải cùng nhân viên với mục tiêu cha.")
+        # hrms fetch_from: child inherits KRA + cycle from the parent goal
+        if kra and parent.kra and kra != parent.kra:
+            frappe.throw("Mục tiêu phải cùng KRA với mục tiêu cha.")
+        kra = kra or getattr(parent, "kra", None) or None
+        cycle = getattr(parent, "appraisal_cycle", None) or None
+    elif cycle and not (kra or "").strip():
+        # goal.json: KRA is mandatory when a cycle is linked and there is no parent
+        frappe.throw("Mục tiêu gắn kỳ đánh giá cần chọn KRA.")
+
+    _assert_cycle_open(cycle)
+
+    if not start_date and cycle:
+        # fetch_if_empty: default the window from the appraisal cycle
+        start_date = frappe.db.get_value(CYCLE_DOCTYPE, cycle, "start_date")
+
     company = frappe.db.get_value("Employee", emp, "company")
     doc = frappe.new_doc(GOAL_DOCTYPE)
     doc.employee = emp
@@ -288,26 +383,242 @@ def submit_goal(
     doc.appraisal_cycle = cycle or None
     doc.description = description or ""
     doc.company = company
+    doc.is_group = 1 if group_flag else 0
+    doc.parent_goal = parent_goal if not group_flag else None
     doc.progress = 0
     doc.status = status_for_progress(0)
     doc.insert(ignore_permissions=True)
-    return {"name": doc.name, "status": doc.status}
+    return {
+        "name": doc.name,
+        "status": doc.status,
+        "is_group": getattr(doc, "is_group", 0),
+        "parent_goal": getattr(doc, "parent_goal", None),
+    }
+
+
+@frappe.whitelist()
+def get_goal(name: str | None = None) -> dict:
+    """Goal detail + children stats + server-side ``can`` action matrix."""
+    doc = _goal_doc_or_throw(name)
+    _assert_own(doc.employee)
+
+    children_rows = (
+        frappe.get_all(GOAL_DOCTYPE, filters=[["parent_goal", "=", name]], fields=["name", "status"]) or []
+    )
+    total = len(children_rows)
+    counts = {"Completed": 0, "In Progress": 0, "Pending": 0}
+    for row in children_rows:
+        st = row.get("status")
+        if st in counts:
+            counts[st] += 1
+
+    out = {f: getattr(doc, f, None) for f in _GOAL_DETAIL_FIELDS}
+    out["parent_goal_name"] = (
+        frappe.db.get_value(GOAL_DOCTYPE, doc.parent_goal, "goal_name") if doc.parent_goal else None
+    )
+    out["children"] = {
+        "total": total,
+        "completed": counts["Completed"],
+        "in_progress": counts["In Progress"],
+        "pending": counts["Pending"],
+    }
+    out["completion_count"] = (
+        f"{counts['Completed']}/{total} hoàn thành" if _to_bool(doc.is_group) and total else ""
+    )
+    out["can"] = goal_can(doc.status, getattr(doc, "is_group", 0), total)
+    return out
+
+
+@frappe.whitelist()
+def update_goal(
+    name: str | None = None,
+    goal_name: str | None = None,
+    kra: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    description: str | None = None,
+    parent_goal: str | None = None,
+) -> dict:
+    """Edit the non-set_only_once fields. Runs the FULL hrms controller
+    (validate + on_update roll-up) via ``doc.save()`` — never ``db.set_value``.
+
+    ``employee`` / ``is_group`` / ``appraisal_cycle`` / ``progress`` / ``status``
+    are intentionally NOT accepted (set_only_once or dedicated endpoints).
+    """
+    doc = _goal_doc_or_throw(name)
+    _assert_own(doc.employee)
+    _assert_cycle_open(getattr(doc, "appraisal_cycle", None))
+
+    if (goal_name or "").strip():
+        doc.goal_name = goal_name.strip()
+    if kra is not None:
+        doc.kra = kra or None
+    if start_date:
+        doc.start_date = start_date
+    if end_date is not None:
+        doc.end_date = end_date or None
+    if description is not None:
+        doc.description = description or ""
+
+    if getattr(doc, "appraisal_cycle", None) and not getattr(doc, "parent_goal", None) and not doc.kra:
+        frappe.throw("Mục tiêu gắn kỳ đánh giá cần chọn KRA.")
+
+    if parent_goal is not None:
+        # NestedSet move: set old_parent from DB truth before saving
+        # (mirrors frappe.desk.treeview) so on_update relocates the node.
+        doc.old_parent = frappe.db.get_value(GOAL_DOCTYPE, name, "parent_goal") or ""
+        doc.parent_goal = parent_goal or None
+
+    try:
+        doc.save()
+    except Exception as exc:  # noqa: BLE001 — map native messages to Vietnamese
+        friendly = _friendly_goal_error(exc)
+        if friendly:
+            frappe.throw(friendly)
+        raise
+
+    return {
+        "name": name,
+        "goal_name": getattr(doc, "goal_name", None),
+        "status": getattr(doc, "status", None),
+        "progress": getattr(doc, "progress", None),
+        "modified": getattr(doc, "modified", None),
+    }
+
+
+@frappe.whitelist()
+def delete_goal(name: str | None = None) -> dict:
+    _delete_one_goal(name)
+    return {"name": name}
+
+
+def _delete_one_goal(name: str | None) -> None:
+    """Shared delete path (single + bulk): ownership gate + children guard."""
+    doc = _goal_doc_or_throw(name)
+    _assert_own(doc.employee)
+    child_count = frappe.db.count(GOAL_DOCTYPE, [["parent_goal", "=", name]]) or 0
+    if child_count:
+        frappe.throw("Mục tiêu nhóm còn mục tiêu con — hãy xoá hoặc di chuyển các mục tiêu con trước.")
+    try:
+        frappe.delete_doc(GOAL_DOCTYPE, name)
+    except Exception as exc:  # noqa: BLE001 — LinkExistsError etc → Vietnamese
+        lowered = str(exc).lower()
+        if "linkexists" in lowered or "linked with" in lowered:
+            frappe.throw("Mục tiêu đang được liên kết — không xoá được.")
+        raise
+
+
+@frappe.whitelist()
+def bulk_delete_goals(names) -> dict:
+    """P1 (plans/goals-frontend-crud.md §1.7): manager-only bulk delete, partial-safe."""
+    if not _is_manager():
+        frappe.throw("Chỉ HR/Manager xoá được hàng loạt mục tiêu.")
+    if isinstance(names, str):
+        try:
+            parsed = json.loads(names)
+        except (TypeError, ValueError):
+            parsed = [names]
+        names = parsed
+    deleted: list[str] = []
+    failed: list[dict] = []
+    for goal_name in [n for n in (names or []) if n]:
+        try:
+            _delete_one_goal(goal_name)
+            deleted.append(goal_name)
+        except Exception as exc:  # noqa: BLE001 — per-row failures never kill the batch
+            failed.append({"name": goal_name, "reason": str(exc)})
+    return {"deleted": deleted, "failed": failed}
+
+
+@frappe.whitelist()
+def list_goal_children(name: str | None = None) -> dict:
+    """P1: direct children of a group goal (hrms tree semantics — Archived hidden).
+
+    Each row carries ``has_children`` so the UI can render expandable nodes.
+    """
+    doc = _goal_doc_or_throw(name)
+    _assert_own(doc.employee)
+
+    rows = (
+        frappe.get_all(
+            GOAL_DOCTYPE,
+            filters=[["parent_goal", "=", name], ["status", "!=", "Archived"]],
+            fields=["name", "goal_name", "status", "progress", "kra", "end_date", "is_group"],
+            order_by="creation asc",
+        )
+        or []
+    )
+    children = []
+    for row in rows:
+        child = dict(row)
+        child["has_children"] = bool(frappe.db.count(GOAL_DOCTYPE, [["parent_goal", "=", row.get("name")]]))
+        children.append(child)
+    return {"parent": name, "children": children}
+
+
+_GOAL_BULK_STATUS = {"Archived", "Closed", "Completed", "Unarchive", "Reopen"}
+
+
+@frappe.whitelist()
+def set_goal_status(names, status: str | None = None) -> dict:
+    """Bulk status moves (partial-safe): Archived / Closed / Completed /
+    Unarchive / Reopen (the last two recompute the status from progress,
+    mirroring hrms set_status semantics for sticky states)."""
+    if isinstance(names, str):
+        try:
+            parsed = json.loads(names)
+        except (TypeError, ValueError):
+            parsed = [names]
+        names = parsed
+    names = [n for n in (names or []) if n]
+
+    if status not in _GOAL_BULK_STATUS:
+        frappe.throw("Trạng thái không hợp lệ.")
+
+    updated: list[str] = []
+    failed: list[dict] = []
+    for goal_name in names:
+        try:
+            doc = _goal_doc_or_throw(goal_name)
+            _assert_own(doc.employee)
+            _assert_cycle_open(getattr(doc, "appraisal_cycle", None))
+
+            if status in ("Archived", "Closed"):
+                doc.status = status
+            elif status == "Completed":
+                doc.status = "Completed"
+                doc.progress = 100
+            else:  # Unarchive / Reopen → recompute from progress
+                doc.status = status_for_progress(getattr(doc, "progress", 0) or 0)
+
+            doc.flags.ignore_mandatory = True
+            doc.save()
+            updated.append(goal_name)
+        except Exception as exc:  # noqa: BLE001 — per-row failures never kill the batch
+            failed.append({"name": goal_name, "reason": str(exc)})
+    return {"updated": updated, "failed": failed}
 
 
 @frappe.whitelist()
 def update_goal_progress(name: str | None = None, progress: float = 0) -> dict:
-    if not name or not frappe.db.exists(GOAL_DOCTYPE, name):
-        frappe.throw("Mục tiêu không tồn tại.")
-    emp, cycle = frappe.db.get_value(GOAL_DOCTYPE, name, ["employee", "appraisal_cycle"])
-    _assert_own(emp)
-    if cycle:
-        cyc_status = frappe.db.get_value("Appraisal Cycle", cycle, "status")
-        if cyc_status in ("Completed", "Cancelled"):
-            frappe.throw("Chu kỳ đánh giá đã đóng — không thể cập nhật mục tiêu.")
+    """FIX (plans/goals-frontend-crud.md §2.5): save via ``doc.save()`` so the
+    native hrms controller runs — auto status, parent-group roll-up and the
+    Appraisal goal score refresh. The old ``db.set_value`` bypassed all hooks."""
+    doc = _goal_doc_or_throw(name)
+    _assert_own(doc.employee)
+    _assert_cycle_open(getattr(doc, "appraisal_cycle", None))
+
+    if _to_bool(getattr(doc, "is_group", 0)):
+        frappe.throw("Mục tiêu nhóm tự tính tiến độ từ các mục tiêu con.")
+    if doc.status in ("Archived", "Closed"):
+        frappe.throw("Mục tiêu đã lưu trữ/đóng — khôi phục trước khi cập nhật.")
+
     p = max(0.0, min(100.0, _num(progress)))
-    status = status_for_progress(p)
-    frappe.db.set_value(GOAL_DOCTYPE, name, {"progress": p, "status": status})
-    return {"name": name, "progress": p, "status": status}
+    doc.progress = p
+    doc.status = status_for_progress(p)  # native validate re-derives this too
+    doc.flags.ignore_mandatory = True
+    doc.save()
+    return {"name": name, "progress": doc.progress, "status": doc.status}
 
 
 @frappe.whitelist()
@@ -331,7 +642,7 @@ def my_appraisals(employee: str | None = None) -> list[dict]:
 
 @frappe.whitelist()
 def appraisal_options() -> dict:
-    out = {"cycles": [], "kras": []}
+    out = {"cycles": [], "kras": [], "employees": []}
     try:
         out["cycles"] = (
             frappe.get_all(CYCLE_DOCTYPE, filters={"status": ["!=", "Completed"]}, fields=_CYCLE_FIELDS) or []
@@ -342,4 +653,17 @@ def appraisal_options() -> dict:
         out["kras"] = frappe.get_all("KRA", pluck="name", order_by="name asc") or []
     except Exception:
         pass
+    if _is_manager():
+        try:
+            out["employees"] = (
+                frappe.get_all(
+                    "Employee",
+                    filters=[["status", "=", "Active"]],
+                    fields=["name", "employee_name"],
+                    order_by="employee_name asc",
+                )
+                or []
+            )
+        except Exception:
+            pass
     return out

@@ -86,7 +86,7 @@ def handle_employee_status_change(doc, method: str | None = None) -> None:
                 frappe.db.set_value("Shift Assignment", sa, {"end_date": end_on, "status": "Inactive"})
             except Exception:
                 frappe.log_error(title=f"employee Left: end SA failed {sa}")
-    except Exception:
+    except Exception:  # noqa: BLE001 — partial install tolerance
         pass
 
     # 2) Cancel FUTURE Shift Instances (today onwards); keep history.
@@ -114,3 +114,28 @@ def handle_employee_status_change(doc, method: str | None = None) -> None:
         frappe.logger().info(f"[gege_hr] Employee {doc.name} → Left: SAs ended, future SIs cancelled")
     except Exception:
         pass
+
+
+def guard_reports_to_cycle(doc, method: str | None = None) -> None:
+    """``Employee.validate`` (doc_events) — chặn chuỗi reports_to tạo vòng lặp.
+
+    plan-employee-frontend-parity §2.5: một vòng A→B→A từng khiến org chart
+    và duyệt đơn treo vĩnh viễn. Đi ngược chuỗi quản lý tối đa 200 cấp — gặp
+    lại chính mình thì throw (message tiếng Việt kèm chuỗi để HR sửa).
+    """
+    from gege_hr.gege_hr.api.employee_profile import detect_cycle
+
+    reports_to = str(getattr(doc, "reports_to", "") or "").strip()
+    if not reports_to:
+        return
+    if reports_to == doc.name:
+        frappe.throw(_("Nhân viên không thể báo cáo cho chính mình."))
+    try:
+        rows = frappe.get_all("Employee", fields=["name", "reports_to"], limit_page_length=0)
+    except Exception:
+        return  # partial install — không chặn save vì meta thiếu
+    chain = {r.name: r.reports_to for r in rows if r.get("name")}
+    chain[doc.name] = reports_to
+    cycle = detect_cycle(chain, doc.name)
+    if cycle:
+        frappe.throw(_("Chuỗi báo cáo tạo vòng lặp: {0}").format(" → ".join(cycle)))

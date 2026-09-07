@@ -29,6 +29,7 @@ from gege_hr.gege_hr.utils import (
     _db as _db_mod,
     employee as emp_utils,
     gamification as game,
+    notify as notify_util,
     pagination,
     tz as tz_utils,
 )
@@ -818,6 +819,51 @@ def _shift_location_for_day(employee: str, day: date) -> str | None:
     return (row[0].get("vn_work_location") or "").strip() or None
 
 
+def _ws_payload(r) -> dict:
+    """Project ONE ``VN Attendance Work Session`` row → the SPA day-row dict.
+
+    Shared by ``my_logs`` and ``my_day_detail`` (plan
+    plans/plan-monthly-attendance-self-deskfree.md §3.1) so the month list and
+    the day drawer always show the SAME engine-computed values.
+    """
+    # Derive a Frappe-compatible status from the Work Session flags.
+    if r.absent:
+        status = "Absent"
+    elif r.has_leave:
+        status = "On Leave"
+    elif flt(r.payable_day or 0) == 0.5:
+        status = "Half Day"
+    else:
+        status = "Present"
+
+    return {
+        "name": r.name,
+        "work_date": str(r.work_date),
+        "shift_type": r.shift_type or "",
+        "status": status,
+        "planned_start": str(r.planned_start) if r.planned_start else None,
+        "planned_end": str(r.planned_end) if r.planned_end else None,
+        "actual_checkin": str(r.actual_checkin) if r.actual_checkin else None,
+        "actual_checkout": str(r.actual_checkout) if r.actual_checkout else None,
+        "late_minutes": int(r.late_minutes or 0),
+        "early_leave_minutes": int(r.early_leave_minutes or 0),
+        "regular_hours": flt(r.regular_hours or 0, 2),
+        "total_actual_hours": flt(r.total_actual_hours or 0, 2),
+        "raw_overtime_hours": flt(r.raw_overtime_hours or 0, 4),
+        "approved_overtime_hours": flt(r.approved_overtime_hours or 0, 4),
+        "payable_day": flt(r.payable_day or 0, 2),
+        "has_leave": bool(r.has_leave),
+        "absent": bool(r.absent),
+        "missing_checkin": bool(r.missing_checkin),
+        "missing_checkout": bool(r.missing_checkout),
+        # Engine-synthesised OUT (checkout-miss auto-close): the UI must
+        # keep showing "Quên chấm ra", not a green completed day.
+        "vn_auto_checkout": bool(r.vn_auto_checkout),
+        "need_review": bool(r.need_review),
+        "shift_instance": getattr(r, "shift_instance", None) or None,
+    }
+
+
 @frappe.whitelist()
 def my_logs(
     employee: str | None = None,
@@ -885,46 +931,7 @@ def my_logs(
         limit_page_length=500,
     )
 
-    out: list[dict] = []
-    for r in ws_rows:
-        # Derive a Frappe-compatible status from the Work Session flags.
-        if r.absent:
-            status = "Absent"
-        elif r.has_leave:
-            status = "On Leave"
-        elif flt(r.payable_day or 0) == 0.5:
-            status = "Half Day"
-        else:
-            status = "Present"
-
-        out.append(
-            {
-                "name": r.name,
-                "work_date": str(r.work_date),
-                "shift_type": r.shift_type or "",
-                "status": status,
-                "planned_start": str(r.planned_start) if r.planned_start else None,
-                "planned_end": str(r.planned_end) if r.planned_end else None,
-                "actual_checkin": str(r.actual_checkin) if r.actual_checkin else None,
-                "actual_checkout": str(r.actual_checkout) if r.actual_checkout else None,
-                "late_minutes": int(r.late_minutes or 0),
-                "early_leave_minutes": int(r.early_leave_minutes or 0),
-                "regular_hours": flt(r.regular_hours or 0, 2),
-                "total_actual_hours": flt(r.total_actual_hours or 0, 2),
-                "raw_overtime_hours": flt(r.raw_overtime_hours or 0, 4),
-                "approved_overtime_hours": flt(r.approved_overtime_hours or 0, 4),
-                "payable_day": flt(r.payable_day or 0, 2),
-                "has_leave": bool(r.has_leave),
-                "absent": bool(r.absent),
-                "missing_checkin": bool(r.missing_checkin),
-                "missing_checkout": bool(r.missing_checkout),
-                # Engine-synthesised OUT (checkout-miss auto-close): the UI must
-                # keep showing "Quên chấm ra", not a green completed day.
-                "vn_auto_checkout": bool(r.vn_auto_checkout),
-                "need_review": bool(r.need_review),
-            }
-        )
-    return out
+    return [_ws_payload(r) for r in ws_rows]
 
 
 def _parse_year_month(year, month, now):
@@ -1095,35 +1102,865 @@ def my_monthly_summary(
 
 
 @frappe.whitelist()
-def team_daily_status(date_str: str | None = None) -> list[dict]:
-    """Plan §10.2 — manager snapshot: one row per team member for a day."""
-    frappe.only_for(["HR Manager", "HR User", "System Manager"])
-    day = getdate(date_str) if date_str else tz_utils.now_in_portal().date()
-    manager_emp = emp_utils.get_employee_for_user()
-    members = frappe.db.get_all(
-        "Employee",
-        filters={"status": "Active", "reports_to": manager_emp},
-        fields=["name", "employee_name", "designation"],
+def my_month_meta(employee: str | None = None, year: int | None = None, month: int | None = None) -> dict:
+    """Employee self-service month metadata (plan
+    plans/plan-monthly-attendance-self-deskfree.md BE-1).
+
+    One read powering the SPA ``/hr/attendance/monthly`` page: lock state of
+    the closing period, holiday dates (for gap-day synthesis), the
+    Work-Session-based summary (tiles stay truthful BEFORE the HR admin
+    generates core ``Attendance`` rows) and ``standard_days``.
+    """
+    emp = _resolve_employee(employee)
+    now = tz_utils.now_in_portal()
+    y, m = _parse_year_month(year, month, now)
+    start = date(y, m, 1)
+    next_first = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
+    end = next_first - timedelta(days=1)
+
+    # ── Closing period covering the month (name/status only — no internals). ──
+    period = None
+    locked = False
+    try:
+        rows = frappe.db.get_all(
+            "VN Monthly Attendance Period",
+            filters=[
+                ["from_date", "<=", str(end)],
+                ["to_date", ">=", str(start)],
+                ["docstatus", "!=", 2],
+            ],
+            fields=["name", "status"],
+            order_by="from_date desc",
+            limit_page_length=1,
+        )
+        if rows:
+            period = {"name": rows[0].get("name"), "status": rows[0].get("status")}
+            locked = (rows[0].get("status") or "") == "Locked"
+    except Exception:
+        period = None
+
+    # ── Holidays of the employee's resolved Holiday List (best-effort). ──────
+    holidays: list[str] = []
+    try:
+        from gege_hr.gege_hr.utils import calc as _calc  # lazy: pure/guarded module
+
+        holidays = sorted(str(d) for d in _calc.load_holiday_dates(start, end, emp))
+    except Exception:
+        holidays = []
+
+    holiday_set = set(holidays)
+    total_days = (end - start).days + 1
+    sundays = sum(1 for i in range(total_days) if (start + timedelta(days=i)).weekday() == 6)
+    standard_days = total_days - sundays - len(holiday_set)
+
+    # ── Work-Session summary (engine truth — same framing as my_logs tiles). ──
+    ws_rows = frappe.db.get_all(
+        "VN Attendance Work Session",
+        filters={
+            "employee": emp,
+            "work_date": ["between", [start, end]],
+            "docstatus": ["!=", 2],
+        },
+        fields=[
+            "actual_checkin",
+            "actual_checkout",
+            "late_minutes",
+            "payable_day",
+            "absent",
+            "has_leave",
+            "raw_overtime_hours",
+            "approved_overtime_hours",
+        ],
     )
-    out = []
-    for m in members:
-        att = frappe.db.get_value(
+    worked_days = 0
+    late_count = 0
+    payable_days = 0.0
+    absent_count = 0
+    leave_days = 0
+    overtime_hours = 0.0
+    for r in ws_rows:
+        if r.get("actual_checkin") or r.get("actual_checkout"):
+            worked_days += 1
+        if flt(r.get("late_minutes") or 0) > 0:
+            late_count += 1
+        payable_days += flt(r.get("payable_day") or 0)
+        if r.get("absent"):
+            absent_count += 1
+        if r.get("has_leave"):
+            leave_days += 1
+        overtime_hours += flt(r.get("approved_overtime_hours") or r.get("raw_overtime_hours") or 0)
+
+    has_attendance = bool(
+        frappe.db.exists(
             "Attendance",
-            {"employee": m.name, "attendance_date": day},
-            ["status", "in_time", "out_time", "late_entry", "early_exit"],
-            as_dict=True,
+            {"employee": emp, "attendance_date": ["between", [start, end]]},
         )
-        out.append(
-            {
-                **m,
-                "status": (att.status if att else "Not marked"),
-                "in_time": att.in_time if att else None,
-                "out_time": att.out_time if att else None,
-                "late_entry": bool(att and att.late_entry),
-                "early_exit": bool(att and att.early_exit),
-            }
+    )
+
+    return {
+        "employee": emp,
+        "year": y,
+        "month": m,
+        "locked": locked,
+        "period": period,
+        "holidays": holidays,
+        "standard_days": standard_days,
+        "has_attendance": has_attendance,
+        "ws_summary": {
+            "worked_days": worked_days,
+            "payable_days": flt(payable_days, 2),
+            "late_count": late_count,
+            "absent_count": absent_count,
+            "leave_days": leave_days,
+            "overtime_hours": flt(overtime_hours, 2),
+        },
+    }
+
+
+@frappe.whitelist()
+def my_day_detail(employee: str | None = None, work_date: str | None = None) -> dict:
+    """Employee self-service day detail (plan
+    plans/plan-monthly-attendance-self-deskfree.md BE-2).
+
+    Read-only 360° of ONE work_date: Work Session (same projection as
+    ``my_logs``), raw punches, correction requests, overtime requests, the
+    official ``Attendance`` row and the closing-period lock flag. Empty
+    sections — never throws — for days with no data.
+    """
+    if not work_date:
+        frappe.throw(_("Thiếu ngày cần tra cứu."), frappe.ValidationError)
+    try:
+        day = getdate(work_date)
+    except Exception:
+        day = None
+    if not day:
+        frappe.throw(_("Ngày tra cứu không hợp lệ."), frappe.ValidationError)
+    emp = _resolve_employee(employee)
+    return _day_detail_core(emp, day)
+
+
+def _day_detail_core(emp: str, day: date) -> dict:
+    """Shared read-only 360° payload of ONE member-day.
+
+    Extracted from ``my_day_detail`` (plans/team-today-desk-free.md §2.2) so
+    ``team_member_day_detail`` reuses the exact same sections — Work Session,
+    raw punches, correction requests, overtime requests, the official
+    ``Attendance`` row and the closing-period lock flag. Empty sections —
+    never throws — for days with no data.
+    """
+    day_str = str(day)
+
+    ws_rows = frappe.db.get_all(
+        "VN Attendance Work Session",
+        filters={"employee": emp, "work_date": day, "docstatus": ["!=", 2]},
+        fields=[
+            "name",
+            "work_date",
+            "shift_type",
+            "shift_instance",
+            "planned_start",
+            "planned_end",
+            "actual_checkin",
+            "actual_checkout",
+            "late_minutes",
+            "early_leave_minutes",
+            "regular_hours",
+            "total_actual_hours",
+            "raw_overtime_hours",
+            "approved_overtime_hours",
+            "payable_day",
+            "absent",
+            "has_leave",
+            "need_review",
+            "missing_checkin",
+            "missing_checkout",
+            "vn_auto_checkout",
+        ],
+        order_by="creation desc",
+        limit_page_length=1,
+    )
+    work_session = _ws_payload(ws_rows[0]) if ws_rows else None
+
+    # Raw punches — reuse the portal-wall day window helper (attribute rows).
+    punches = [
+        {
+            "name": p.get("name"),
+            "time": str(p.get("time")) if p.get("time") else None,
+            "log_type": p.get("log_type"),
+            "device_id": p.get("device_id"),
+            "latitude": p.get("latitude"),
+            "longitude": p.get("longitude"),
+        }
+        for p in _checkins_for(emp, day)
+    ]
+
+    try:
+        corrections = frappe.db.get_all(
+            CR_DOCTYPE,
+            filters={"employee": emp, "work_date": day, "docstatus": ["!=", 2]},
+            fields=["name", "correction_type", "reason", "workflow_state", "docstatus"],
+            order_by="creation desc",
         )
+    except Exception:
+        corrections = []
+
+    try:
+        overtime_requests = frappe.db.get_all(
+            "VN Overtime Request",
+            filters={"employee": emp, "work_date": day, "docstatus": ["!=", 2]},
+            fields=["name", "from_datetime", "to_datetime", "requested_hours", "workflow_state"],
+            order_by="creation desc",
+        )
+    except Exception:
+        overtime_requests = []
+
+    att_rows = frappe.db.get_all(
+        "Attendance",
+        filters={"employee": emp, "attendance_date": day, "docstatus": ["!=", 2]},
+        fields=[
+            "name",
+            "status",
+            "in_time",
+            "out_time",
+            "late_entry",
+            "early_exit",
+            "working_hours",
+            "docstatus",
+        ],
+        order_by="docstatus desc, creation desc",
+        limit_page_length=1,
+    )
+    attendance = dict(att_rows[0]) if att_rows else None
+
+    return {
+        "work_date": day_str,
+        "locked": _is_date_locked(day_str),
+        "work_session": work_session,
+        "punches": punches,
+        "corrections": corrections,
+        "overtime_requests": overtime_requests,
+        "attendance": attendance,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Team Today — desk-free manager roster (plans/team-today-desk-free.md)
+# --------------------------------------------------------------------------- #
+TEAM_VIEW_ROLES = ("HR Manager", "HR User", "System Manager", "Line Manager")
+TEAM_STATUS_TOKENS = (
+    "Present",
+    "Late",
+    "Absent",
+    "On Leave",
+    "Half Day",
+    "Week Off",
+    "Work From Home",
+    "Not Checked In",
+)
+
+_NUDGE_TITLES = {
+    "missing_checkin": (
+        "Nhắc chấm công vào",
+        "Bạn chưa chấm công VÀO cho ngày {day}. Hãy chấm công ngay để ngày làm việc được tính đủ.",
+    ),
+    "missing_checkout": (
+        "Nhắc chấm công ra",
+        "Bạn chưa chấm công RA cho ngày {day}. Hãy chấm công để hoàn tất ngày làm việc.",
+    ),
+}
+
+
+def _team_viewer() -> tuple[str | None, bool]:
+    """Resolve the caller's team-view context → ``(manager_emp, is_hr)``.
+
+    Gate (plan §2.1 — fix D2): HR Manager / HR User / System Manager may view;
+    a Line Manager is scoped to their ``reports_to`` team. Any other role →
+    PermissionError.
+    """
+    roles = set(emp_utils.get_user_roles() or [])
+    if not roles & set(TEAM_VIEW_ROLES):
+        frappe.throw(_("Bạn không có quyền xem tình trạng team."), frappe.PermissionError)
+    is_hr = bool(roles & {"HR Manager", "HR User", "System Manager"})
+    return emp_utils.get_employee_for_user(), is_hr
+
+
+def _is_line_manager_of(manager_emp: str | None, employee) -> bool:
+    """True khi ``employee.reports_to`` là ``manager_emp`` (scope F5)."""
+    if not manager_emp or not employee:
+        return False
+    try:
+        target = emp_utils.emp_name(employee)
+        return bool(target) and frappe.db.get_value("Employee", target, "reports_to") == manager_emp
+    except Exception:
+        return False
+
+
+def _can_view_member(manager_emp: str | None, is_hr: bool, employee) -> bool:
+    """HR đọc được mọi nhân viên; Line Manager chỉ member trong team mình."""
+    if not employee:
+        return False
+    if is_hr:
+        return True
+    return _is_line_manager_of(manager_emp, employee)
+
+
+def _team_scope_members(manager_emp: str | None, is_hr: bool) -> list[dict]:
+    """Active employees of the caller's team (one query — plan §2.1).
+
+    HR giữ nguyên hành vi cũ (team ``reports_to`` của họ); khi HR không quản lý
+    ai thì fallback toàn công ty (scope HR). Line Manager chưa link Employee
+    thì không có member nào.
+    """
+    filters: dict = {"status": "Active"}
+    if manager_emp:
+        filters["reports_to"] = manager_emp
+    elif not is_hr:
+        return []
+    return frappe.db.get_all(
+        "Employee",
+        filters=filters,
+        fields=["name", "employee_name", "designation", "reports_to"],
+    )
+
+
+def _team_member_status(att, ws) -> str:
+    """Pure — canonical Team Today status token for one member-day.
+
+    ``att``: Attendance row dict (or None); ``ws``: ``_ws_payload`` dict (or
+    None). Vocabulary: Present / Late / Absent / On Leave / Half Day /
+    Week Off / Work From Home / Not Checked In — never "Not marked" (fix D3).
+    """
+    att = att or {}
+    ws = ws or {}
+    a_status = str(att.get("status") or "").strip()
+    late = bool(att.get("late_entry")) or int(ws.get("late_minutes") or 0) > 0
+    if not a_status:
+        if not ws:
+            return "Not Checked In"
+        if ws.get("absent"):
+            return "Absent"
+        if ws.get("has_leave"):
+            return "On Leave"
+        if ws.get("missing_checkin"):
+            return "Not Checked In"
+        return "Late" if late else "Present"
+    if a_status == "Present":
+        return "Late" if late else "Present"
+    return a_status
+
+
+def summarize_team(members) -> dict:
+    """Pure — summary card counts over the (already filtered) member rows."""
+    counts = {
+        "total": len(members or []),
+        "present": 0,
+        "late": 0,
+        "absent": 0,
+        "on_leave": 0,
+        "not_checked_in": 0,
+    }
+    for m in members or []:
+        st = str((m or {}).get("status") or "Not Checked In")
+        if st == "Present":
+            counts["present"] += 1
+        elif st == "Late":
+            counts["late"] += 1
+        elif st == "Absent":
+            counts["absent"] += 1
+        elif st in ("On Leave", "Half Day"):
+            counts["on_leave"] += 1
+        elif st == "Not Checked In":
+            counts["not_checked_in"] += 1
+    return counts
+
+
+def _filter_team_rows(rows, search, status):
+    """Pure — server-side broad search + status token filter (DNA §6.6 D)."""
+    q = str(search or "").strip().lower()
+    st = str(status or "").strip()
+    out = []
+    for r in rows or []:
+        if q:
+            hay = f"{(r.get('employee_name') or '')} {(r.get('name') or '')}".lower()
+            if q not in hay:
+                continue
+        if st and str(r.get("status") or "") != st:
+            continue
+        out.append(r)
     return out
+
+
+def _team_member_row(member, att, ws_payload, shift_name, pending, has_cm, leave) -> dict:
+    """Pure-ish assembly — one roster row from the batched contexts."""
+    ws = ws_payload or {}
+    att = att or {}
+    status = _team_member_status(att, ws)
+    return {
+        "name": member.get("name"),
+        "employee": member.get("name"),
+        "employee_name": member.get("employee_name"),
+        "designation": member.get("designation"),
+        "status": status,
+        "shift_type_name": shift_name or ws.get("shift_type") or "",
+        "in_time": str(att["in_time"]) if att.get("in_time") else None,
+        "out_time": str(att["out_time"]) if att.get("out_time") else None,
+        "checkin_time": ws.get("actual_checkin"),
+        "checkout_time": ws.get("actual_checkout"),
+        "late_minutes": int(ws.get("late_minutes") or 0),
+        "early_leave_minutes": int(ws.get("early_leave_minutes") or 0),
+        "late_entry": bool(att.get("late_entry")),
+        "early_exit": bool(att.get("early_exit")),
+        "pending_counts": pending or {"corrections": 0, "overtime": 0, "leaves": 0},
+        "has_checkout_miss": bool(has_cm),
+        "leave_application": leave,
+    }
+
+
+def _team_attendance_by(emps: list[str], day) -> dict:
+    rows = frappe.db.get_all(
+        "Attendance",
+        filters={"employee": ["in", emps], "attendance_date": day, "docstatus": ["!=", 2]},
+        fields=["name", "employee", "status", "in_time", "out_time", "late_entry", "early_exit"],
+        order_by="docstatus desc, creation desc",
+    )
+    by: dict = {}
+    for r in rows:
+        by.setdefault(r.get("employee"), r)
+    return by
+
+
+def _team_ws_by(emps: list[str], day) -> dict:
+    rows = frappe.db.get_all(
+        "VN Attendance Work Session",
+        filters={"employee": ["in", emps], "work_date": day, "docstatus": ["!=", 2]},
+        fields=[
+            "name",
+            "employee",
+            "work_date",
+            "shift_type",
+            "shift_instance",
+            "planned_start",
+            "planned_end",
+            "actual_checkin",
+            "actual_checkout",
+            "late_minutes",
+            "early_leave_minutes",
+            "regular_hours",
+            "total_actual_hours",
+            "raw_overtime_hours",
+            "approved_overtime_hours",
+            "payable_day",
+            "absent",
+            "has_leave",
+            "need_review",
+            "missing_checkin",
+            "missing_checkout",
+            "vn_auto_checkout",
+        ],
+        order_by="creation desc",
+    )
+    by: dict = {}
+    for r in rows:
+        by.setdefault(r.get("employee"), _ws_payload(r))
+    return by
+
+
+def _covering_shift_assignments(emps: list[str], day) -> list[dict]:
+    """Active Shift Assignments of the team that may cover ``day``."""
+    if not emps:
+        return []
+    try:
+        return frappe.db.get_all(
+            "Shift Assignment",
+            filters={
+                "employee": ["in", emps],
+                "status": "Active",
+                "docstatus": 1,
+                "start_date": ["<=", day],
+            },
+            fields=["name", "employee", "shift_type", "start_date", "end_date"],
+            order_by="start_date desc",
+        )
+    except Exception:
+        return []
+
+
+def _team_shift_names_by(emps: list[str], day) -> dict:
+    """``{employee: shift_type}`` — the newest assignment covering ``day``."""
+    by: dict = {}
+    day_s = str(day)
+    for r in _covering_shift_assignments(emps, day):
+        emp = r.get("employee")
+        if not emp or emp in by:
+            continue
+        end = r.get("end_date")
+        if end and str(end) < day_s:
+            continue
+        by[emp] = r.get("shift_type")
+    return by
+
+
+def _team_pending_counts(emps: list[str]) -> dict:
+    """Pending correction / OT / leave counts per member (badge data)."""
+    out = {e: {"corrections": 0, "overtime": 0, "leaves": 0} for e in emps}
+    specs = (
+        ("VN Attendance Correction Request", "workflow_state", "corrections"),
+        ("VN Overtime Request", "workflow_state", "overtime"),
+        ("Leave Application", "status", "leaves"),
+    )
+    for doctype, state_field, key in specs:
+        try:
+            rows = frappe.db.get_all(
+                doctype,
+                filters={"employee": ["in", emps], "docstatus": ["!=", 2]},
+                fields=["employee", state_field],
+            )
+        except Exception:
+            continue
+        for r in rows:
+            emp = r.get("employee")
+            if emp not in out:
+                continue
+            state = str(r.get(state_field) or "").strip().lower()
+            if "pending" in state or state == "open":
+                out[emp][key] += 1
+    return out
+
+
+def _team_checkout_miss_by(emps: list[str]) -> dict:
+    """``{employee: latest open VN Checkout Miss row}`` (badge flag)."""
+    if not emps:
+        return {}
+    try:
+        rows = frappe.db.get_all(
+            "VN Checkout Miss",
+            filters={"employee": ["in", emps], "docstatus": ["!=", 2]},
+            fields=["name", "employee", "status", "work_date"],
+            order_by="creation desc",
+        )
+    except Exception:
+        return {}
+    by: dict = {}
+    for r in rows:
+        by.setdefault(r.get("employee"), r)
+    return by
+
+
+def _team_leave_by(emps: list[str], day) -> dict:
+    """``{employee: approved Leave Application covering ``day``}``."""
+    if not emps:
+        return {}
+    try:
+        rows = frappe.db.get_all(
+            "Leave Application",
+            filters={
+                "employee": ["in", emps],
+                "from_date": ["<=", day],
+                "to_date": [">=", day],
+                "status": "Approved",
+                "docstatus": 1,
+            },
+            fields=["name", "employee", "leave_type", "from_date", "to_date"],
+        )
+    except Exception:
+        return {}
+    by: dict = {}
+    for r in rows:
+        by.setdefault(
+            r.get("employee"),
+            {
+                "name": r.get("name"),
+                "leave_type": r.get("leave_type"),
+                "from_date": str(r.get("from_date") or ""),
+                "to_date": str(r.get("to_date") or ""),
+            },
+        )
+    return by
+
+
+def _publish_team_today(manager_emp: str | None = None) -> None:
+    """Best-effort realtime ping cho các tab ``/team/today`` đang mở (§2.6)."""
+    try:
+        frappe.publish_realtime(
+            "team_today_changed", {"manager": manager_emp or ""}, user=frappe.session.user
+        )
+    except Exception:
+        pass
+
+
+@frappe.whitelist()
+def team_daily_status(
+    date_str: str | None = None,
+    search: str | None = None,
+    status: str | None = None,
+) -> dict:
+    """Plan §10.2 + plans/team-today-desk-free.md §2.1 — manager snapshot v2.
+
+    One row per team member for a day, batched (no N+1). Returns
+    ``{work_date, locked, summary, members}`` — the dict shape the SPA
+    ``fetchTeamDailyStatus`` always expected (fix D1). ``search`` /
+    ``status`` filter server-side (backlog BL); the status vocabulary is the
+    canonical Team Today tokens (fix D3 — never "Not marked").
+    """
+    manager_emp, is_hr = _team_viewer()
+    day = getdate(date_str) if date_str else tz_utils.now_in_portal().date()
+    token = str(status or "").strip()
+    if token and token not in TEAM_STATUS_TOKENS:
+        frappe.throw(_("Trạng thái lọc không hợp lệ."), frappe.ValidationError)
+    members = _team_scope_members(manager_emp, is_hr)
+    emps = [m.get("name") for m in members]
+    att_by = _team_attendance_by(emps, day)
+    ws_by = _team_ws_by(emps, day)
+    shift_by = _team_shift_names_by(emps, day)
+    pending_by = _team_pending_counts(emps)
+    cm_by = _team_checkout_miss_by(emps)
+    leave_by = _team_leave_by(emps, day)
+    rows = [
+        _team_member_row(
+            m,
+            att_by.get(m.get("name")),
+            ws_by.get(m.get("name")),
+            shift_by.get(m.get("name")),
+            pending_by.get(m.get("name")),
+            cm_by.get(m.get("name")),
+            leave_by.get(m.get("name")),
+        )
+        for m in members
+    ]
+    rows = _filter_team_rows(rows, search, token)
+    return {
+        "work_date": str(day),
+        "locked": _is_date_locked(str(day)),
+        "summary": summarize_team(rows),
+        "members": rows,
+    }
+
+
+def team_day_can(*, status, locked, is_hr, is_lm_of, ws=None, is_today=False) -> dict:
+    """Pure — server-driven action matrix cho Team Today drawer (plan §2.2).
+
+    FE chỉ render theo matrix này; BE là nguồn sự thật duy nhất.
+    """
+    ws = ws or {}
+    manage = bool(is_hr or is_lm_of) and not bool(locked)
+    needs_checkin_nudge = str(status) == "Not Checked In"
+    needs_checkout_nudge = str(status) in ("Present", "Late") and bool(ws.get("missing_checkout"))
+    return {
+        "view_detail": True,
+        "fix_punch": manage,
+        # mark_attendance yêu cầu thêm is_hr: ``mark_attendance_bulk``
+        # (Employee Attendance Tool parity) chỉ mở cho HR roles — LM sẽ bị
+        # 403 nếu gọi (P2: nới gate theo scope reports_to nếu cần).
+        "mark_attendance": bool(is_hr) and not bool(locked),
+        "request_correction": manage,
+        "override_shift": manage and bool(is_today),
+        "nudge": needs_checkin_nudge or needs_checkout_nudge,
+        "open_360": bool(is_hr),
+        "export": bool(is_hr or is_lm_of),
+    }
+
+
+def _shift_meta_one(employee: str, day) -> dict | None:
+    """Shift Assignment covering ``day`` of ONE member (drawer meta)."""
+    for r in _covering_shift_assignments([employee], day):
+        end = r.get("end_date")
+        if not end or str(end) >= str(day):
+            return {
+                "name": r.get("name"),
+                "shift_type": r.get("shift_type"),
+                "start_date": str(r.get("start_date") or ""),
+                "end_date": str(end or ""),
+            }
+    return None
+
+
+def _leave_meta_one(employee: str, day) -> dict | None:
+    return _team_leave_by([employee], day).get(employee)
+
+
+def _checkout_miss_meta_one(employee: str) -> dict | None:
+    r = _team_checkout_miss_by([employee]).get(employee)
+    if not r:
+        return None
+    return {
+        "name": r.get("name"),
+        "status": r.get("status"),
+        "work_date": str(r.get("work_date") or ""),
+    }
+
+
+def _member_pending_lists(employee: str) -> dict:
+    """Pending correction/OT docs of ONE member (drawer badges, light)."""
+    out = {"corrections": [], "overtime": []}
+    specs = (
+        ("VN Attendance Correction Request", "corrections", "work_date"),
+        ("VN Overtime Request", "overtime", "from_datetime"),
+    )
+    for doctype, key, date_field in specs:
+        try:
+            rows = frappe.db.get_all(
+                doctype,
+                filters={"employee": employee, "docstatus": ["!=", 2]},
+                fields=["name", "workflow_state", date_field],
+                order_by="creation desc",
+                limit_page_length=10,
+            )
+        except Exception:
+            continue
+        for r in rows:
+            state = str(r.get("workflow_state") or "").strip().lower()
+            if "pending" in state:
+                out[key].append({"name": r.get("name"), "state": r.get("workflow_state")})
+    return out
+
+
+@frappe.whitelist()
+def team_member_day_detail(employee: str | None = None, date_str: str | None = None) -> dict:
+    """plans/team-today-desk-free.md §2.2 — chi tiết 1 member-day cho drawer.
+
+    Tái dùng ``_day_detail_core`` (đúng payload self-service) + enrich shift /
+    leave / checkout-miss / pending approvals + can matrix server-driven.
+    Gate: HR đọc ai cũng được; Line Manager chỉ member ``reports_to`` mình.
+    """
+    manager_emp, is_hr = _team_viewer()
+    if not employee:
+        frappe.throw(_("Thiếu nhân viên cần tra cứu."), frappe.ValidationError)
+    emp = emp_utils.emp_name(employee)
+    if not _can_view_member(manager_emp, is_hr, emp):
+        frappe.throw(_("Bạn chỉ được xem nhân viên trong team của mình."), frappe.PermissionError)
+    day = getdate(date_str) if date_str else tz_utils.now_in_portal().date()
+    core = _day_detail_core(emp, day)
+    ws = core.get("work_session") or {}
+    status = _team_member_status(core.get("attendance"), ws)
+    is_today = str(day) == str(tz_utils.now_in_portal().date())
+    return {
+        **core,
+        "employee": emp,
+        "status": status,
+        "shift": _shift_meta_one(emp, day),
+        "leave_application": _leave_meta_one(emp, day),
+        "checkout_miss": _checkout_miss_meta_one(emp),
+        "pending_approvals": _member_pending_lists(emp),
+        "can": team_day_can(
+            status=status,
+            locked=bool(core.get("locked")),
+            is_hr=is_hr,
+            is_lm_of=_is_line_manager_of(manager_emp, emp),
+            ws=ws,
+            is_today=is_today,
+        ),
+    }
+
+
+@frappe.whitelist()
+def nudge_team_member(
+    employee: str | None = None,
+    kind: str | None = None,
+    date_str: str | None = None,
+) -> dict:
+    """plans/team-today-desk-free.md §2.3 — nhắc member check-in/out.
+
+    Tạo 1 VN Notification (best-effort) + audit 1 dòng + realtime ping. Chống
+    spam bằng ``rate_limit`` 1 lần / employee / kind / ngày / 10 phút (F8).
+    """
+    manager_emp, is_hr = _team_viewer()
+    kind = str(kind or "").strip()
+    if kind not in _NUDGE_TITLES:
+        frappe.throw(_("Loại nhắc không hợp lệ."), frappe.ValidationError)
+    if not employee:
+        frappe.throw(_("Thiếu nhân viên cần nhắc."), frappe.ValidationError)
+    emp = emp_utils.emp_name(employee)
+    if not _can_view_member(manager_emp, is_hr, emp):
+        frappe.throw(_("Bạn chỉ được nhắc nhân viên trong team của mình."), frappe.PermissionError)
+    day = getdate(date_str) if date_str else tz_utils.now_in_portal().date()
+    core = _day_detail_core(emp, day)
+    ws = core.get("work_session") or {}
+    status = _team_member_status(core.get("attendance"), ws)
+    can = team_day_can(
+        status=status,
+        locked=bool(core.get("locked")),
+        is_hr=is_hr,
+        is_lm_of=_is_line_manager_of(manager_emp, emp),
+        ws=ws,
+        is_today=str(day) == str(tz_utils.now_in_portal().date()),
+    )
+    if not can["nudge"]:
+        frappe.throw(
+            _("Nhân viên này hiện không cần nhắc (đã đủ check-in/out hoặc trạng thái không áp dụng)."),
+            frappe.ValidationError,
+        )
+    rate_limit(f"nudge:{emp}:{kind}:{day}", max_requests=1, window_seconds=600)
+    title, body = _NUDGE_TITLES[kind]
+    name = notify_util.push_notification(
+        employee=emp,
+        notification_type="Reminder",
+        title=title,
+        message=body.format(day=str(day)),
+        action_url="/hr/attendance",
+    )
+    try:
+        audit_api.log(
+            "Manual Override",
+            employee=emp,
+            work_date=str(day),
+            company=frappe.db.get_value("Employee", emp, "company"),
+            description=f"Nudge {kind} ngày {day}",
+        )
+    except Exception:
+        pass
+    _publish_team_today(manager_emp)
+    return {"name": name, "employee": emp, "kind": kind, "work_date": str(day)}
+
+
+def _csv_cell(v) -> str:
+    s = str(v if v is not None else "")
+    if any(ch in s for ch in (",", '"', "\n")):
+        return '"' + s.replace('"', '""') + '"'
+    return s
+
+
+@frappe.whitelist()
+def export_team_day_csv(
+    date_str: str | None = None,
+    search: str | None = None,
+    status: str | None = None,
+) -> dict:
+    """plans/team-today-desk-free.md §2.4 — CSV (UTF-8 BOM) của bảng team ngày."""
+    res = team_daily_status(date_str=date_str, search=search, status=status)
+    header = [
+        "Mã NV",
+        "Tên",
+        "Chức danh",
+        "Ca",
+        "Giờ vào",
+        "Giờ ra",
+        "Muộn (phút)",
+        "Về sớm (phút)",
+        "Trạng thái",
+        "Đơn chờ",
+    ]
+    lines = [",".join(header)]
+    for m in res["members"]:
+        pc = m.get("pending_counts") or {}
+        pending = sum(int(pc.get(k) or 0) for k in ("corrections", "overtime", "leaves"))
+        cells = [
+            m.get("name"),
+            m.get("employee_name"),
+            m.get("designation"),
+            m.get("shift_type_name"),
+            m.get("checkin_time") or "",
+            m.get("checkout_time") or "",
+            m.get("late_minutes"),
+            m.get("early_leave_minutes"),
+            m.get("status"),
+            pending,
+        ]
+        lines.append(",".join(_csv_cell(c) for c in cells))
+    return {
+        "filename": f"team-{res['work_date']}.csv",
+        "csv": "\ufeff" + "\n".join(lines),
+        "rows": len(res["members"]),
+    }
 
 
 @frappe.whitelist()
@@ -2399,6 +3236,14 @@ def submit_correction_request(**kwargs) -> dict:
     # Move into the approval pipeline (Draft → Pending Manager). Best-effort:
     # stays Draft if the workflow isn't seeded yet.
     send_for_approval(doc)
+    # Realtime ping for open /hr/correction tabs (plans/correction-deskfree §3.4).
+    # Best-effort — never fails the submit over a publish/import error.
+    try:
+        from gege_hr.gege_hr.api.correction import _publish_correction
+
+        _publish_correction(doc)
+    except Exception:
+        pass
     return {
         "name": doc.name,
         "status": doc.workflow_state,
@@ -2428,6 +3273,14 @@ def cancel_correction_request(name: str | None = None) -> dict:
         doc.cancel()
     else:
         doc.save()
+    # Realtime ping for open /hr/correction tabs (plans/correction-deskfree §3.4).
+    # Best-effort — never fails the cancel over a publish/import error.
+    try:
+        from gege_hr.gege_hr.api.correction import _publish_correction
+
+        _publish_correction(doc)
+    except Exception:
+        pass
     return {
         "name": name,
         "status": doc.workflow_state,
@@ -2444,9 +3297,18 @@ from gege_hr.gege_hr.api import attendance_period as _ap  # noqa: E402
 
 
 @frappe.whitelist()
-def get_monthly_period_list(company=None, year=None, status=None):
-    """FE contract → :func:`attendance_period.periods`."""
-    return _ap.periods(company=company or None, status=status or None, year=year or None)
+def get_monthly_period_list(company=None, year=None, status=None, search=None):
+    """FE contract → :func:`attendance_period.periods`.
+
+    ``search`` (plan-lock-desk-free BE-4) performs the server-side broad
+    LIKE so the SPA search box can hit the DB directly (HR-BL-10).
+    """
+    return _ap.periods(
+        company=company or None,
+        status=status or None,
+        year=year or None,
+        search=search or None,
+    )
 
 
 @frappe.whitelist()
@@ -2479,3 +3341,37 @@ def lock_monthly_period(name, reason=None):
 def unlock_monthly_period(name, reason=None):
     """FE contract → :func:`attendance_period.unlock_period`."""
     return _ap.unlock_period(name, reason=reason)
+
+
+@frappe.whitelist()
+def confirm_monthly_line(name):
+    """FE contract → :func:`attendance_period.confirm_line` (BE-5)."""
+    return _ap.confirm_line(name)
+
+
+@frappe.whitelist()
+def confirm_all_monthly_lines(period):
+    """FE contract → :func:`attendance_period.confirm_all_lines` (BE-5)."""
+    return _ap.confirm_all_lines(period)
+
+
+@frappe.whitelist()
+def adjust_monthly_line(name, values=None, reason=None):
+    """FE contract → :func:`attendance_period.adjust_line` (BE-5).
+
+    ``values`` may arrive as a JSON string (form-encoded POST) — the core
+    endpoint parses both.
+    """
+    return _ap.adjust_line(name, values=values, reason=reason)
+
+
+@frappe.whitelist()
+def delete_monthly_period(name):
+    """FE contract → :func:`attendance_period.delete_period` (BE-5, Draft only)."""
+    return _ap.delete_period(name)
+
+
+@frappe.whitelist()
+def get_lock_logs(period):
+    """FE contract → :func:`attendance_period.lock_logs` (BE-5)."""
+    return _ap.lock_logs(period)

@@ -132,7 +132,18 @@ class _Frappe:
 
         def keep(r):
             if filters:
-                conds = [[k2, "=", v] for k2, v in filters.items()] if isinstance(filters, dict) else filters
+                if isinstance(filters, dict):
+                    # Frappe dict-filter shorthand: a list value is already a
+                    # [field, op, value] condition (e.g. {"from_date": ["<=", d]}).
+                    conds = []
+                    for k2, v in filters.items():
+                        if isinstance(v, list) and len(v) == 2:
+                            # {"field": [op, val]} → [field, op, val]
+                            conds.append([k2, *v])
+                        else:
+                            conds.append([k2, "=", v])
+                else:
+                    conds = filters
                 for cond in conds:
                     if not _match(r, cond):
                         return False
@@ -490,3 +501,393 @@ def test_notify_failure_never_breaks_transition(mod, monkeypatch):  # LE-B18 (G6
     created = m.submit_leave_encashment(employee="HR-EMP-1", leave_type="Năm", encashment_days=1)
     res = m.approve_leave_encashment(created["name"])  # must NOT raise
     assert res["status"] == "Approved"
+
+
+# ── plan leave-extra-deskfree-complete (LX) — detail / context / update /
+#    withdraw / delete / publish-wire. Pattern: LE-B stub harness above. ──────
+def _publish_spy(stub):
+    stub.publish_events = []
+    stub.publish_realtime = lambda event, payload=None: stub.publish_events.append((event, payload))
+    return stub.publish_events
+
+
+def _delete_spy(stub):
+    stub.deleted = []
+    stub.delete_doc = lambda doctype, name, *a, **k: stub.deleted.append((doctype, name))
+    return stub.deleted
+
+
+def _encash_draft(m, days=1, employee="HR-EMP-1"):
+    _balance(m, 10)
+    return m.submit_leave_encashment(employee=employee, leave_type="Năm", encashment_days=days)
+
+
+def _compoff_draft(m, employee="HR-EMP-1"):
+    return m.submit_comp_off(
+        employee=employee,
+        leave_type="Compensatory Off",
+        work_from_date="2026-08-01",
+        work_to_date="2026-08-02",
+    )
+
+
+def test_lx01_get_encashment_draft_owner_can(mod):  # LX1
+    m, stub = mod
+    stub.roles = {"Employee"}
+    created = _encash_draft(m)
+    res = m.get_leave_encashment(created["name"])
+    assert res["doc"]["status"] == "Draft"
+    assert res["doc"]["docstatus"] == 0
+    can = res["can"]
+    assert can["edit"] and can["withdraw"] and can["delete"]
+    assert can["approve"] is False and can["reject"] is False and can["resend"] is False
+
+
+def test_lx02_get_denies_other_employee(mod):  # LX2
+    m, stub = mod
+    created = _encash_draft(m, employee="HR-EMP-2")  # manager mints for another
+    stub.roles = {"Employee"}
+    with pytest.raises(Exception):
+        m.get_leave_encashment(created["name"])
+
+
+def test_lx03_get_encashment_approved_links_and_can(mod):  # LX3
+    m, stub = mod
+    created = _encash_draft(m)
+    m.approve_leave_encashment(created["name"])
+    doc = stub.store[("Leave Encashment", created["name"])]
+    doc.additional_salary = "AS-1"
+    stub.list_rows["Additional Salary"] = [
+        {"name": "AS-1", "status": "Submitted", "docstatus": 1, "amount": 100000}
+    ]
+    res = m.get_leave_encashment(created["name"])
+    assert res["links"]["additional_salary"]["amount"] == 100000
+    assert res["doc"]["docstatus"] == 1
+    can = res["can"]
+    assert can["edit"] is False and can["withdraw"] is False and can["delete"] is False
+    assert can["reject"] is True  # HR hủy sau duyệt
+
+
+def test_lx04_get_comp_off_rejected_draft_can(mod):  # LX4
+    m, _ = mod
+    created = _compoff_draft(m)
+    m.reject_comp_off(created["name"], reason="chưa đủ điều kiện")
+    res = m.get_comp_off(created["name"])
+    assert res["doc"]["status"] == "Rejected"
+    can = res["can"]
+    assert can["edit"] and can["delete"] and can["resend"]
+    assert can["approve"] is False and can["reject"] is False
+
+
+def test_lx05_get_comp_off_approved_allocation(mod):  # LX5
+    m, stub = mod
+    created = _compoff_draft(m)
+    m.approve_comp_off(created["name"])
+    doc = stub.store[("Compensatory Leave Request", created["name"])]
+    doc.leave_allocation = "LA-1"
+    stub.list_rows["Leave Allocation"] = [
+        {
+            "name": "LA-1",
+            "new_leaves_allocated": 2,
+            "total_leaves_allocated": 2,
+            "from_date": "2026-08-01",
+            "to_date": "2026-12-31",
+            "docstatus": 1,
+        }
+    ]
+    res = m.get_comp_off(created["name"])
+    assert res["links"]["leave_allocation"]["new_leaves_allocated"] == 2
+    assert res["doc"]["work_to_date"] == "2026-08-02"  # alias survives detail projection
+
+
+def test_lx06_activity_merges_version_and_comment(mod):  # LX6
+    m, stub = mod
+    created = _compoff_draft(m)
+    stub.list_rows["Comment"] = [
+        {
+            "reference_doctype": "Compensatory Leave Request",
+            "reference_name": created["name"],
+            "comment_type": "Comment",
+            "owner": "a@b",
+            "creation": "2026-09-01 10:00:00",
+            "content": "hello",
+        }
+    ]
+    stub.list_rows["Version"] = [
+        {
+            "ref_doctype": "Compensatory Leave Request",
+            "docname": created["name"],
+            "owner": "c@d",
+            "modified": "2026-09-02 09:00:00",
+            "data": "{}",
+        }
+    ]
+    res = m.get_comp_off(created["name"])
+    kinds = [r["type"] for r in res["activity"]]
+    assert kinds[0] == "version" and set(kinds) == {"version", "comment"}
+
+
+def test_lx07_update_encashment_revalidates_balance(mod):  # LX7
+    m, stub = mod
+    calls = []
+    created = _encash_draft(m, days=1)
+    m.remaining_leave_days = lambda employee, leave_type: calls.append(leave_type) or 10
+    res = m.update_leave_encashment(created["name"], encashment_days=2)
+    assert res["status"] == "Draft" and res["encashment_days"] == 2
+    doc = stub.store[("Leave Encashment", created["name"])]
+    assert doc.encashment_days == 2
+    assert calls  # G3 balance gate re-ran on the new value
+
+
+def test_lx08_update_rejects_submitted(mod):  # LX8
+    m, _ = mod
+    created = _encash_draft(m)
+    m.approve_leave_encashment(created["name"])
+    with pytest.raises(Exception) as ei:
+        m.update_leave_encashment(created["name"], encashment_days=2)
+    assert "Chỉ sửa được" in str(ei.value)
+
+
+def test_lx09_update_denies_other_employee(mod):  # LX9
+    m, stub = mod
+    created = _encash_draft(m, employee="HR-EMP-2")
+    stub.roles = {"Employee"}
+    with pytest.raises(Exception):
+        m.update_leave_encashment(created["name"], encashment_days=2)
+
+
+def test_lx10_update_resets_rejected_to_draft(mod):  # LX10
+    m, stub = mod
+    created = _encash_draft(m)
+    m.reject_leave_encashment(created["name"], reason="sai số")
+    res = m.update_leave_encashment(created["name"], encashment_days=1)
+    assert res["status"] == "Draft"
+    assert stub.store[("Leave Encashment", created["name"])].vn_status == "Draft"
+
+
+def test_lx11_update_blocks_over_balance(mod):  # LX11
+    m, _ = mod
+    created = _encash_draft(m, days=1)
+    m.remaining_leave_days = lambda employee, leave_type: 1.5
+    with pytest.raises(Exception) as ei:
+        m.update_leave_encashment(created["name"], leave_type="Casual Leave", encashment_days=3)
+    assert "vượt số dư" in str(ei.value)
+
+
+def test_lx12_update_comp_off_inverted_range(mod):  # LX12
+    m, _ = mod
+    created = _compoff_draft(m)
+    with pytest.raises(Exception) as ei:
+        m.update_comp_off(created["name"], work_from_date="2026-08-10", work_to_date="2026-08-01")
+    assert "không được trước ngày bắt đầu" in str(ei.value)
+
+
+def test_lx13_withdraw_draft_with_note_and_publish(mod):  # LX13
+    m, stub = mod
+    events = _publish_spy(stub)
+    created = _encash_draft(m)
+    res = m.withdraw_leave_encashment(created["name"], note="đổi ý")
+    assert res["status"] == "Rejected"
+    doc = stub.store[("Leave Encashment", created["name"])]
+    assert doc.vn_status == "Rejected"
+    assert "Rút đơn: đổi ý" in doc.vn_note
+    assert events and events[-1][1]["status"] == "Rejected"
+
+
+def test_lx13b_withdraw_default_note(mod):  # LX13 — no reason given
+    m, _ = mod
+    created = _encash_draft(m)
+    res = m.withdraw_leave_encashment(created["name"])
+    assert "Nhân viên tự rút đơn" in res["note"]
+
+
+def test_lx14_withdraw_rejects_submitted(mod):  # LX14
+    m, _ = mod
+    created = _encash_draft(m)
+    m.approve_leave_encashment(created["name"])
+    with pytest.raises(Exception) as ei:
+        m.withdraw_leave_encashment(created["name"])
+    assert "Chỉ rút được" in str(ei.value)
+
+
+def test_lx15_withdraw_denies_other_employee(mod):  # LX15
+    m, stub = mod
+    created = _compoff_draft(m, employee="HR-EMP-2")
+    stub.roles = {"Employee"}
+    with pytest.raises(Exception):
+        m.withdraw_comp_off(created["name"])
+
+
+def test_lx16_delete_draft_publishes(mod):  # LX16
+    m, stub = mod
+    events = _publish_spy(stub)
+    deleted = _delete_spy(stub)
+    created = _encash_draft(m)
+    res = m.delete_leave_extra_draft(doctype="Leave Encashment", name=created["name"])
+    assert res["deleted"] is True
+    assert ("Leave Encashment", created["name"]) in deleted
+    assert events[-1][1]["status"] == "Deleted"
+
+
+def test_lx17_delete_rejects_submitted(mod):  # LX17
+    m, _ = mod
+    created = _compoff_draft(m)
+    m.approve_comp_off(created["name"])
+    with pytest.raises(Exception):
+        m.delete_leave_extra_draft(doctype="Compensatory Leave Request", name=created["name"])
+
+
+def test_lx18_delete_rejects_unknown_doctype(mod):  # LX18
+    m, _ = mod
+    with pytest.raises(Exception):
+        m.delete_leave_extra_draft(doctype="Leave Application", name="X")
+
+
+def test_lx19_context_balances_and_components(mod):  # LX19
+    m, stub = mod
+    stub.list_rows["Leave Type"] = [{"name": "Casual Leave", "allow_encashment": 1}]
+    stub.list_rows["Salary Component"] = [
+        {"name": "Basic", "type": "earning", "disabled": 0},
+        {"name": "Deduction X", "type": "deduction", "disabled": 0},
+    ]
+    stub.list_rows["Leave Period"] = [
+        {
+            "name": "LP-2026",
+            "from_date": "2026-01-01",
+            "to_date": "2026-12-31",
+            "docstatus": 1,
+            "is_active": 1,
+            "company": "Gege",
+        }
+    ]
+    m.remaining_leave_days = lambda employee, leave_type: 5
+    res = m.leave_extra_context()
+    assert res["balances"] == {"Casual Leave": 5}
+    assert res["earning_components"] == ["Basic"]
+    assert res["leave_period"] == "LP-2026"
+    assert res["health"] == "ok"
+    # legacy options contract stays intact (LX23 half)
+    assert set(("Draft", "Approved", "Rejected")) <= set(res["encash_statuses"])
+
+
+def test_lx20_context_no_leave_period_health(mod):  # LX20
+    m, stub = mod
+    stub.list_rows["Leave Type"] = []
+    res = m.leave_extra_context()
+    assert res["leave_period"] is None
+    assert res["health"] == "no_leave_period"
+    assert res["balances"] == {}
+
+
+def test_lx21_context_caller_without_employee(mod):  # LX21
+    m, stub = mod
+    stub.employee_for_user = None
+    res = m.leave_extra_context()
+    assert res["balances"] == {}
+
+
+def test_lx22_publish_wired_into_every_mutation(mod):  # LX22
+    m, stub = mod
+    events = _publish_spy(stub)
+    _delete_spy(stub)
+    a = _encash_draft(m)
+    m.update_leave_encashment(a["name"], encashment_days=2)
+    m.withdraw_leave_encashment(a["name"])
+    b = _encash_draft(m)
+    m.approve_leave_encashment(b["name"])
+    c = _encash_draft(m)
+    m.reject_leave_encashment(c["name"], reason="x")
+    d = _compoff_draft(m)
+    m.approve_comp_off(d["name"])
+    e = _compoff_draft(m)
+    m.reject_comp_off(e["name"], reason="y")
+    f = _compoff_draft(m)
+    m.delete_leave_extra_draft(doctype="Compensatory Leave Request", name=f["name"])
+    statuses = [payload["status"] for _, payload in events]
+    assert "Draft" in statuses and "Approved" in statuses
+    assert "Rejected" in statuses and "Deleted" in statuses
+    assert len(events) >= 10
+
+
+def test_lx23_list_contract_unchanged(mod):  # LX23
+    m, stub = mod
+    stub.list_rows["Leave Encashment"] = [{"name": "LE-1", "employee": "HR-EMP-1"}]
+    res = m.my_leave_encashments()
+    assert set(res) == {"data", "total"} and res["total"] == 1
+
+
+def test_lx24_add_comment_inserts_and_publishes(mod):  # LX24 (P1)
+    m, stub = mod
+    events = _publish_spy(stub)
+    created = _encash_draft(m)
+
+    # Seam: the stub's get_doc takes (doctype, name); teach it the dict-payload
+    # form used by the Comment insert (parity the real frappe.get_doc(dict)).
+    def _get_doc(*a, **k):
+        if len(a) == 1 and isinstance(a[0], dict):
+            payload = dict(a[0])
+            doc = stub.new_doc(payload.get("doctype") or "Comment")
+            for k2, v in payload.items():
+                if k2 != "doctype":
+                    setattr(doc, k2, v)
+            doc.insert(ignore_permissions=True)
+            return doc
+        return _Frappe.get_doc(stub, *a, **k)
+
+    stub.get_doc = _get_doc
+    res = m.add_leave_extra_comment(doctype="Leave Encashment", name=created["name"], text="xin duyệt sớm")
+    assert res["content"] == "xin duyệt sớm"
+    assert res["owner"]
+    assert events[-1][1]["status"] == "Comment"
+    with pytest.raises(Exception):
+        m.add_leave_extra_comment(doctype="Leave Encashment", name=created["name"], text="   ")
+
+
+def test_lx25_bulk_action_partial_safe(mod):  # LX25 (P1)
+    m, stub = mod
+    _publish_spy(stub)
+    a = _encash_draft(m)
+    b = _encash_draft(m)
+    stub.roles = {"Employee"}
+    with pytest.raises(Exception):
+        m.bulk_leave_extra_action(doctype="Leave Encashment", names=[a["name"]], action="approve")
+    stub.roles = {"HR Manager"}
+    # b is un-approvable (already cancelled) → per-row failure, not a throw.
+    stub.store[("Leave Encashment", b["name"])].docstatus = 2
+    res = m.bulk_leave_extra_action(
+        doctype="Leave Encashment", names=[a["name"], b["name"]], action="approve"
+    )
+    assert res["updated"] == [a["name"]]
+    assert len(res["failed"]) == 1 and res["failed"][0]["name"] == b["name"]
+
+
+def test_lx26_bulk_reject_appends_reason(mod):  # LX26 (P1)
+    m, stub = mod
+    a = _encash_draft(m)
+    b = _encash_draft(m)
+    res = m.bulk_leave_extra_action(
+        doctype="Leave Encashment",
+        names=[a["name"], b["name"]],
+        action="reject",
+        reason="thiếu chứng từ",
+    )
+    assert sorted(res["updated"]) == sorted([a["name"], b["name"]])
+    doc = stub.store[("Leave Encashment", a["name"])]
+    assert "Từ chối: thiếu chứng từ" in (doc.vn_note or "")
+
+
+def test_lx27_summary_counts_by_vn_status(mod):  # LX27 (P1)
+    m, stub = mod
+    stub.list_rows["Leave Encashment"] = [
+        {"vn_status": "Draft"},
+        {"vn_status": "Draft"},
+        {"vn_status": "Approved"},
+        {"vn_status": None},
+    ]
+    stub.list_rows["Compensatory Leave Request"] = [{"vn_status": "Rejected"}]
+    res = m.leave_extra_summary()
+    assert res["encash"] == {"Draft": 2, "Approved": 1, "Rejected": 0}
+    assert res["compoff"]["Rejected"] == 1
+    stub.roles = {"Employee"}
+    with pytest.raises(Exception):
+        m.leave_extra_summary()

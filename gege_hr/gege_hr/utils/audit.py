@@ -24,7 +24,7 @@ except Exception:  # pragma: no cover - outside bench
 
 
 # --------------------------------------------------------------------------- #
-# Vocabulary (matches VN Audit Event.audit_type options — 19 values)
+# Vocabulary (matches VN Audit Event.audit_type options — 22 values)
 # --------------------------------------------------------------------------- #
 AUDIT_TYPES = (
     "Check-in",
@@ -35,8 +35,10 @@ AUDIT_TYPES = (
     "Leave Reject",
     "OT Submit",
     "OT Approve",
+    "OT Update Draft",
     "Correction Submit",
     "Correction Approve",
+    "Correction Update Draft",
     "Advance Submit",
     "Advance Approve",
     "Work Session Recalculate",
@@ -48,15 +50,20 @@ AUDIT_TYPES = (
     "Manual Override",
     "Checkout Miss Explain",
     "Checkout Miss Resolve",
+    "Checkout Miss Appeal",
 )
 
 # Coarse category groupings, useful for the audit-list filter UI.
 AUDIT_CATEGORIES = {
     "attendance": ("Check-in", "Check-out", "Work Session Recalculate"),
-    "checkout_miss": ("Checkout Miss Explain", "Checkout Miss Resolve"),
+    "checkout_miss": (
+        "Checkout Miss Explain",
+        "Checkout Miss Resolve",
+        "Checkout Miss Appeal",
+    ),
     "leave": ("Leave Submit", "Leave Cancel", "Leave Approve", "Leave Reject"),
-    "overtime": ("OT Submit", "OT Approve"),
-    "correction": ("Correction Submit", "Correction Approve"),
+    "overtime": ("OT Submit", "OT Approve", "OT Update Draft"),
+    "correction": ("Correction Submit", "Correction Approve", "Correction Update Draft"),
     "advance": ("Advance Submit", "Advance Approve"),
     "monthly": ("Monthly Lock", "Monthly Unlock"),
     "payroll": ("Payroll Calculate", "Payroll Approve", "Payroll Publish"),

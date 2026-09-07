@@ -253,18 +253,39 @@ def hourly_rate(base_salary: float, standard_hours: float | None) -> float:
     return _num(base_salary) / sh
 
 
-def compute_line(agg: dict, base_salary: float, config: dict | None = None) -> dict:
+def compute_line(
+    agg: dict,
+    base_salary: float,
+    config: dict | None = None,
+    *,
+    late_penalty: float | None = None,
+    deduction_rates: dict[str, float] | None = None,
+    allowances: list[float] | None = None,
+    extra_deductions: list[float] | None = None,
+) -> dict:
     """Compute a full review-line breakdown from an aggregate summary.
 
     Parameters
     ----------
     agg : dict
-        Output of :func:`aggregate_work_sessions`.
+        Output of :func:`aggregate_work_sessions` (Monthly mode feeds it via
+        :func:`build_monthly_agg`).
     base_salary : float
         Monthly base salary (from Salary Structure Assignment).
     config : dict, optional
         Rate overrides — see :func:`default_config`. Missing keys fall back
         to the defaults.
+    late_penalty : float, optional (keyword-only)
+        Per-employee salary plan (Monthly mode): FINAL tiered penalty from
+        :func:`compute_late_penalty` — overrides the minutes×rate default.
+    deduction_rates : dict, optional (keyword-only)
+        ``{"BHXH": 8.0, ...}`` percent-of-gross deductions — same semantics
+        as :func:`compute_hourly_line`.
+    allowances / extra_deductions : list[float], optional (keyword-only)
+        Fixed amounts from the Salary Structure earnings/deductions.
+
+    All keyword-only params default to ``None`` ⇒ the legacy formula keeps
+    running unchanged (regression-locked by PS11).
 
     Returns
     -------
@@ -314,22 +335,34 @@ def compute_line(agg: dict, base_salary: float, config: dict | None = None) -> d
 
     # --- Late penalty ----------------------------------------------------- #
     late_penalty_amount = _num(agg.get("late_minutes")) * _num(cfg.get("late_penalty_rate"))
+    # Per-employee salary plan: the API layer computes the tiered penalty via
+    # compute_late_penalty (daily-rate aware) and passes the FINAL amount in.
+    if late_penalty is not None:
+        late_penalty_amount = _num(late_penalty)
+
+    # --- Allowances (fixed amounts from Salary Structure earnings) -------- #
+    total_allowances = sum(_num(a) for a in (allowances or []))
 
     # --- Deductions ------------------------------------------------------- #
     unpaid_days = max(0.0, standard_days - _num(agg.get("payable_days")))
     unpaid_leave_deduction = unpaid_days * daily_rate
     salary_advance_deduction = _num(cfg.get("salary_advance_deduction"))
-    other_deduction = _num(cfg.get("other_deduction"))
+    other_deduction = _num(cfg.get("other_deduction")) + sum(_num(d) for d in (extra_deductions or []))
     # Checkout-miss penalty (layered on by the API layer, like advance/other).
     checkout_miss_penalty = _num(cfg.get("checkout_miss_penalty"))
 
-    gross_pay = proportional_base + overtime_amount + night_allowance_amount
+    gross_pay = proportional_base + overtime_amount + night_allowance_amount + total_allowances
+    # Standard percentage deductions (BHXH/BHYT/BHTN/TNCN — percent of gross),
+    # same semantics as compute_hourly_line.
+    total_pct = sum(_num(v) for v in (deduction_rates or {}).values()) / 100.0
+    standard_deductions = gross_pay * total_pct
     total_deduction = (
         late_penalty_amount
         + unpaid_leave_deduction
         + salary_advance_deduction
         + other_deduction
         + checkout_miss_penalty
+        + standard_deductions
     )
     net_pay = gross_pay - total_deduction
 
@@ -340,7 +373,7 @@ def compute_line(agg: dict, base_salary: float, config: dict | None = None) -> d
         "overtime_hours": round2(agg.get("overtime_hours")),
         "overtime_amount": round2(overtime_amount),
         "night_allowance_amount": round2(night_allowance_amount),
-        "allowance_amount": 0.0,
+        "allowance_amount": round2(total_allowances),
         "late_penalty_amount": round2(late_penalty_amount),
         "unpaid_leave_deduction": round2(unpaid_leave_deduction),
         "salary_advance_deduction": round2(salary_advance_deduction),
@@ -365,6 +398,34 @@ def rollup_lines(line_amounts: list[dict]) -> dict:
     out["total_deductions"] = round2(out["total_deductions"])
     out["total_net_pay"] = round2(out["total_net_pay"])
     return out
+
+
+def build_monthly_agg(agg: dict, summary: dict | None = None) -> dict:
+    """Merge the F-LC13 REAL summary with the Work-Session OT-split aggregate.
+
+    Monthly mode (plan per-employee-salary §4.3): ``payable_days`` /
+    ``regular_hours`` come from :func:`summarize_work_sessions` output (the
+    same REAL numbers the hourly path stamps on the line — includes PR2
+    leave-only days), while the OT buckets / night hours / late minutes come
+    from :func:`aggregate_work_sessions` (the only source with the OT split).
+    The result feeds :func:`compute_line` directly.
+    """
+    summ = summary or {}
+
+    def _pick(summary_key: str, agg_key: str) -> float:
+        # Prefer the REAL summary value; fall back to the WS aggregate.
+        v = _num(summ.get(summary_key))
+        return v if v else _num(agg.get(agg_key))
+
+    return {
+        "payable_days": _pick("payable_days", "payable_days"),
+        "regular_hours": _pick("regular_hours", "regular_hours"),
+        "regular_night_hours": _num(agg.get("regular_night_hours")),
+        "overtime_normal_hours": _num(agg.get("overtime_normal_hours")),
+        "overtime_night_hours": _num(agg.get("overtime_night_hours")),
+        "overtime_holiday_hours": _num(agg.get("overtime_holiday_hours")),
+        "late_minutes": _num(agg.get("late_minutes")),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -460,6 +521,35 @@ def resolve_base_salary(employee: str, date=None) -> float:
         return 0.0
 
 
+def load_employee_period_agg(employee: str, from_date, to_date) -> dict:
+    """OT-split + late-minutes aggregate for the window (Monthly mode).
+
+    :func:`load_employee_period_summary` (F-LC13) has the REAL payable days
+    but NO OT split; this loader folds the same Work Session rows through
+    :func:`aggregate_work_sessions`, which keeps the normal/night/holiday OT
+    buckets, night hours and late minutes. Guarded — returns a neutral
+    aggregate outside a bench.
+    """
+    if frappe is None:
+        return aggregate_work_sessions([])
+    try:
+        rows = (
+            frappe.db.get_all(
+                "VN Attendance Work Session",
+                filters={
+                    "employee": employee,
+                    "docstatus": ["<", 2],
+                    "work_date": ["between", [from_date, to_date]],
+                },
+                fields=list(_WS_FIELDS),
+            )
+            or []
+        )
+        return aggregate_work_sessions(rows)
+    except Exception:
+        return aggregate_work_sessions([])
+
+
 def employee_advance_deductions(company: str, employees: list[str], from_date, to_date) -> dict:
     """Sum approved/paid advance amounts per employee for the window.
 
@@ -495,7 +585,18 @@ def employee_advance_deductions(company: str, employees: list[str], from_date, t
 # Hourly-rate × time-bracket payroll model (plan §payroll-hourly-rate-design)
 # --------------------------------------------------------------------------- #
 def resolve_hourly_rate(employee: str, date=None) -> float:
-    """Hourly rate for ``employee`` from their Department's ``vn_hourly_rate``.
+    """Hourly rate for ``employee`` (float only — see the ``_detail`` variant)."""
+    rate, _source = resolve_hourly_rate_detail(employee, date)
+    return rate
+
+
+def resolve_hourly_rate_detail(employee: str, date=None) -> tuple[float, str]:
+    """Hourly rate + source tier for ``employee``.
+
+    Chain (plan per-employee-salary §4.2): ``Employee.vn_hourly_rate`` →
+    Department ``vn_hourly_rate`` → ``VN HR Portal Setting.vn_default_hourly_rate``
+    (default 20 000 VND). Returns ``(rate, source)`` with ``source`` ∈
+    ``employee`` / ``department`` / ``default``.
 
     Falls back to ``VN HR Portal Setting.vn_default_hourly_rate`` (default 20 000 VND)
     when the employee has no department or the department has no rate set.
@@ -508,8 +609,15 @@ def resolve_hourly_rate(employee: str, date=None) -> float:
     used, same as before.
     """
     if frappe is None or not employee:
-        return 20000.0
+        return 20000.0, "default"
     try:
+        # Per-employee rate wins when set (> 0) — plan per-employee-salary.
+        try:
+            own = frappe.db.get_value("Employee", employee, "vn_hourly_rate")
+            if own and float(own) > 0:
+                return float(own), "employee"
+        except Exception:
+            pass
         dept = None
         if date:
             # Employee department as of ``date``: scan the Version trail
@@ -552,12 +660,38 @@ def resolve_hourly_rate(employee: str, date=None) -> float:
         if dept:
             rate = frappe.db.get_value("Department", dept, "vn_hourly_rate")
             if rate and float(rate) > 0:
-                return float(rate)
+                return float(rate), "department"
         # Fallback to portal default.
         default = frappe.db.get_single_value("VN HR Portal Setting", "vn_default_hourly_rate")
-        return float(default or 20000)
+        return float(default or 20000), "default"
     except Exception:
-        return 20000.0
+        return 20000.0, "default"
+
+
+def resolve_payroll_setting(employee: str, date=None) -> dict:
+    """Per-employee payroll setting (plan per-employee-salary §4.2).
+
+    ``{mode, hourly_rate, rate_source, monthly_base}`` — ``mode`` from
+    ``Employee.vn_payroll_mode`` (blank/invalid → ``Hourly``),
+    ``monthly_base`` from the active Salary Structure Assignment via
+    :func:`resolve_base_salary` (``0.0`` when none — callers treat ≤0 as
+    "missing base" for the Monthly pre-flight).
+    """
+    mode = "Hourly"
+    if frappe is not None and employee:
+        try:
+            m = (frappe.db.get_value("Employee", employee, "vn_payroll_mode") or "").strip()
+            if m in ("Hourly", "Monthly"):
+                mode = m
+        except Exception:
+            pass
+    rate, source = resolve_hourly_rate_detail(employee, date)
+    return {
+        "mode": mode,
+        "hourly_rate": rate,
+        "rate_source": source,
+        "monthly_base": resolve_base_salary(employee, date),
+    }
 
 
 def load_time_brackets() -> list[dict]:

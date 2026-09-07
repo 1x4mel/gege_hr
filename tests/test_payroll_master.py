@@ -43,6 +43,9 @@ def _build_stub_frappe():
     mod.get_all = lambda *a, **k: []
     mod.throw = lambda msg, exc=_FrappeError, *args, **kwargs: (_ for _ in ()).throw(exc(msg))
     mod.log_error = lambda *a, **k: None
+    mod.copy_doc = None
+    mod.delete_doc = None
+    mod.get_traceback = lambda *a, **k: ""
 
     class _S:
         pass
@@ -63,12 +66,15 @@ class _FakeDoc:
     def __init__(self, payload, name=None):
         self.__dict__.update(payload)
         self.name = payload.get("name", name or "NEW-0001")
+        self.docstatus = payload.get("docstatus", 0)
+        self.title = payload.get("title", "")
         self.earnings = payload.get("earnings", [])
         self.deductions = payload.get("deductions", [])
         self.leave_policy_details = payload.get("leave_policy_details", [])
         self.inserted = False
         self.submitted = False
         self.saved = False
+        self.cancelled = False
 
     def insert(self, ignore_permissions=False):
         self.inserted = True
@@ -76,10 +82,18 @@ class _FakeDoc:
 
     def submit(self):
         self.submitted = True
+        self.docstatus = 1
         return self
 
     def save(self, ignore_permissions=False):
         self.saved = True
+        return self
+
+    def cancel(self):
+        if self.docstatus != 1:
+            raise _FrappeError("cannot cancel non-submitted doc")
+        self.cancelled = True
+        self.docstatus = 2
         return self
 
     def set(self, key, value):
@@ -93,19 +107,41 @@ class _FakeDoc:
 class _FakeDB:
     def __init__(self):
         self.exists_map = {}  # {(doctype, name): bool}
+        self.values_map = {}  # {(doctype, name, field): value}
         self.table_exists_flag = True
+        self.commits = 0
+        self.savepoints = []
+        self.rollbacks = []
 
     def exists(self, doctype, name):
         return self.exists_map.get((doctype, name), True)
 
+    def get_value(self, doctype, name, fieldname=None, **_k):
+        # Default docstatus=1 (submitted) so permission-ish guards pass unless a
+        # test explicitly overrides via values_map.
+        key = (doctype, name, fieldname)
+        if key in self.values_map:
+            return self.values_map[key]
+        return 1 if fieldname == "docstatus" else None
+
     def table_exists(self, doctype):
         return self.table_exists_flag
+
+    def commit(self):
+        self.commits += 1
+
+    def savepoint(self, name):
+        self.savepoints.append(name)
+
+    def rollback(self, save_point=None):
+        self.rollbacks.append(save_point)
 
 
 class _FakeFrappe:
     def __init__(self):
         self.db = _FakeDB()
         self.docs_created = []
+        self.deleted = []
         self._next_id = 1
         self._existing = {}  # {(doctype,name): _FakeDoc} for get_doc(name)
 
@@ -116,6 +152,22 @@ class _FakeFrappe:
         self._next_id += 1
         self.docs_created.append(doc)
         return doc
+
+    def copy_doc(self, doc):
+        payload = {
+            k: v
+            for k, v in doc.__dict__.items()
+            if k in ("doctype", "title", "leave_policy_details", "employee", "leave_policy")
+        }
+        new = _FakeDoc(payload, name=f"NEW-{self._next_id:04d}")
+        self._next_id += 1
+        self.docs_created.append(new)
+        return new
+
+    def delete_doc(self, doctype, name):
+        self.deleted.append((doctype, name))
+        self._existing.pop((doctype, name), None)
+        return name
 
     def get_all(self, doctype, **kwargs):
         return self._all_rows.get(doctype, [])
@@ -140,6 +192,8 @@ def fake(monkeypatch):
     monkeypatch.setattr(stub, "get_doc", harness.get_doc)
     monkeypatch.setattr(stub, "get_all", harness.get_all)
     monkeypatch.setattr(stub, "throw", harness.throw)
+    monkeypatch.setattr(stub, "copy_doc", harness.copy_doc)
+    monkeypatch.setattr(stub, "delete_doc", harness.delete_doc)
 
     # Stub the admin helpers so payroll_master logic is isolated.
     monkeypatch.setattr(api, "_require_hr_admin", lambda *a, **k: None)
