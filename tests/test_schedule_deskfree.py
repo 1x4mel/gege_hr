@@ -800,12 +800,33 @@ _TODAY = "2026-09-02"
 def _seed_team(db, stub):
     """LM E-1 with direct reports E-2/E-3 + foreign E-9 (common C-case setup)."""
     db.rows["Employee"] = [
-        {"name": "E-2", "employee_name": "Member Two", "department": "Sales", "reports_to": "E-1", "status": "Active"},
-        {"name": "E-3", "employee_name": "Member Three", "department": "Ops", "reports_to": "E-1", "status": "Active"},
-        {"name": "E-9", "employee_name": "Foreign Nine", "department": "IT", "reports_to": "X-1", "status": "Active"},
+        {
+            "name": "E-2",
+            "employee_name": "Member Two",
+            "department": "Sales",
+            "reports_to": "E-1",
+            "status": "Active",
+        },
+        {
+            "name": "E-3",
+            "employee_name": "Member Three",
+            "department": "Ops",
+            "reports_to": "E-1",
+            "status": "Active",
+        },
+        {
+            "name": "E-9",
+            "employee_name": "Foreign Nine",
+            "department": "IT",
+            "reports_to": "X-1",
+            "status": "Active",
+        },
     ]
     db.values[("Shift Type", "Day")] = {"start_time": datetime.time(9, 0), "end_time": datetime.time(17, 0)}
-    db.values[("Shift Type", "Evening")] = {"start_time": datetime.time(18, 0), "end_time": datetime.time(22, 0)}
+    db.values[("Shift Type", "Evening")] = {
+        "start_time": datetime.time(18, 0),
+        "end_time": datetime.time(22, 0),
+    }
 
 
 def test_c1_team_schedule_line_manager_scope(shift):
@@ -860,9 +881,30 @@ def test_c6_pending_approvals_scoped(shift):
     stub._roles = {"Line Manager"}
     _seed_team(db, stub)
     db.rows["Shift Request"] = [
-        {"name": "SR-1", "employee": "E-2", "docstatus": 0, "status": "Draft", "from_date": "2026-09-03", "to_date": "2026-09-03"},
-        {"name": "SR-2", "employee": "E-3", "docstatus": 0, "status": "Draft", "from_date": "2026-09-04", "to_date": "2026-09-04"},
-        {"name": "SR-9", "employee": "E-9", "docstatus": 0, "status": "Draft", "from_date": "2026-09-04", "to_date": "2026-09-04"},
+        {
+            "name": "SR-1",
+            "employee": "E-2",
+            "docstatus": 0,
+            "status": "Draft",
+            "from_date": "2026-09-03",
+            "to_date": "2026-09-03",
+        },
+        {
+            "name": "SR-2",
+            "employee": "E-3",
+            "docstatus": 0,
+            "status": "Draft",
+            "from_date": "2026-09-04",
+            "to_date": "2026-09-04",
+        },
+        {
+            "name": "SR-9",
+            "employee": "E-9",
+            "docstatus": 0,
+            "status": "Draft",
+            "from_date": "2026-09-04",
+            "to_date": "2026-09-04",
+        },
     ]
     ctx = mod.team_schedule_context("2026-09-03", "2026-09-05")
     assert ctx["pending_approvals"]["count"] == 2
@@ -896,11 +938,24 @@ def test_c8_grid_instance_status_beats_assignment(shift):
     stub._roles = {"Line Manager"}
     _seed_team(db, stub)
     db.rows["Shift Assignment"] = [
-        {"name": "SA-1", "employee": "E-2", "status": "Active", "docstatus": 1,
-         "shift_type": "Day", "start_date": "2026-09-10", "end_date": "2026-09-12"},
+        {
+            "name": "SA-1",
+            "employee": "E-2",
+            "status": "Active",
+            "docstatus": 1,
+            "shift_type": "Day",
+            "start_date": "2026-09-10",
+            "end_date": "2026-09-12",
+        },
     ]
     db.rows["VN Employee Shift Instance"] = [
-        {"name": "VESI-1", "employee": "E-2", "work_date": "2026-09-11", "shift_type": "Day", "status": "Skipped"},
+        {
+            "name": "VESI-1",
+            "employee": "E-2",
+            "work_date": "2026-09-11",
+            "shift_type": "Day",
+            "status": "Skipped",
+        },
     ]
     grid = mod.team_schedule_grid("2026-09-10", "2026-09-12")
     cell = next(c for c in grid["members"][0]["days"] if c["date"] == "2026-09-11")
@@ -915,12 +970,26 @@ def test_c9_grid_leave_chip(shift):
     stub._roles = {"Line Manager"}
     _seed_team(db, stub)
     db.rows["Shift Assignment"] = [
-        {"name": "SA-1", "employee": "E-2", "status": "Active", "docstatus": 1,
-         "shift_type": "Day", "start_date": "2026-09-10", "end_date": "2026-09-12"},
+        {
+            "name": "SA-1",
+            "employee": "E-2",
+            "status": "Active",
+            "docstatus": 1,
+            "shift_type": "Day",
+            "start_date": "2026-09-10",
+            "end_date": "2026-09-12",
+        },
     ]
     db.rows["Leave Application"] = [
-        {"name": "LA-1", "employee": "E-2", "leave_type": "Annual Leave",
-         "from_date": "2026-09-11", "to_date": "2026-09-11", "status": "Approved", "docstatus": 1},
+        {
+            "name": "LA-1",
+            "employee": "E-2",
+            "leave_type": "Annual Leave",
+            "from_date": "2026-09-11",
+            "to_date": "2026-09-11",
+            "status": "Approved",
+            "docstatus": 1,
+        },
     ]
     grid = mod.team_schedule_grid("2026-09-10", "2026-09-12")
     cell = next(c for c in grid["members"][0]["days"] if c["date"] == "2026-09-11")
@@ -950,8 +1019,13 @@ def test_c11_grid_window_clamp(shift):
 def test_c12_cell_can_past_day_readonly(shift):
     """C12: past dates are read-only (mutations false, view_detail true)."""
     can = shift.mod._grid_cell_can(
-        is_hr=True, is_lm_of=True, day="2026-08-01", today="2026-09-02",
-        has_assignment=True, has_instance=True, instance_status="Scheduled",
+        is_hr=True,
+        is_lm_of=True,
+        day="2026-08-01",
+        today="2026-09-02",
+        has_assignment=True,
+        has_instance=True,
+        instance_status="Scheduled",
     )
     assert can["view_detail"] is True
     assert not any(can[k] for k in ("assign", "override", "skip", "amend", "end", "approve"))
@@ -960,8 +1034,13 @@ def test_c12_cell_can_past_day_readonly(shift):
 def test_c13_cell_can_active_instance_engine_owned(shift):
     """C13: Active/Completed instances are engine-owned — no manual mutations."""
     can = shift.mod._grid_cell_can(
-        is_hr=True, is_lm_of=True, day="2026-09-10", today="2026-09-02",
-        has_assignment=True, has_instance=True, instance_status="Active",
+        is_hr=True,
+        is_lm_of=True,
+        day="2026-09-10",
+        today="2026-09-02",
+        has_assignment=True,
+        has_instance=True,
+        instance_status="Active",
     )
     assert not any(can[k] for k in ("assign", "override", "skip", "amend", "end"))
 
@@ -969,13 +1048,23 @@ def test_c13_cell_can_active_instance_engine_owned(shift):
 def test_c14_cell_can_line_manager_scope(shift):
     """C14: a non-report member gets no mutation flags for an LM."""
     can = shift.mod._grid_cell_can(
-        is_hr=False, is_lm_of=False, day="2026-09-10", today="2026-09-02",
-        has_assignment=True, has_instance=True, instance_status="Scheduled",
+        is_hr=False,
+        is_lm_of=False,
+        day="2026-09-10",
+        today="2026-09-02",
+        has_assignment=True,
+        has_instance=True,
+        instance_status="Scheduled",
     )
     assert not any(can[k] for k in ("assign", "override", "skip", "amend", "end", "approve"))
     ok = shift.mod._grid_cell_can(
-        is_hr=False, is_lm_of=True, day="2026-09-10", today="2026-09-02",
-        has_assignment=True, has_instance=True, instance_status="Scheduled",
+        is_hr=False,
+        is_lm_of=True,
+        day="2026-09-10",
+        today="2026-09-02",
+        has_assignment=True,
+        has_instance=True,
+        instance_status="Scheduled",
     )
     assert ok["override"] is True and ok["skip"] is True
 
@@ -996,8 +1085,22 @@ def test_c15_list_shift_requests_lm_team_scope(admin, monkeypatch):
         {"name": "E-9", "status": "Active", "reports_to": "OTHER"},
     ]
     db.rows["Shift Request"] = [
-        {"name": "SR-1", "employee": "E-2", "docstatus": 0, "status": "Draft", "from_date": "2026-09-10", "to_date": "2026-09-10"},
-        {"name": "SR-9", "employee": "E-9", "docstatus": 0, "status": "Draft", "from_date": "2026-09-10", "to_date": "2026-09-10"},
+        {
+            "name": "SR-1",
+            "employee": "E-2",
+            "docstatus": 0,
+            "status": "Draft",
+            "from_date": "2026-09-10",
+            "to_date": "2026-09-10",
+        },
+        {
+            "name": "SR-9",
+            "employee": "E-9",
+            "docstatus": 0,
+            "status": "Draft",
+            "from_date": "2026-09-10",
+            "to_date": "2026-09-10",
+        },
     ]
     rows = mod.list_shift_requests(scope="team")
     assert {r["employee"] for r in rows} == {"E-2"}
@@ -1025,9 +1128,18 @@ def test_c17_configured_approver_can_approve(admin):
     stub.session = types.SimpleNamespace(user="boss@gege.test")
     db.exists_set.update({("Shift Request", "SR-A"), ("Employee", "E-2"), ("Shift Type", "Day")})
     stub._doc_map[("Shift Request", "SR-A")] = _RecDoc(
-        {"employee": "E-2", "approver": "boss@gege.test", "status": "Draft", "company": None,
-         "shift_type": "Day", "from_date": "2026-09-10", "to_date": "2026-09-10"},
-        name="SR-A", db=db, doctype="Shift Request",
+        {
+            "employee": "E-2",
+            "approver": "boss@gege.test",
+            "status": "Draft",
+            "company": None,
+            "shift_type": "Day",
+            "from_date": "2026-09-10",
+            "to_date": "2026-09-10",
+        },
+        name="SR-A",
+        db=db,
+        doctype="Shift Request",
     )
     res = mod.approve_shift_request("SR-A")
     assert res["shift_assignment"]
@@ -1039,7 +1151,9 @@ def test_c18_swap_same_instance_pair_denied(admin):
     stub._roles = {"HR Manager"}
     stub.ValidationError = type("ValidationError", (Exception,), {})
     db.values[("VN Employee Shift Instance", "V-1")] = {
-        "employee": "E-1", "work_date": "2026-09-10", "shift_type": "Day"
+        "employee": "E-1",
+        "work_date": "2026-09-10",
+        "shift_type": "Day",
     }
     with pytest.raises(Exception):
         mod.swap_shift_days("V-1", "V-1")
@@ -1049,12 +1163,18 @@ def test_c19_swap_happy_path(admin):
     """C19: two-cell swap → both overrides applied, union result, audit row."""
     mod, stub, db = admin.mod, admin.stub, admin.db
     stub._roles = {"HR Manager"}
-    db.exists_set.update({("Employee", "E-1"), ("Employee", "E-2"), ("Shift Type", "Day"), ("Shift Type", "Evening")})
+    db.exists_set.update(
+        {("Employee", "E-1"), ("Employee", "E-2"), ("Shift Type", "Day"), ("Shift Type", "Evening")}
+    )
     db.values[("VN Employee Shift Instance", "V-1")] = {
-        "employee": "E-1", "work_date": "2026-09-10", "shift_type": "Day"
+        "employee": "E-1",
+        "work_date": "2026-09-10",
+        "shift_type": "Day",
     }
     db.values[("VN Employee Shift Instance", "V-2")] = {
-        "employee": "E-2", "work_date": "2026-09-11", "shift_type": "Evening"
+        "employee": "E-2",
+        "work_date": "2026-09-11",
+        "shift_type": "Evening",
     }
     res = mod.swap_shift_days("V-1", "V-2")
     assert len(res["created"]) == 2  # one 1-day SA per side
@@ -1065,18 +1185,41 @@ def test_c20_copy_week_partial_safe(admin):
     """C20: mid-batch conflict on E-1 is recorded; E-2 still copies fine."""
     mod, stub, db = admin.mod, admin.stub, admin.db
     stub._roles = {"HR Manager"}
-    db.exists_set.update({("Employee", "E-1"), ("Employee", "E-2"), ("Shift Type", "Day"), ("Shift Type", "Evening")})
+    db.exists_set.update(
+        {("Employee", "E-1"), ("Employee", "E-2"), ("Shift Type", "Day"), ("Shift Type", "Evening")}
+    )
     db.values[("Shift Type", "Day")] = {"start_time": _dt(9), "end_time": _dt(17)}
     db.values[("Shift Type", "Evening")] = {"start_time": _dt(18), "end_time": _dt(22)}
     db.rows["Shift Assignment"] = [
-        {"name": "SA-SRC", "employee": "E-1", "status": "Active", "docstatus": 1,
-         "shift_type": "Day", "start_date": "2026-09-07", "end_date": "2026-09-07"},
+        {
+            "name": "SA-SRC",
+            "employee": "E-1",
+            "status": "Active",
+            "docstatus": 1,
+            "shift_type": "Day",
+            "start_date": "2026-09-07",
+            "end_date": "2026-09-07",
+        },
         # Blocker shares the SAME shift (Day) on the target day → genuine G5
         # conflict (a disjoint-timing Evening would be legitimately allowed).
-        {"name": "SA-BLK", "employee": "E-1", "status": "Active", "docstatus": 1,
-         "shift_type": "Day", "start_date": "2026-09-14", "end_date": "2026-09-14"},
-        {"name": "SA-E2", "employee": "E-2", "status": "Active", "docstatus": 1,
-         "shift_type": "Evening", "start_date": "2026-09-08", "end_date": "2026-09-08"},
+        {
+            "name": "SA-BLK",
+            "employee": "E-1",
+            "status": "Active",
+            "docstatus": 1,
+            "shift_type": "Day",
+            "start_date": "2026-09-14",
+            "end_date": "2026-09-14",
+        },
+        {
+            "name": "SA-E2",
+            "employee": "E-2",
+            "status": "Active",
+            "docstatus": 1,
+            "shift_type": "Evening",
+            "start_date": "2026-09-08",
+            "end_date": "2026-09-08",
+        },
     ]
     res = mod.copy_week_schedule("2026-09-07", "2026-09-14", ["E-1", "E-2"])
     assert res["enqueued"] is False
@@ -1102,8 +1245,15 @@ def test_c22_ics_token_gate(shift):
         mod.team_schedule_ics(employee="E-2", token="forged")
     _seed_team(db, stub)
     db.rows["Shift Assignment"] = [
-        {"name": "SA-1", "employee": "E-2", "status": "Active", "docstatus": 1,
-         "shift_type": "Day", "start_date": "2026-09-10", "end_date": "2026-09-12"},
+        {
+            "name": "SA-1",
+            "employee": "E-2",
+            "status": "Active",
+            "docstatus": 1,
+            "shift_type": "Day",
+            "start_date": "2026-09-10",
+            "end_date": "2026-09-12",
+        },
     ]
     out = mod.team_schedule_ics(employee="E-2", token=mod._schedule_ics_token("E-2"))
     assert out.startswith("BEGIN:VCALENDAR")

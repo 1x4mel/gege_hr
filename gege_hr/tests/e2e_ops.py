@@ -1288,8 +1288,7 @@ def schedule_deskfree_smoke():
         except Exception as exc:
             assert "quyền" in str(exc).lower() or "Permission" in str(exc), str(exc)
         print(
-            f"ASSERT: TEAM_GRID members={len(grid['members'])} "
-            f"window={grid['from_date']}..{grid['to_date']}"
+            f"ASSERT: TEAM_GRID members={len(grid['members'])} window={grid['from_date']}..{grid['to_date']}"
         )
     finally:
         frappe.set_user("Administrator")

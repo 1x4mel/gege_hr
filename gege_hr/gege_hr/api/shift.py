@@ -415,19 +415,13 @@ def team_schedule_grid(
     if end < start:
         start, end = end, start
     if (end - start).days + 1 > TEAM_SCHEDULE_MAX_DAYS:
-        frappe.throw(
-            _("Cửa sổ lịch tối đa {0} ngày.").format(TEAM_SCHEDULE_MAX_DAYS), frappe.ValidationError
-        )
+        frappe.throw(_("Cửa sổ lịch tối đa {0} ngày.").format(TEAM_SCHEDULE_MAX_DAYS), frappe.ValidationError)
 
     is_lm = bool(manager_emp) and not is_hr
     members = _team_scope_members(manager_emp, is_hr, department=department)
     q = str(search or "").strip().lower()
     if q:
-        members = [
-            m
-            for m in members
-            if q in f"{m.get('employee_name') or ''} {m.get('name') or ''}".lower()
-        ]
+        members = [m for m in members if q in f"{m.get('employee_name') or ''} {m.get('name') or ''}".lower()]
     emps = [m.get("name") for m in members if m.get("name")]
     emp_set = set(emps)
 
@@ -577,7 +571,11 @@ def team_schedule_grid(
             inst = inst_by.get((emp, d_iso))
             covering = [r for r in sa_by_emp.get(emp, []) if _sa_covers(r, d_iso)]
             sa = covering[0] if covering else None
-            st_name = getattr(inst, "shift_type", None) if inst else (getattr(sa, "shift_type", None) if sa else None)
+            st_name = (
+                getattr(inst, "shift_type", None)
+                if inst
+                else (getattr(sa, "shift_type", None) if sa else None)
+            )
             meta = _st(st_name) or {"start_time": "", "end_time": "", "is_overnight": False}
             leave = leave_by.get((emp, d_iso))
             ot_hours = ot_by.get((emp, d_iso), 0.0)
@@ -669,9 +667,7 @@ def team_schedule_export(from_date: str | None = None, to_date: str | None = Non
 
     grid = team_schedule_grid(from_date=from_date, to_date=to_date, page_size=200)
     buf = io.StringIO()
-    writer = csv.writer(
-        buf, quoting=csv.QUOTE_MINIMAL, lineterminator="\n"
-    )
+    writer = csv.writer(buf, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
     writer.writerow(
         [
             "employee",
@@ -712,7 +708,11 @@ def team_schedule_export(from_date: str | None = None, to_date: str | None = Non
         frappe.response["type"] = "csv"
     except Exception:
         pass
-    return {"filename": filename, "rows": len((grid.get("members") or [])[0].get("days") or []) if grid.get("members") else 0, "content": content}
+    return {
+        "filename": filename,
+        "rows": len((grid.get("members") or [])[0].get("days") or []) if grid.get("members") else 0,
+        "content": content,
+    }
 
 
 def _schedule_ics_token(employee: str) -> str:

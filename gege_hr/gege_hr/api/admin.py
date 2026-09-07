@@ -3433,15 +3433,16 @@ def _copy_week_schedule_job(src: str, dst: str, employees: list[str]) -> dict:
         created = 0
         conflict = None
         for i in range(7):
-            src_day = add_days(src_d, i)
             dst_day = add_days(dst_d, i)
             if dst_day < getdate():
                 continue
             for st in sorted(x for x in pattern[emp].get(i, set()) if x):
                 try:
                     _create_shift_assignment_core(
-                        employee=emp, shift_type=st,
-                        start_date=dst_day.isoformat(), end_date=dst_day.isoformat(),
+                        employee=emp,
+                        shift_type=st,
+                        start_date=dst_day.isoformat(),
+                        end_date=dst_day.isoformat(),
                     )
                     created += 1
                 except Exception as exc:

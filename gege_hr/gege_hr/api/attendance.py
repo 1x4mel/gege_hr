@@ -2377,9 +2377,7 @@ def team_attendance(
             # the capability matrix for THIS (member × day) cell.
             cur_locked = str(cur) in locked_dates
             cm_row = checkout_miss_by.get(m["name"])
-            cm_open_today = bool(
-                cm_row and str(getattr(cm_row, "work_date", "") or "") == str(cur)
-            )
+            cm_open_today = bool(cm_row and str(getattr(cm_row, "work_date", "") or "") == str(cur))
             cell_can = _team_att_cell_can(
                 is_hr=is_hr,
                 is_lm_of=lm_of_roster,
@@ -2653,9 +2651,7 @@ def team_attendance_context(manager: str = "", from_date: str = "", to_date: str
 
     # Filter options for the gear popover (shift types + departments).
     shift_types = sorted(
-        str(r.get("name") or "")
-        for r in frappe.db.get_all("Shift Type", fields=["name"])
-        if r.get("name")
+        str(r.get("name") or "") for r in frappe.db.get_all("Shift Type", fields=["name"]) if r.get("name")
     )
     departments = sorted(
         {

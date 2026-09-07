@@ -603,7 +603,9 @@ def test_ta18_approve_ot_requires_approver_and_raw_ot(env):
 def test_ta18b_happy_paths_for_hr_and_lm(env):
     """Companion: HR on a past unlocked day with a punch → everything on;
     LM on own member → manage flags on but mark/recalc/CM/OT off."""
-    hr = env.att._team_att_cell_can(is_hr=True, is_lm_of=False, has_punch=True, raw_ot=1.0, open_cm=True, is_ot_approver=True)
+    hr = env.att._team_att_cell_can(
+        is_hr=True, is_lm_of=False, has_punch=True, raw_ot=1.0, open_cm=True, is_ot_approver=True
+    )
     assert hr["fix_punch"] is True
     assert hr["delete_punch"] is True
     assert hr["mark_attendance"] is True
@@ -642,7 +644,9 @@ def test_ta7_grid_server_side_search(env):
     """TA7: ``search`` narrows the roster server-side (name match only)."""
     _seed_team(env.fr)
     _seed_month(env.fr)
-    res = env.att.team_attendance(manager="M1", from_date="2026-09-01", to_date="2026-09-30", search="an nguyễn")
+    res = env.att.team_attendance(
+        manager="M1", from_date="2026-09-01", to_date="2026-09-30", search="an nguyễn"
+    )
     assert [m["name"] for m in res["members"]] == ["E1"]
 
 
@@ -723,11 +727,15 @@ def test_ta26_member_paging(env):
     carries the un-paged count."""
     _seed_team(env.fr)
     _seed_month(env.fr)
-    res = env.att.team_attendance(manager="M1", from_date="2026-09-01", to_date="2026-09-30", page=1, page_size=1)
+    res = env.att.team_attendance(
+        manager="M1", from_date="2026-09-01", to_date="2026-09-30", page=1, page_size=1
+    )
     assert len(res["members"]) == 1
     assert res["total_members"] == 2
     assert res["page"] == 1 and res["page_size"] == 1
-    page2 = env.att.team_attendance(manager="M1", from_date="2026-09-01", to_date="2026-09-30", page=2, page_size=1)
+    page2 = env.att.team_attendance(
+        manager="M1", from_date="2026-09-01", to_date="2026-09-30", page=2, page_size=1
+    )
     assert {res["members"][0]["name"], page2["members"][0]["name"]} == {"E1", "E2"}
 
 
@@ -862,9 +870,7 @@ def ops_env(monkeypatch):
     monkeypatch.setattr(ops, "_recalc_work_sessions", lambda emp, d: rec_ws.append((emp, d)))
     monkeypatch.setattr(ops, "_commit", lambda: None)
 
-    return types.SimpleNamespace(
-        ops=ops, fr=mod, state=state, audits=audits, recalcs=recalcs, rec_ws=rec_ws
-    )
+    return types.SimpleNamespace(ops=ops, fr=mod, state=state, audits=audits, recalcs=recalcs, rec_ws=rec_ws)
 
 
 def test_ta13_mark_bulk_lm_own_team(ops_env):
