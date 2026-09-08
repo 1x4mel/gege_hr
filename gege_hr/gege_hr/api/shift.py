@@ -1,10 +1,13 @@
 """
-Shift API — plan v5 §10.3.
+Shift API — plan v5 §10.3 + plans/plan-team-schedule-desk-free.md.
 
 Milestone-2 materialises VN Employee Shift Instance rows from Shift Assignment
 (``generate_daily_shift_instances``) and enqueues work-session recalculation
 on submit (``on_shift_instance_submit``). The read-only ``my_schedule`` /
-``shift_type_options`` endpoints drive the frontend Schedule view.
+``shift_type_options`` endpoints drive the personal Schedule view, while the
+batched ``team_schedule_grid`` / ``team_schedule_context`` power the desk-free
+/hr/team/schedule command center (per-cell ``can`` matrix, leave/OT overlays,
+coverage gaps, CSV export + token-gated ICS feed).
 """
 
 from __future__ import annotations
@@ -149,20 +152,642 @@ def shift_type_options() -> list[dict]:
 
 @frappe.whitelist()
 def team_schedule(from_date: str | None = None, to_date: str | None = None) -> list[dict]:
-    """Plan §10.3 — manager team schedule window."""
-    frappe.only_for(["HR Manager", "HR User", "System Manager"])
-    manager_emp = emp_utils.get_employee_for_user()
+    """Plan §10.3 — manager team schedule window (LEGACY shape, deprecated).
+
+    Kept for backward compatibility with deployed SPA calls. New code (and the
+    /hr/team/schedule grid) should use :func:`team_schedule_grid` — batched,
+    instance-aware, with a per-cell action matrix
+    (plans/plan-team-schedule-desk-free.md §4 WP1).
+    """
+    manager_emp, is_hr = _team_schedule_viewer()
     today = tz_utils.now_in_portal().date()
     start = getdate(from_date) if from_date else today
     end = getdate(to_date) if to_date else today + timedelta(days=6)
-    members = frappe.db.get_all(
-        "Employee", filters={"status": "Active", "reports_to": manager_emp}, fields=["name", "employee_name"]
-    )
+    members = _team_scope_members(manager_emp, is_hr)
     result = []
     for m in members:
         sched = my_schedule(employee=m.name, from_date=start.isoformat(), to_date=end.isoformat())
-        result.append({**m, "shifts": sched})
+        result.append({"name": m.get("name"), "employee_name": m.get("employee_name"), "shifts": sched})
     return result
+
+
+# --------------------------------------------------------------------------- #
+# /hr/team/schedule desk-free grid (plans/plan-team-schedule-desk-free.md §4).
+# Scope: Line Manager → own ``reports_to`` team; HR roles → company-wide
+# (optionally filtered by department). Every read is BATCHED (fixed number of
+# queries per request — never per-member loops) and every cell carries a
+# server-computed ``can`` action matrix, mirroring the Team Today principle
+# ("BE là nguồn sự thật duy nhất" — see attendance.team_day_can).
+# --------------------------------------------------------------------------- #
+TEAM_SCHEDULE_MAX_DAYS = 31
+_TEAM_SCHEDULE_HR_ROLES = {"HR Manager", "HR User", "System Manager"}
+
+
+def _team_schedule_viewer() -> tuple[str | None, bool]:
+    """Resolve the team-schedule caller → ``(manager_emp, is_hr)``.
+
+    Gate: any SCHEDULE_MANAGER_ROLES member may open the team grid; a Line
+    Manager is scoped to their reports_to team, HR roles to the company.
+    Anyone else → PermissionError (plain employees belong on /hr/schedule).
+    """
+    roles: set = set()
+    try:
+        roles = set(frappe.get_roles() or [])
+    except Exception:
+        roles = set()
+    if not roles & set(SCHEDULE_MANAGER_ROLES):
+        frappe.throw(_("Bạn không có quyền xem lịch làm việc của team."), frappe.PermissionError)
+    is_hr = bool(roles & _TEAM_SCHEDULE_HR_ROLES)
+    return emp_utils.get_employee_for_user(), is_hr
+
+
+def _team_scope_members(manager_emp: str | None, is_hr: bool, department: str | None = None) -> list[dict]:
+    """Active employees visible to the caller (one query — plan §4 WP1).
+
+    Line Manager → ``reports_to = manager_emp`` only. HR roles → every Active
+    employee (department filter applied server-side when given). An LM without
+    a linked Employee sees nobody.
+    """
+    if not is_hr and not manager_emp:
+        return []
+    filters: dict = {"status": "Active"}
+    if not is_hr:
+        filters["reports_to"] = manager_emp
+    if department:
+        filters["department"] = department
+    try:
+        return frappe.db.get_all(
+            "Employee", filters=filters, fields=["name", "employee_name", "department", "reports_to"]
+        )
+    except Exception:
+        # Stripped benches may lack a column — degrade to the core fields.
+        return frappe.db.get_all("Employee", filters=filters, fields=["name", "employee_name"])
+
+
+def _grid_pending_requests_by_emp(emps: list[str], start, end) -> dict[str, list[dict]]:
+    """Draft Shift Requests per employee overlapping the window (one query).
+
+    Fetched broad (docstatus/status filters only) then narrowed in Python —
+    keeps the stub harness (``_FakeDB2`` has no ``in`` support) and the bench
+    on identical semantics.
+    """
+    out: dict[str, list[dict]] = {}
+    if not emps:
+        return out
+    try:
+        rows = frappe.db.get_all(
+            "Shift Request",
+            filters=[["docstatus", "=", 0], ["status", "=", "Draft"]],
+            fields=["name", "employee", "shift_type", "from_date", "to_date"],
+        )
+    except Exception:
+        return out
+    emp_set = set(emps)
+    for r in rows or []:
+        emp = getattr(r, "employee", None)
+        if emp not in emp_set:
+            continue
+        if not _date_overlaps(getattr(r, "from_date", None), getattr(r, "to_date", None), start, end):
+            continue
+        out.setdefault(emp, []).append(
+            {
+                "name": getattr(r, "name", None),
+                "shift_type": getattr(r, "shift_type", None),
+                "from_date": str(getattr(r, "from_date", "") or ""),
+                "to_date": str(getattr(r, "to_date", "") or ""),
+            }
+        )
+    return out
+
+
+def _grid_cell_can(
+    *,
+    is_hr: bool,
+    is_lm_of: bool,
+    locked: bool = False,
+    day=None,
+    today=None,
+    has_assignment: bool = False,
+    has_instance: bool = False,
+    instance_status: str | None = None,
+    has_pending_request: bool = False,
+) -> dict:
+    """Pure — per-cell action matrix for the team grid (plan §4 WP3).
+
+    Mirrors ``attendance.team_day_can``: the FE renders buttons from this
+    matrix only. Rules: past days and locked periods are read-only; an
+    ``Active``/``Completed`` instance is engine-owned (parity with
+    :func:`set_shift_instance_status` refusals); a Line Manager only acts on
+    own-report members.
+    """
+    today = today or getdate()
+    manage = bool(is_hr or is_lm_of) and not bool(locked)
+    if day is not None and getdate(day) < getdate(today):
+        manage = False
+    status = str(instance_status or "")
+    if status in ("Active", "Completed"):
+        manage = False
+    return {
+        "view_detail": True,
+        "assign": bool(manage and not has_assignment),
+        "override": bool(manage and has_assignment),
+        "skip": bool(manage and has_instance and status in ("Scheduled", "Skipped", "Cancelled")),
+        "amend": bool(manage and has_assignment),
+        "end": bool(manage and has_assignment),
+        "approve": bool(manage and has_pending_request),
+    }
+
+
+def _grid_locked_dates(start, end) -> list[str]:
+    """Dates in the window locked by a VN Monthly Attendance Period (fail-soft)."""
+    try:
+        from gege_hr.gege_hr.api.attendance import _is_date_locked
+
+        out = []
+        day = start
+        while day <= end:
+            if _is_date_locked(str(day)):
+                out.append(day.isoformat())
+            day = add_days(day, 1)
+        return out
+    except Exception:
+        return []
+
+
+def _grid_filter_options() -> dict:
+    """Dropdown options for the team-grid toolbar (fail-soft per group)."""
+    out: dict = {"shift_types": [], "work_locations": [], "departments": []}
+    try:
+        out["shift_types"] = shift_type_options()
+    except Exception:
+        pass
+    try:
+        rows = frappe.db.get_all("VN Work Location", fields=["name", "location_name"])
+        out["work_locations"] = [
+            {"value": r.get("name"), "label": r.get("location_name") or r.get("name")} for r in rows
+        ]
+    except Exception:
+        pass
+    try:
+        rows = frappe.db.get_all("Employee", filters={"status": "Active"}, fields=["department"])
+        seen: list[str] = []
+        for r in rows or []:
+            d = getattr(r, "department", None) if not isinstance(r, dict) else r.get("department")
+            if d and d not in seen:
+                seen.append(d)
+        out["departments"] = [{"value": d, "label": d} for d in sorted(seen)]
+    except Exception:
+        pass
+    return out
+
+
+@frappe.whitelist()
+def team_schedule_context(from_date: str | None = None, to_date: str | None = None) -> dict:
+    """Plan §4 WP2 — role/context payload powering the /hr/team/schedule toolbar.
+
+    Returns the viewer, the resolved scope, the toolbar ``can`` matrix, the
+    in-window pending Shift Request count (scope-limited) and the dropdown
+    filter options. Plain employees get PermissionError (their surface is
+    /hr/schedule).
+    """
+    manager_emp, is_hr = _team_schedule_viewer()
+    today = tz_utils.now_in_portal().date()
+    start = getdate(from_date) if from_date else today
+    end = getdate(to_date) if to_date else add_days(today, 6)
+    members = _team_scope_members(manager_emp, is_hr)
+    emp_names = [m.get("name") for m in members if m.get("name")]
+
+    is_lm = bool(manager_emp) and not is_hr
+    try:
+        _roles = set(frappe.get_roles() or [])
+    except Exception:
+        _roles = set()
+    # Bulk endpoints keep the strict HR-admin gate (HR Manager / System Manager).
+    bulk_ok = bool(_roles & {"HR Manager", "System Manager"})
+    pending = _grid_pending_requests_by_emp(emp_names, start, end)
+    pending_count = sum(len(v) for v in pending.values())
+    return {
+        "viewer_employee": manager_emp,
+        "scope": {"mode": "company" if is_hr else "team", "member_count": len(members)},
+        "can": {
+            "view_grid": True,
+            "assign": bool(is_hr or is_lm),
+            "override_day": bool(is_hr or is_lm),
+            "end": bool(is_hr or is_lm),
+            "amend": bool(is_hr or is_lm),
+            "approve_requests": bool(is_hr or is_lm),
+            "bulk": bulk_ok,
+            "export": bool(is_hr or is_lm),
+        },
+        "pending_approvals": {"count": pending_count, "link": "team_shift_requests?status=Draft"},
+        "filters": _grid_filter_options(),
+        "window": {
+            "from_date": start.isoformat(),
+            "to_date": end.isoformat(),
+            "max_days": TEAM_SCHEDULE_MAX_DAYS,
+        },
+    }
+
+
+@frappe.whitelist()
+def team_schedule_grid(
+    from_date: str | None = None,
+    to_date: str | None = None,
+    search: str | None = None,
+    department: str | None = None,
+    coverage: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> dict:
+    """Plan §4 WP3 — the batched team grid: members × days with cell truth.
+
+    One request = fixed query budget (members, Shift Assignments, Shift
+    Instances, approved Leave, approved OT, pending Shift Requests, locks).
+    Each cell reports the materialised ``VN Employee Shift Instance`` status
+    (Skipped/Cancelled beat the covering Shift Assignment), leave/OT chips and
+    its ``can`` action matrix. ``coverage="unassigned"`` keeps only members
+    with ≥1 future working gap (empty, not-on-leave day).
+    """
+    manager_emp, is_hr = _team_schedule_viewer()
+    today = tz_utils.now_in_portal().date()
+    start = getdate(from_date) if from_date else today
+    end = getdate(to_date) if to_date else add_days(today, 6)
+    if end < start:
+        start, end = end, start
+    if (end - start).days + 1 > TEAM_SCHEDULE_MAX_DAYS:
+        frappe.throw(_("Cửa sổ lịch tối đa {0} ngày.").format(TEAM_SCHEDULE_MAX_DAYS), frappe.ValidationError)
+
+    is_lm = bool(manager_emp) and not is_hr
+    members = _team_scope_members(manager_emp, is_hr, department=department)
+    q = str(search or "").strip().lower()
+    if q:
+        members = [m for m in members if q in f"{m.get('employee_name') or ''} {m.get('name') or ''}".lower()]
+    emps = [m.get("name") for m in members if m.get("name")]
+    emp_set = set(emps)
+
+    # ── Batched reads (filters help the bench; Python guards keep the stub
+    #    harness on identical semantics — plan §4 WP3) ───────────────────────
+    sa_fields = ["name", "employee", "shift_type", "start_date", "end_date"]
+    has_loc_field = False
+    try:
+        has_loc_field = frappe.get_meta("Shift Assignment").has_field("vn_work_location")
+    except Exception:
+        has_loc_field = False
+    if has_loc_field:
+        sa_fields.append("vn_work_location")
+    try:
+        sa_rows = frappe.db.get_all(
+            "Shift Assignment",
+            filters={"status": "Active", "docstatus": 1, "start_date": ["<=", end]},
+            fields=sa_fields,
+        )
+    except Exception:
+        sa_rows = []
+    sa_by_emp: dict[str, list[dict]] = {}
+    for r in sa_rows or []:
+        emp = getattr(r, "employee", None)
+        if emp in emp_set:
+            sa_by_emp.setdefault(emp, []).append(r)
+
+    try:
+        inst_rows = frappe.db.get_all(
+            "VN Employee Shift Instance",
+            filters={"docstatus": ["!=", 2]},
+            fields=[
+                "name",
+                "employee",
+                "work_date",
+                "shift_type",
+                "status",
+                "work_location",
+                "work_location_name",
+            ],
+        )
+    except Exception:
+        inst_rows = []
+    inst_by: dict[tuple[str, str], dict] = {}
+    for r in inst_rows or []:
+        emp = getattr(r, "employee", None)
+        wd = str(getattr(r, "work_date", "") or "")[:10]
+        if emp in emp_set and str(start) <= wd <= str(end):
+            inst_by[(emp, wd)] = r
+
+    try:
+        leave_rows = frappe.db.get_all(
+            "Leave Application",
+            filters={"status": "Approved", "docstatus": 1},
+            fields=["name", "employee", "leave_type", "from_date", "to_date", "half_day"],
+        )
+    except Exception:
+        try:
+            leave_rows = frappe.db.get_all(
+                "Leave Application",
+                filters={"status": "Approved", "docstatus": 1},
+                fields=["name", "employee", "leave_type", "from_date", "to_date"],
+            )
+        except Exception:
+            leave_rows = []
+    leave_by: dict[tuple[str, str], dict] = {}
+    for r in leave_rows or []:
+        emp = getattr(r, "employee", None)
+        if emp not in emp_set:
+            continue
+        if not _date_overlaps(getattr(r, "from_date", None), getattr(r, "to_date", None), start, end):
+            continue
+        day = getdate(getattr(r, "from_date", None) or start)
+        last = getdate(getattr(r, "to_date", None) or end)
+        while day <= last:
+            if start <= day <= end:
+                leave_by.setdefault(
+                    (emp, day.isoformat()),
+                    {
+                        "name": getattr(r, "name", None),
+                        "type": getattr(r, "leave_type", None),
+                        "half_day": bool(getattr(r, "half_day", False)),
+                    },
+                )
+            day = add_days(day, 1)
+
+    try:
+        ot_rows = frappe.db.get_all(
+            "VN Attendance Work Session",
+            filters={"docstatus": ["!=", 2]},
+            fields=["employee", "work_date", "approved_overtime_hours"],
+        )
+    except Exception:
+        ot_rows = []
+    ot_by: dict[tuple[str, str], float] = {}
+    for r in ot_rows or []:
+        emp = getattr(r, "employee", None)
+        wd = str(getattr(r, "work_date", "") or "")[:10]
+        if emp in emp_set and str(start) <= wd <= str(end):
+            try:
+                ot_by[(emp, wd)] = round(float(getattr(r, "approved_overtime_hours", 0) or 0), 2)
+            except (TypeError, ValueError):
+                ot_by[(emp, wd)] = 0.0
+
+    sr_by_emp = _grid_pending_requests_by_emp(emps, start, end)
+    locked = set(_grid_locked_dates(start, end))
+
+    # Shift Type cache for window labels (start_time/end_time strings).
+    st_cache: dict[str, dict] = {}
+
+    def _st(name: str | None):
+        if not name:
+            return None
+        if name not in st_cache:
+            try:
+                doc = frappe.get_cached_doc("Shift Type", name)
+                st_cache[name] = {
+                    "start_time": str(doc.start_time),
+                    "end_time": str(doc.end_time),
+                    "is_overnight": tz_utils.is_overnight(doc.start_time, doc.end_time),
+                }
+            except Exception:
+                st_cache[name] = {"start_time": "", "end_time": "", "is_overnight": False}
+        return st_cache[name]
+
+    def _sa_covers(r, day_iso: str) -> bool:
+        s = str(getattr(r, "start_date", "") or "")[:10]
+        e = str(getattr(r, "end_date", "") or "2999-12-31")[:10]
+        return s <= day_iso <= e
+
+    # ── Build member rows (all matching search/department), then coverage ──
+    rows: list[dict] = []
+    unassigned_total = 0
+    day = start
+    days_list = []
+    while day <= end:
+        days_list.append(day.isoformat())
+        day = add_days(day, 1)
+
+    for m in members:
+        emp = m.get("name")
+        pend = sr_by_emp.get(emp, [])
+        pend_spans = [(str(p["from_date"])[:10], str(p["to_date"])[:10] or "2999-12-31") for p in pend]
+        cells = []
+        member_gaps = 0
+        for d_iso in days_list:
+            inst = inst_by.get((emp, d_iso))
+            covering = [r for r in sa_by_emp.get(emp, []) if _sa_covers(r, d_iso)]
+            sa = covering[0] if covering else None
+            st_name = (
+                getattr(inst, "shift_type", None)
+                if inst
+                else (getattr(sa, "shift_type", None) if sa else None)
+            )
+            meta = _st(st_name) or {"start_time": "", "end_time": "", "is_overnight": False}
+            leave = leave_by.get((emp, d_iso))
+            ot_hours = ot_by.get((emp, d_iso), 0.0)
+            instance_status = str(getattr(inst, "status", "") or "") if inst else ""
+            has_pending = any(ps <= d_iso <= pe for ps, pe in pend_spans)
+            cell = {
+                "date": d_iso,
+                "shift_type": st_name,
+                "start_time": meta["start_time"],
+                "end_time": meta["end_time"],
+                "is_overnight": bool(meta["is_overnight"]),
+                "instance": getattr(inst, "name", None) if inst else None,
+                "instance_status": instance_status or None,
+                "shift_assignment": getattr(sa, "name", None) if sa else None,
+                "work_location": (getattr(inst, "work_location", None) if inst else None)
+                or (getattr(sa, "vn_work_location", None) if sa else None),
+                "work_location_name": (getattr(inst, "work_location_name", None) if inst else None),
+                "leave": leave,
+                "ot_hours": ot_hours,
+            }
+            cell["can"] = _grid_cell_can(
+                is_hr=is_hr,
+                is_lm_of=is_lm,  # every scope member of an LM is a direct report
+                locked=d_iso in locked,
+                day=d_iso,
+                today=today,
+                has_assignment=bool(sa or inst),
+                has_instance=bool(inst),
+                instance_status=instance_status or None,
+                has_pending_request=has_pending,
+            )
+            if not sa and not inst and not leave and d_iso >= today.isoformat():
+                cell["unassigned"] = True
+                member_gaps += 1
+                unassigned_total += 1
+            cells.append(cell)
+        rows.append(
+            {
+                "employee": emp,
+                "employee_name": m.get("employee_name"),
+                "department": m.get("department"),
+                "pending_requests": len(pend),
+                "days": cells,
+                "_gaps": member_gaps,
+            }
+        )
+
+    if str(coverage or "").strip() == "unassigned":
+        rows = [r for r in rows if r.pop("_gaps", 0) > 0]
+    else:
+        for r in rows:
+            r.pop("_gaps", None)
+
+    # ── Paging over members ──────────────────────────────────────────────────
+    try:
+        page_i = max(1, int(page or 1))
+        size_i = max(1, min(200, int(page_size or 50)))
+    except (TypeError, ValueError):
+        page_i, size_i = 1, 50
+    total_pages = max(1, -(-len(rows) // size_i))
+    rows_page = rows[(page_i - 1) * size_i : page_i * size_i]
+
+    return {
+        "from_date": start.isoformat(),
+        "to_date": end.isoformat(),
+        "locked_dates": sorted(locked),
+        "summary": {
+            "members": len(rows),
+            "unassigned_days": unassigned_total,
+            "pending_requests": sum(r["pending_requests"] for r in rows),
+            "page": page_i,
+            "page_size": size_i,
+            "pages": total_pages,
+        },
+        "members": rows_page,
+    }
+
+
+@frappe.whitelist()
+def team_schedule_export(from_date: str | None = None, to_date: str | None = None) -> dict:
+    """Plan §4 WP6 — CSV export of the team grid window (HR / Line Manager).
+
+    Streams the same rows the grid renders (page_size capped at 200 — teams
+    are small). Sets the Frappe download response when available; always
+    returns the payload too so stub harnesses can assert on it.
+    """
+    import csv
+    import io
+
+    grid = team_schedule_grid(from_date=from_date, to_date=to_date, page_size=200)
+    buf = io.StringIO()
+    writer = csv.writer(buf, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
+    writer.writerow(
+        [
+            "employee",
+            "employee_name",
+            "department",
+            "date",
+            "shift_type",
+            "start_time",
+            "end_time",
+            "instance_status",
+            "leave_type",
+            "ot_hours",
+            "work_location",
+        ]
+    )
+    for m in grid.get("members") or []:
+        for c in m.get("days") or []:
+            writer.writerow(
+                [
+                    m.get("employee"),
+                    m.get("employee_name"),
+                    m.get("department"),
+                    c.get("date"),
+                    c.get("shift_type") or "",
+                    c.get("start_time") or "",
+                    c.get("end_time") or "",
+                    c.get("instance_status") or "",
+                    (c.get("leave") or {}).get("type") or "",
+                    c.get("ot_hours") or 0,
+                    c.get("work_location_name") or c.get("work_location") or "",
+                ]
+            )
+    content = buf.getvalue()
+    filename = f"team_schedule_{grid['from_date']}_{grid['to_date']}.csv"
+    try:
+        frappe.response["filename"] = filename
+        frappe.response["filecontent"] = content
+        frappe.response["type"] = "csv"
+    except Exception:
+        pass
+    return {
+        "filename": filename,
+        "rows": len((grid.get("members") or [])[0].get("days") or []) if grid.get("members") else 0,
+        "content": content,
+    }
+
+
+def _schedule_ics_token(employee: str) -> str:
+    """Deterministic per-employee feed token (site-secret HMAC — no schema)."""
+    import hashlib
+
+    try:
+        secret = str(frappe.get_site_config().get("encryption_key") or "gege-hr")
+    except Exception:
+        secret = "gege-hr"
+    return hashlib.sha256(f"{secret}:schedule-ics:{employee}".encode()).hexdigest()[:32]
+
+
+@frappe.whitelist(allow_guest=True)
+def team_schedule_ics(employee: str | None = None, token: str | None = None) -> str:
+    """Plan §4 WP6 — per-employee ICS feed of the next 60 days.
+
+    Read-only, token-gated (``_schedule_ics_token``), no session needed — so
+    the employee can subscribe from Google/Outlook. Floating local datetimes
+    (portal wall clock) are used deliberately: the feed follows whatever TZ
+    the calendar client is in.
+    """
+    employee_name = emp_utils.emp_name(employee) if employee else None
+    if not employee_name or not token or token != _schedule_ics_token(employee_name):
+        frappe.throw(_("Liên kết lịch không hợp lệ."), frappe.PermissionError)
+    today = tz_utils.now_in_portal().date()
+    start = today
+    end = add_days(today, 60)
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//gege_hr//Team Schedule//VI",
+        "CALSCALE:GREGORIAN",
+    ]
+    try:
+        has_loc = frappe.get_meta("Shift Assignment").has_field("vn_work_location")
+        sa_fields = ["name", "shift_type", "start_date", "end_date"]
+        if has_loc:
+            sa_fields.append("vn_work_location")
+        assignments = frappe.db.get_all(
+            "Shift Assignment",
+            filters={"employee": employee_name, "status": "Active", "docstatus": 1},
+            fields=sa_fields,
+        )
+    except Exception:
+        assignments = []
+    day = start
+    while day <= end:
+        for a in assignments or []:
+            a_start = str(getattr(a, "start_date", "") or "")[:10]
+            a_end = str(getattr(a, "end_date", "") or "2999-12-31")[:10]
+            if not (a_start <= day.isoformat() <= a_end):
+                continue
+            try:
+                st = frappe.get_cached_doc("Shift Type", a.shift_type)
+            except Exception:
+                continue
+            if not st.start_time or not st.end_time:
+                continue
+            planned_start, planned_end = tz_utils.planned_window(day, st.start_time, st.end_time)
+            ps = tz_utils.wall(planned_start).strftime("%Y%m%dT%H%M%S")
+            pe = tz_utils.wall(planned_end).strftime("%Y%m%dT%H%M%S")
+            stamp = tz_utils.wall(tz_utils.now_in_portal()).strftime("%Y%m%dT%H%M%S")
+            lines += [
+                "BEGIN:VEVENT",
+                f"UID:{a.name}-{day.isoformat()}@gege-hr",
+                f"DTSTAMP:{stamp}",
+                f"DTSTART:{ps}",
+                f"DTEND:{pe}",
+                f"SUMMARY:{a.shift_type}",
+                "END:VEVENT",
+            ]
+        day = add_days(day, 1)
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #

@@ -101,6 +101,46 @@ def _require_ot_approver() -> None:
     frappe.only_for(OT_APPROVER_ROLES)
 
 
+def _is_lm_of(employee: str) -> bool:
+    """True khi ``employee.reports_to`` là Employee của caller (lazy, stub-safe).
+
+    plan-team-attendance-desk-free §4 WP4 — Line-Manager scope probe for the
+    team-attendance drawer ops. Resolves the employee util lazily so the
+    bench-free harness stays light; any resolution failure → False (deny).
+    """
+    try:
+        from gege_hr.gege_hr.utils import employee as emp_utils
+
+        me = emp_utils.get_employee_for_user()
+    except Exception:
+        return False
+    if not me:
+        return False
+    try:
+        reports_to = frappe.db.get_value("Employee", employee, "reports_to")
+    except Exception:
+        return False
+    return bool(reports_to) and reports_to == me
+
+
+def _require_hr_or_lm_of(employee: str) -> None:
+    """Permission gate for the /hr/team/attendance drawer punch ops (WP4).
+
+    HR Manager / HR User / System Manager may act on anyone; a ``Line Manager``
+    only on employees whose ``reports_to`` is them — semantics copied from
+    ``admin._require_attendance_editor_for`` (no cross-team escalation).
+    """
+    roles = set(frappe.get_roles())
+    if roles & set(HR_ROLES):
+        return
+    if roles & {"Line Manager"} and _is_lm_of(employee or ""):
+        return
+    frappe.throw(
+        frappe._("Bạn chỉ được thao tác chấm công của nhân viên trong team của mình."),
+        frappe.PermissionError,
+    )
+
+
 def _is_locked(work_date: str | None) -> bool:
     """True when a VN Monthly Attendance Period covering ``work_date`` is Locked.
 
@@ -265,6 +305,20 @@ def _recalc_work_sessions(employee: str, work_date: str) -> None:
             pass
 
 
+def _publish_att_updated(employee, work_date) -> None:
+    """Best-effort realtime ping (plan-team-attendance-desk-free WP9): open
+    ``/hr/team/attendance`` tabs refetch the affected member row. Never raises;
+    also the monkeypatch seam for the TA22 unit tests."""
+    try:
+        from gege_hr.gege_hr.api import attendance as _att_api
+
+        _pub = getattr(_att_api, "_publish_team_attendance", None)
+        if _pub:
+            _pub(employee, work_date)
+    except Exception:
+        pass
+
+
 def _attendance_backfill(from_date: str, to_date: str, employee: str | None) -> dict:
     """Delegate the WS → Attendance regeneration to ``attendance_sync`` (E6 core)."""
     from gege_hr.gege_hr.api import attendance_sync
@@ -387,14 +441,15 @@ def list_checkins(
     log_type: str | None = None,
     limit: int = 200,
 ) -> list[dict]:
-    """Raw ``Employee Checkin`` rows for an employee in a date window (HR only).
+    """Raw ``Employee Checkin`` rows for an employee in a date window.
 
-    ``from_date`` defaults to ``to_date - 30d``; ``to_date`` defaults to today.
+    HR roles see anyone; a Line Manager only their own reports (WP4).The feed
+    powers the /hr/team/attendance day-drawer punch tab.
     """
-    _require_hr()
     employee = (employee or "").strip()
     if not employee:
         frappe.throw(frappe._("Thiếu mã nhân viên."), frappe.MandatoryError)
+    _require_hr_or_lm_of(employee)
     end = _parse_date(to_date) or _dt.date.today()
     start = _parse_date(from_date) or (end - _dt.timedelta(days=30))
     if start > end:
@@ -445,12 +500,13 @@ def create_checkin(
     ``time`` is portal-local ("YYYY-MM-DD HH:mm[:ss]" / ISO) and is stored as
     naive PORTAL WALL — the live DB frame (PHASE-1, same as
     ``admin_custom_checkin``). The after_insert hook recalculates the Work
-    Session automatically.
+    Session automatically. HR roles may act on anyone; a Line Manager only on
+    their own reports (plan WP4).
     """
-    _require_hr()
     employee = (employee or "").strip()
     if not employee or not frappe.db.exists("Employee", employee):
         frappe.throw(frappe._("Nhân viên không tồn tại."), frappe.DoesNotExistError)
+    _require_hr_or_lm_of(employee)
     lt = _norm_log_type(log_type)
     reason = _require_reason(reason)
     dt = _parse_dt(time)
@@ -481,6 +537,7 @@ def create_checkin(
         description=f"HR tạo lượt chấm {lt} {dt.strftime('%Y-%m-%d %H:%M:%S')} — lý do: {reason}",
     )
     _commit()
+    _publish_att_updated(employee, work_date)
     return {
         "ok": True,
         "name": getattr(doc, "name", None),
@@ -501,8 +558,8 @@ def update_checkin(
 
     The update path fires no ``after_insert`` hook, so the Work Session is
     recomputed explicitly (same pattern as ``admin._upsert_employee_checkin``).
+    HR roles may act on anyone; a Line Manager only on their own reports (WP4).
     """
-    _require_hr()
     name = (name or "").strip()
     if not name:
         frappe.throw(frappe._("Thiếu mã lượt chấm."), frappe.MandatoryError)
@@ -510,6 +567,7 @@ def update_checkin(
     existing = frappe.db.get_value(CHECKIN_DOCTYPE, name, ["employee", "time"], as_dict=True)
     if not existing or not getattr(existing, "employee", None):
         frappe.throw(frappe._("Lượt chấm {0} không tồn tại.").format(name), frappe.DoesNotExistError)
+    _require_hr_or_lm_of(getattr(existing, "employee", None))
 
     old_dt = _parse_dt(getattr(existing, "time", None))
     new_dt = _parse_dt(time) if time else None
@@ -545,13 +603,16 @@ def update_checkin(
         ),
     )
     _commit()
+    _publish_att_updated(
+        getattr(existing, "employee", None),
+        ((new_dt or old_dt).date().isoformat() if (new_dt or old_dt) else None),
+    )
     return {"ok": True, "name": name, "message": frappe._("Đã cập nhật lượt chấm {0}.").format(name)}
 
 
 @frappe.whitelist()
 def delete_checkin(name: str | None = None, reason: str | None = None) -> dict:
     """Delete a stray/duplicate punch (E5). Recalcs the surrounding sessions."""
-    _require_hr()
     name = (name or "").strip()
     if not name:
         frappe.throw(frappe._("Thiếu mã lượt chấm."), frappe.MandatoryError)
@@ -559,6 +620,7 @@ def delete_checkin(name: str | None = None, reason: str | None = None) -> dict:
     existing = frappe.db.get_value(CHECKIN_DOCTYPE, name, ["employee", "time"], as_dict=True)
     if not existing or not getattr(existing, "employee", None):
         frappe.throw(frappe._("Lượt chấm {0} không tồn tại.").format(name), frappe.DoesNotExistError)
+    _require_hr_or_lm_of(getattr(existing, "employee", None))
 
     old_dt = _parse_dt(getattr(existing, "time", None))
     work_date = old_dt.date().isoformat() if old_dt else None
@@ -575,6 +637,7 @@ def delete_checkin(name: str | None = None, reason: str | None = None) -> dict:
         description=(f"HR xoá lượt chấm {name} ({work_date or '?'}) — lý do: {reason}"),
     )
     _commit()
+    _publish_att_updated(getattr(existing, "employee", None), work_date)
     return {"ok": True, "name": name, "message": frappe._("Đã xoá lượt chấm {0}.").format(name)}
 
 
@@ -641,7 +704,12 @@ def mark_attendance_bulk(
     rows submit only when the date sits in a Locked monthly period (same
     decision as ``attendance_sync``).
     """
-    _require_hr()
+    # WP4: Line Manager may bulk-mark their OWN reports only (per-row scope
+    # check below); HR roles keep company-wide reach.
+    caller_roles = set(frappe.get_roles())
+    if not (caller_roles & (set(HR_ROLES) | {"Line Manager"})):
+        frappe.throw(frappe._("Bạn không có quyền thực hiện thao tác này."), frappe.PermissionError)
+    is_hr_caller = bool(caller_roles & set(HR_ROLES))
     day = _parse_date(attendance_date)
     if not day:
         frappe.throw(frappe._("Thiếu ngày chấm công."), frappe.MandatoryError)
@@ -663,6 +731,9 @@ def mark_attendance_bulk(
     for emp in emps:
         if not frappe.db.exists("Employee", emp):
             results.append({"employee": emp, "ok": False, "error": "Nhân viên không tồn tại"})
+            continue
+        if not is_hr_caller and not _is_lm_of(emp):
+            results.append({"employee": emp, "ok": False, "error": "Ngoài phạm vi team của bạn"})
             continue
         existing = frappe.db.get_value(
             ATTENDANCE_DOCTYPE,
@@ -709,6 +780,7 @@ def mark_attendance_bulk(
             results.append({"employee": emp, "ok": False, "error": "Lỗi khi tạo Attendance"})
 
     _commit()
+    _publish_att_updated(None, work_date)
     return {
         "ok": True,
         "attendance_date": work_date,
@@ -779,6 +851,7 @@ def approve_session_overtime(
         ),
     )
     _commit()
+    _publish_att_updated(getattr(ws, "employee", None), str(getattr(ws, "work_date", "") or ""))
     return {
         "ok": True,
         "work_session": ws_name,

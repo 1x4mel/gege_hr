@@ -1270,6 +1270,26 @@ def schedule_deskfree_smoke():
         restored = shift_api.set_shift_instance_status(inst, "Scheduled")
         assert restored["status"] == "Scheduled"
         print("ASSERT: SKIP_RESTORE ok")
+
+        # ── /hr/team/schedule grid (plans/plan-team-schedule-desk-free.md §5.3) ─
+        tctx = shift_api.team_schedule_context(d1, d3)
+        assert tctx["can"]["view_grid"] and tctx["can"]["assign"]
+        assert tctx["scope"]["member_count"] >= 1
+        grid = shift_api.team_schedule_grid(d1, d3)
+        assert grid["members"] and all(m["days"] for m in grid["members"])
+        cell = grid["members"][0]["days"][0]
+        assert {"assign", "override", "skip", "approve"} <= set(cell["can"])
+        frappe.set_user(email)
+        try:
+            shift_api.team_schedule_context()
+            raise AssertionError("employee must not open the team schedule")
+        except AssertionError:
+            raise
+        except Exception as exc:
+            assert "quyền" in str(exc).lower() or "Permission" in str(exc), str(exc)
+        print(
+            f"ASSERT: TEAM_GRID members={len(grid['members'])} window={grid['from_date']}..{grid['to_date']}"
+        )
     finally:
         frappe.set_user("Administrator")
         for sr in frappe.get_all("Shift Request", filters={"employee": emp}, pluck="name"):
@@ -1303,3 +1323,59 @@ def schedule_deskfree_smoke():
             pass
         frappe.db.commit()
         print("ASSERT: CLEANED")
+
+
+def team_attendance_deskfree_smoke():
+    """plans/plan-team-attendance-desk-free.md §5.3 — desk-free grid smoke.
+
+    READ-ONLY on the live site (mutations are covered bench-free by
+    tests/test_team_attendance_deskfree.py TA13–TA22): context payload, the
+    enhanced grid (can matrix + locked_dates + pending badges), a past-date
+    member-day detail and the CSV export — all as the first HR Manager found.
+    Prints ``ASSERT:`` lines for the bench wrapper.
+    """
+    from gege_hr.gege_hr.api import attendance as att
+    from gege_hr.gege_hr.utils import tz
+
+    hr_users = frappe.get_all(
+        "Has Role",
+        filters={"role": "HR Manager", "parenttype": "User"},
+        pluck="parent",
+        limit=1,
+    )
+    if not hr_users:
+        print("ASSERT: no HR Manager user on this site — smoke skipped")
+        return
+    frappe.set_user(hr_users[0])
+
+    today = tz.now_in_portal().date()
+    start, end = today.replace(day=1), today
+
+    ctx = att.team_attendance_context(from_date=str(start), to_date=str(end))
+    assert ctx["can"]["view_grid"] is True
+    assert ctx["scope"]["mode"] == "company"
+    assert set(ctx["pending_approvals"]) == {"corrections", "overtime", "leaves", "checkout_misses"}
+    print(f"ASSERT: context scope={ctx['scope']} can.fix_punch={ctx['can']['fix_punch']}")
+
+    grid = att.team_attendance(manager="", from_date=str(start), to_date=str(end))
+    assert "locked_dates" in grid and "period" in grid and "total_members" in grid
+    members = grid.get("members") or []
+    assert members, "no roster members for the current month"
+    m0 = members[0]
+    assert m0.get("pending") is not None
+    d0 = next((d for d in m0["days"] if d.get("can")), None)
+    assert d0 is not None
+    assert set(d0["can"]) >= {"fix_punch", "mark_attendance", "approve_ot", "nudge"}
+    print(f"ASSERT: grid members={len(members)} first={m0['name']} can_keys={len(d0['can'])}")
+
+    past = next((d for d in reversed(m0["days"]) if d["work_date"] < str(today)), None)
+    if past:
+        detail = att.team_member_day_detail(employee=m0["name"], date_str=past["work_date"])
+        assert detail["can"]["view_detail"] is True
+        print(f"ASSERT: day-detail {m0['name']}@{past['work_date']} status={detail.get('status')}")
+
+    csv_res = att.team_attendance_export_csv(from_date=str(start), to_date=str(end))
+    assert csv_res["csv"].startswith("\ufeff")
+    assert csv_res["rows"] >= len(members)
+    print(f"ASSERT: export rows={csv_res['rows']} filename={csv_res['filename']}")
+    print("ASSERT: team_attendance_deskfree_smoke OK")
