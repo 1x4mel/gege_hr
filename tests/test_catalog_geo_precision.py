@@ -162,11 +162,16 @@ def test_create_drops_meta_keys_from_payload(fake):
             "location_name": "Chi nhánh Q7",
             "latitude": LAT,
             "longitude": LNG,
-            "doctype": "VN Work Location",  # must never be written onto the doc
+            # internal Frappe keys must never be written onto the doc
+            "modified_by": "someone@x",
+            "__islocal": True,
+            "__unsaved": True,
         },
         is_new=1,
     )
 
     created = fake.created[0]
-    assert getattr(created, "doctype", None) is None
+    assert getattr(created, "modified_by", None) is None
+    assert getattr(created, "__islocal", None) is None
+    assert getattr(created, "__unsaved", None) is None
     assert created.latitude == LAT
