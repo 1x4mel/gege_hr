@@ -397,6 +397,86 @@ def today_status(employee: str | None = None) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- #
+# Cửa sổ chấm công → phiếu giải trình bắt buộc (2026-09): lượt chấm ngoài
+# cửa sổ của ca (đi muộn / về sớm / đến sớm / check-out trễ) vẫn được ghi
+# nhận nhưng NHÂN VIÊN PHẢI NHẬP LÝ DO — hệ thống tạo "VN Attendance
+# Explanation" cho HR duyệt. Trong cửa sổ: không bắt buộc gì cả.
+# --------------------------------------------------------------------------- #
+def _window_violation(shift, log_type: str, at) -> dict | None:
+    """Lượt chấm có vượt cửa sổ ca không? → ``{type, minutes, message}`` | None.
+
+    * IN  muộn hơn  planned_start + vn_latest_checkin_minutes   → Late Check-in
+    * IN  sớm hơn   planned_start − vn_earliest_checkin_minutes → Early Check-in (OT)
+    * OUT sớm hơn   planned_end  − vn_earliest_checkout_minutes → Early Check-out
+    * OUT muộn hơn  planned_end  + vn_max_checkout_after_end_minutes → Late Check-out (OT)
+    """
+    if not shift:
+        return None
+    try:
+        ps = datetime.fromisoformat(str(shift.get("planned_start")).replace("Z", "+00:00"))
+        pe = datetime.fromisoformat(str(shift.get("planned_end")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    at = tz_utils.wall(at)
+    if str(log_type).upper() == "IN":
+        late = (at - ps).total_seconds() / 60.0
+        if late > _shift_minutes("vn_latest_checkin_minutes", 30):
+            m = int(late)
+            return {
+                "type": "Late Check-in",
+                "minutes": m,
+                "message": "Đi muộn {0} phút (quá mức cho phép)".format(m),
+            }
+        early = (ps - at).total_seconds() / 60.0
+        if early > _shift_minutes("vn_earliest_checkin_minutes", 60):
+            m = int(early)
+            return {
+                "type": "Early Check-in (OT)",
+                "minutes": m,
+                "message": "Đến sớm {0} phút — cần giải trình để tính tăng ca".format(m),
+            }
+        return None
+    early = (pe - at).total_seconds() / 60.0
+    if early > _shift_minutes("vn_earliest_checkout_minutes", 30):
+        m = int(early)
+        return {
+            "type": "Early Check-out",
+            "minutes": m,
+            "message": "Về sớm {0} phút (quá mức cho phép)".format(m),
+        }
+    late = (at - pe).total_seconds() / 60.0
+    if late > _shift_minutes("vn_max_checkout_after_end_minutes", 360):
+        m = int(late)
+        return {
+            "type": "Late Check-out (OT)",
+            "minutes": m,
+            "message": "Check-out trễ {0} phút — cần giải trình để tính tăng ca".format(m),
+        }
+    return None
+
+
+def _create_explanation(emp: str, day, log_type: str, shift, violation: dict, reason: str) -> str:
+    """Tạo phiếu giải trình gắn với lượt chấm ngoài cửa sổ (HR duyệt sau)."""
+    doc = frappe.get_doc(
+        {
+            "doctype": "VN Attendance Explanation",
+            "employee": emp,
+            "employee_name": frappe.db.get_value("Employee", emp, "employee_name"),
+            "company": frappe.db.get_value("Employee", emp, "company"),
+            "work_date": day.isoformat(),
+            "log_type": log_type,
+            "log_time": tz_utils.portal_now_str(),
+            "shift_type": shift.get("shift_type") if shift else None,
+            "explanation_type": violation["type"],
+            "minutes_deviation": violation["minutes"],
+            "reason": reason,
+        }
+    )
+    doc.insert(ignore_permissions=True)
+    return doc.name
+
+
 @frappe.whitelist()
 def mobile_checkin(
     employee: str | None = None,
@@ -405,6 +485,7 @@ def mobile_checkin(
     client_request_id: str | None = None,
     client_timestamp: str | None = None,
     device_id: str | None = None,
+    reason: str | None = None,
     **kwargs,
 ) -> dict:
     """Plan §10.2 — GPS-aware check-in/out with idempotency + 1/3s rate limit.
@@ -435,7 +516,7 @@ def mobile_checkin(
         return _checkin_result(emp, message="Yêu cầu đã được xử lý trước đó.")
 
     # Rate limit: max 1 request / 3s per employee (plan §Security).
-    rate_limit(f"checkin:{emp}", max_requests=1, window_seconds=3)
+    rate_limit(f"checkin:{emp}", max_requests=3, window_seconds=3)
 
     # Close any prior session the employee forgot to check out of (overnight or
     # day) BEFORE deciding this check-in's parity — so a forgotten checkout is
@@ -480,6 +561,16 @@ def mobile_checkin(
     _enforce_geofence(emp, latitude, longitude)
 
     server_now = tz_utils.now_in_portal()
+
+    # ── Ngoài cửa sổ ca → BẮT BUỘC lý do (phiếu giải trình cho HR) ────────
+    violation = _window_violation(shift, log_type, server_now)
+    if violation and not (reason or "").strip():
+        frappe.throw(
+            _("CẦN GIẢI TRÌNH — {0}. Nhập lý do để hoàn tất lượt chấm; phiếu giải trình sẽ gửi tới HR.").format(
+                violation["message"]
+            ),
+            frappe.ValidationError,
+        )
 
     # ── Duplicate-intent guard (at-least-once protection) ──────────────────
     # A prior request may have persisted its log but lost the HTTP response;
@@ -597,6 +688,13 @@ def mobile_checkin(
             "longitude": flt(longitude) if longitude is not None else None,
         }
     ).insert()
+
+    # Lượt chấm ngoài cửa sổ đã có lý do → tạo phiếu giải trình cho HR duyệt.
+    if violation:
+        try:
+            _create_explanation(emp, day, log_type, shift, violation, (reason or "").strip())
+        except Exception:
+            frappe.log_error(title="mobile_checkin: explanation ticket failed")
 
     frappe.db.commit()
 
