@@ -823,6 +823,48 @@ def test_delete_cancelled_succeeds(admin):
     assert res == {"name": "SA-1"}
 
 
+# --- B12b: xoá bị chặn khi ca đã có dữ liệu chấm công (chuẩn Frappe) -------- #
+def test_delete_blocked_by_checkin_data(admin):
+    mod, stub, db = admin
+    _register(stub, db, _mk_sa("SA-1", docstatus=2, status="Inactive"))
+    db.rows["Employee Checkin"] = [
+        {"name": "CK-1", "employee": "E-1", "shift": "Day", "time": "2026-06-15 08:00:00"}
+    ]
+    with pytest.raises(Exception):
+        mod.delete_shift_assignment("SA-1")
+    assert ("Shift Assignment", "SA-1") not in stub.deleted
+
+
+def test_delete_blocked_by_attendance_data(admin):
+    mod, stub, db = admin
+    _register(stub, db, _mk_sa("SA-1", docstatus=2, status="Inactive"))
+    db.rows["Attendance"] = [
+        {"name": "ATT-1", "employee": "E-1", "shift": "Day", "attendance_date": "2026-06-15"}
+    ]
+    with pytest.raises(Exception):
+        mod.delete_shift_assignment("SA-1")
+    assert ("Shift Assignment", "SA-1") not in stub.deleted
+
+
+def test_list_rows_carry_can_delete_flag(admin):
+    mod, stub, db = admin
+    # Stub get_all applies "=" filters only (between is ignored), so the two
+    # rows are separated by SHIFT: CK-1 (Day) only links the Day assignment.
+    db.rows["Shift Assignment"] = [
+        {k: v for k, v in vars(_mk_sa("SA-OK", docstatus=1, shift_type="Evening")).items()},
+        {k: v for k, v in vars(_mk_sa("SA-DATA", docstatus=1, shift_type="Day")).items()},
+    ]
+    db.rows["Employee Checkin"] = [
+        {"name": "CK-1", "employee": "E-1", "shift": "Day", "time": "2026-06-15 08:00:00"}
+    ]
+    rows = mod.list_shift_assignments()
+    by_name = {r["name"]: r for r in rows}
+    assert by_name["SA-OK"]["can_delete"] is True
+    assert by_name["SA-OK"]["has_checkin_data"] is False
+    assert by_name["SA-DATA"]["can_delete"] is False
+    assert by_name["SA-DATA"]["has_checkin_data"] is True
+
+
 # --- B13/B14: bulk partial-safe wrappers ------------------------------------ #
 def test_bulk_end_partial_safe(admin, monkeypatch):
     mod, stub, db = admin

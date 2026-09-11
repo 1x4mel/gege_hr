@@ -16,6 +16,8 @@ Locked decisions (``plans/hr-fix-plan.md`` §QUYẾT ĐỊNH):
 
 from __future__ import annotations
 
+from datetime import date as _date
+
 import frappe
 
 WORK_SESSION_DOCTYPE = "VN Attendance Work Session"
@@ -140,6 +142,14 @@ def _sync_attendance_internal(ws_name: str) -> str | None:
     if not ws.get("name"):
         return None
 
+    # FIX 2026-09-11 — never create/update Attendance for a FUTURE work date:
+    # planned sessions exist ahead of time (team-schedule planning), and a
+    # whole-month backfill used to materialise Present rows for days that have
+    # not happened yet ("30 ca" on day 11 of the month).
+    ws_day = str(ws.get("work_date") or "")[:10]
+    if ws_day and ws_day > _date.today().isoformat():
+        return None
+
     fields = build_attendance_fields(ws)
     status = fields["status"]
     employee, attendance_date = fields["employee"], fields["attendance_date"]
@@ -224,6 +234,14 @@ def backfill_attendance(
     employee while the header button generates for the whole filtered window.
     """
     frappe.only_for(["HR Manager", "System Manager"])
+    # FIX 2026-09-11 — clamp the window to today: future planned sessions must
+    # not materialise Attendance rows (per-day guard in _sync_attendance_internal
+    # also protects doc-event paths).
+    today = _date.today().isoformat()
+    if from_date and from_date > today:
+        from_date = today
+    if not to_date or to_date > today:
+        to_date = today
     range_filters: list = []
     if from_date:
         range_filters.append(["work_date", ">=", from_date])

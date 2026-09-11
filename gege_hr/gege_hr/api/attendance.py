@@ -309,8 +309,8 @@ def _session_context(shift: dict | None, checkins: list[dict], now_local: dateti
         "checkout_status": checkout_status,
         "overtime_minutes": overtime_minutes,
         "early_exit_minutes": early_exit_minutes,
-        "actual_checkin": tz_utils.utc_iso(actual_in) if actual_in else None,
-        "actual_checkout": tz_utils.utc_iso(actual_out) if actual_out else None,
+        "actual_checkin": actual_in.isoformat() if actual_in else None,  # PORTAL WALL, no Z
+        "actual_checkout": actual_out.isoformat() if actual_out else None,  # PORTAL WALL, no Z
         "elapsed_minutes": elapsed,
         "remaining_minutes": remaining,
         "planned_duration_minutes": int(max(0, (planned_end - planned_start).total_seconds() / 60.0)),
@@ -397,6 +397,86 @@ def today_status(employee: str | None = None) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- #
+# Cửa sổ chấm công → phiếu giải trình bắt buộc (2026-09): lượt chấm ngoài
+# cửa sổ của ca (đi muộn / về sớm / đến sớm / check-out trễ) vẫn được ghi
+# nhận nhưng NHÂN VIÊN PHẢI NHẬP LÝ DO — hệ thống tạo "VN Attendance
+# Explanation" cho HR duyệt. Trong cửa sổ: không bắt buộc gì cả.
+# --------------------------------------------------------------------------- #
+def _window_violation(shift, log_type: str, at) -> dict | None:
+    """Lượt chấm có vượt cửa sổ ca không? → ``{type, minutes, message}`` | None.
+
+    * IN  muộn hơn  planned_start + vn_latest_checkin_minutes   → Late Check-in
+    * IN  sớm hơn   planned_start − vn_earliest_checkin_minutes → Early Check-in (OT)
+    * OUT sớm hơn   planned_end  − vn_earliest_checkout_minutes → Early Check-out
+    * OUT muộn hơn  planned_end  + vn_max_checkout_after_end_minutes → Late Check-out (OT)
+    """
+    if not shift:
+        return None
+    try:
+        ps = datetime.fromisoformat(str(shift.get("planned_start")).replace("Z", "+00:00"))
+        pe = datetime.fromisoformat(str(shift.get("planned_end")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    at = tz_utils.wall(at)
+    if str(log_type).upper() == "IN":
+        late = (at - ps).total_seconds() / 60.0
+        if late > _shift_minutes("vn_latest_checkin_minutes", 30):
+            m = int(late)
+            return {
+                "type": "Late Check-in",
+                "minutes": m,
+                "message": f"Đi muộn {m} phút (quá mức cho phép)",
+            }
+        early = (ps - at).total_seconds() / 60.0
+        if early > _shift_minutes("vn_earliest_checkin_minutes", 60):
+            m = int(early)
+            return {
+                "type": "Early Check-in (OT)",
+                "minutes": m,
+                "message": f"Đến sớm {m} phút — cần giải trình để tính tăng ca",
+            }
+        return None
+    early = (pe - at).total_seconds() / 60.0
+    if early > _shift_minutes("vn_earliest_checkout_minutes", 30):
+        m = int(early)
+        return {
+            "type": "Early Check-out",
+            "minutes": m,
+            "message": f"Về sớm {m} phút (quá mức cho phép)",
+        }
+    late = (at - pe).total_seconds() / 60.0
+    if late > _shift_minutes("vn_max_checkout_after_end_minutes", 360):
+        m = int(late)
+        return {
+            "type": "Late Check-out (OT)",
+            "minutes": m,
+            "message": f"Check-out trễ {m} phút — cần giải trình để tính tăng ca",
+        }
+    return None
+
+
+def _create_explanation(emp: str, day, log_type: str, shift, violation: dict, reason: str) -> str:
+    """Tạo phiếu giải trình gắn với lượt chấm ngoài cửa sổ (HR duyệt sau)."""
+    doc = frappe.get_doc(
+        {
+            "doctype": "VN Attendance Explanation",
+            "employee": emp,
+            "employee_name": frappe.db.get_value("Employee", emp, "employee_name"),
+            "company": frappe.db.get_value("Employee", emp, "company"),
+            "work_date": day.isoformat(),
+            "log_type": log_type,
+            "log_time": tz_utils.portal_now_str(),
+            "shift_type": shift.get("shift_type") if shift else None,
+            "explanation_type": violation["type"],
+            "minutes_deviation": violation["minutes"],
+            "reason": reason,
+        }
+    )
+    doc.insert(ignore_permissions=True)
+    return doc.name
+
+
 @frappe.whitelist()
 def mobile_checkin(
     employee: str | None = None,
@@ -405,6 +485,7 @@ def mobile_checkin(
     client_request_id: str | None = None,
     client_timestamp: str | None = None,
     device_id: str | None = None,
+    reason: str | None = None,
     **kwargs,
 ) -> dict:
     """Plan §10.2 — GPS-aware check-in/out with idempotency + 1/3s rate limit.
@@ -435,7 +516,7 @@ def mobile_checkin(
         return _checkin_result(emp, message="Yêu cầu đã được xử lý trước đó.")
 
     # Rate limit: max 1 request / 3s per employee (plan §Security).
-    rate_limit(f"checkin:{emp}", max_requests=1, window_seconds=3)
+    rate_limit(f"checkin:{emp}", max_requests=3, window_seconds=3)
 
     # Close any prior session the employee forgot to check out of (overnight or
     # day) BEFORE deciding this check-in's parity — so a forgotten checkout is
@@ -480,6 +561,16 @@ def mobile_checkin(
     _enforce_geofence(emp, latitude, longitude)
 
     server_now = tz_utils.now_in_portal()
+
+    # ── Ngoài cửa sổ ca → BẮT BUỘC lý do (phiếu giải trình cho HR) ────────
+    violation = _window_violation(shift, log_type, server_now)
+    if violation and not (reason or "").strip():
+        frappe.throw(
+            _(
+                "CẦN GIẢI TRÌNH — {0}. Nhập lý do để hoàn tất lượt chấm; phiếu giải trình sẽ gửi tới HR."
+            ).format(violation["message"]),
+            frappe.ValidationError,
+        )
 
     # ── Duplicate-intent guard (at-least-once protection) ──────────────────
     # A prior request may have persisted its log but lost the HTTP response;
@@ -597,6 +688,13 @@ def mobile_checkin(
             "longitude": flt(longitude) if longitude is not None else None,
         }
     ).insert()
+
+    # Lượt chấm ngoài cửa sổ đã có lý do → tạo phiếu giải trình cho HR duyệt.
+    if violation:
+        try:
+            _create_explanation(emp, day, log_type, shift, violation, (reason or "").strip())
+        except Exception:
+            frappe.log_error(title="mobile_checkin: explanation ticket failed")
 
     frappe.db.commit()
 
@@ -1021,30 +1119,81 @@ def my_monthly_summary(
 ) -> dict:
     """Plan §10.2 — monthly worked/payable/late/absent/leave/OT totals.
 
-    Milestone-1 uses Attendance (Frappe HR) counts; the Work-Session engine
-    (M2) will replace these with precise payable/OT figures. Until then OT is
-    estimated per-day from out_time vs the shift planned end (see
-    ``_monthly_overtime_hours``).
+    FIX 2026-09-11 — aggregate from VN Attendance Work Sessions (engine truth)
+    instead of core ``Attendance`` rows, for two reasons found in production:
+    1. The sync projection (``build_attendance_fields``) never writes
+       late_entry / early_exit / working-hours onto Attendance, so every
+       Attendance-based counter (đi muộn, về sớm, OT) was permanently 0.
+    2. A whole-month ``backfill_attendance`` run created Present rows for
+       FUTURE dates — on 11/09 the tile showed "30 ca". The stat window is
+       now capped at today: a planned-only session (no punches yet) can
+       never count as worked.
     """
     emp = _resolve_employee(employee)
     now = tz_utils.now_in_portal()
     y, m = _parse_year_month(year, month, now)
     start = date(y, m, 1)
-    # Inclusive end = LAST day of the month. Frappe's ``between`` is inclusive on
-    # both bounds, so using the first day of the next month pulls in one extra
-    # day (e.g. 2026-08-01) and inflates the counts (32 "worked days" for July,
-    # which only has 31). Subtract one day to land on the actual month end.
     next_first = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
     end = next_first - timedelta(days=1)
+    # Session kế hoạch cho ngày tương lai không được tính vào thống kê.
+    stat_end = min(end, now.date())
 
-    def _count(status):
-        return frappe.db.count(
-            "Attendance", {"employee": emp, "status": status, "attendance_date": ["between", [start, end]]}
+    worked_days = 0
+    worked_minutes = 0.0
+    late_count = 0
+    late_minutes = 0.0
+    early_count = 0
+    early_minutes = 0.0
+    overtime_hours = 0.0
+    absent_count = 0
+    leave_days = 0
+    missing_checkout_count = 0
+    if start <= stat_end:
+        ws_rows = frappe.db.get_all(
+            "VN Attendance Work Session",
+            filters={
+                "employee": emp,
+                "work_date": ["between", [start, stat_end]],
+                "docstatus": ["!=", 2],
+            },
+            fields=[
+                "actual_checkin",
+                "actual_checkout",
+                "late_minutes",
+                "early_leave_minutes",
+                "total_actual_hours",
+                "raw_overtime_hours",
+                "approved_overtime_hours",
+                "absent",
+                "has_leave",
+                "missing_checkout",
+            ],
         )
+        for r in ws_rows:
+            if r.get("actual_checkin") or r.get("actual_checkout"):
+                worked_days += 1
+            worked_minutes += flt(r.get("total_actual_hours") or 0) * 60
+            lm = flt(r.get("late_minutes") or 0)
+            if lm > 0:
+                late_count += 1
+            late_minutes += lm
+            em = flt(r.get("early_leave_minutes") or 0)
+            if em > 0:
+                early_count += 1
+            early_minutes += em
+            overtime_hours += flt(r.get("approved_overtime_hours") or r.get("raw_overtime_hours") or 0)
+            if r.get("absent"):
+                absent_count += 1
+            if r.get("has_leave"):
+                leave_days += 1
+            if r.get("missing_checkout"):
+                missing_checkout_count += 1
 
+    # Legacy rows view (core Attendance) kept for compatibility consumers;
+    # bounded to stat_end so seeded future rows never leak into month views.
     rows = frappe.db.get_all(
         "Attendance",
-        filters={"employee": emp, "attendance_date": ["between", [start, end]]},
+        filters={"employee": emp, "attendance_date": ["between", [start, stat_end]]},
         fields=[
             "attendance_date",
             "status",
@@ -1057,45 +1206,36 @@ def my_monthly_summary(
         ],
         order_by="attendance_date desc",
     )
-    early_exit_days = frappe.db.count(
-        "Attendance",
-        {"employee": emp, "early_exit": 1, "attendance_date": ["between", [start, end]]},
-    )
-    # Totals are exposed at the TOP LEVEL because the SPA's MonthlyAttendanceView
-    # reads ``summary.worked_days`` / ``payable_days`` / ``late_count`` /
-    # ``absent_count`` / ``leave_days`` / ``overtime_hours`` directly off the
-    # response object. Previously they were nested under ``summary`` (and used
-    # different keys: late_days/absent/leave) so every tile resolved to 0.
-    worked_days = _count("Present") + 0.5 * _count("Half Day")
-    late_count = frappe.db.count(
-        "Attendance",
-        {"employee": emp, "late_entry": 1, "attendance_date": ["between", [start, end]]},
-    )
-    absent_count = _count("Absent")
-    leave_days = _count("On Leave")
-    overtime_hours = _monthly_overtime_hours(rows)
+
     return {
         "employee": emp,
         "year": y,
         "month": m,
-        # Top-level totals — the SPA contract (MonthlyAttendanceView tiles).
+        # Top-level totals — the SPA contract (AttendanceView check-in tiles +
+        # DashboardView KPIs). All Work-Session aggregates, capped at today.
         "worked_days": worked_days,
         "payable_days": worked_days,
         "late_count": late_count,
         "absent_count": absent_count,
         "leave_days": leave_days,
-        "overtime_hours": overtime_hours,
+        "overtime_hours": round(overtime_hours, 2),
+        # Tile extras for the check-in screen (AttendanceView summaryRows).
+        "worked_minutes": round(worked_minutes),
+        "late_minutes": round(late_minutes),
+        "early_leave_count": early_count,
+        "early_leave_minutes": round(early_minutes),
+        "missing_checkout_count": missing_checkout_count,
         # Nested view kept for other consumers / future use (key names unchanged).
         "summary": {
-            "present": _count("Present"),
+            "present": worked_days,
             "absent": absent_count,
             "leave": leave_days,
-            "half_day": _count("Half Day"),
+            "half_day": 0,
             "worked_days": worked_days,
             "payable_days": worked_days,
             "late_days": late_count,
-            "early_exit_days": early_exit_days,
-            "overtime_hours": overtime_hours,
+            "early_exit_days": early_count,
+            "overtime_hours": round(overtime_hours, 2),
         },
         "rows": rows,
     }

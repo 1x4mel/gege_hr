@@ -1418,12 +1418,22 @@ def _shift_assignment_summary(light_rows) -> dict:
     }
 
 
-def _shift_assignment_row(row) -> dict:
-    """Augment a raw DB row with display_status + is_cancelled + work_location."""
+def _shift_assignment_row(row, with_can_delete: bool = False) -> dict:
+    """Augment a raw DB row with display_status + is_cancelled + work_location.
+
+    ``with_can_delete=True`` (admin list) also resolves ``has_checkin_data`` /
+    ``can_delete`` from linked Employee Checkin / Attendance counts, so the SPA
+    can hide the destructive Xoá button for assignments with attendance history
+    (Frappe-standard: those may only be Ngưng / Đóng, never deleted).
+    """
     row["display_status"] = _shift_display_status(row)
     row["is_cancelled"] = row.get("docstatus") == 2
     if "work_location" not in row:
         row["work_location"] = row.get("vn_work_location") or ""
+    if with_can_delete:
+        counts = _shift_assignment_linked_counts(row)
+        row["has_checkin_data"] = (counts["checkin_count"] + counts["attendance_count"]) > 0
+        row["can_delete"] = not row["has_checkin_data"]
     return row
 
 
@@ -1579,16 +1589,24 @@ def _shift_assignment_linked_counts(row: dict) -> dict:
     the SPA detail drawer's ``can`` hints (why a close/amend is blocked). Accepts
     a plain dict row so it works behind both ``get_doc`` and ``get_value``.
     """
-    start = row.get("start_date")
-    end = row.get("end_date") or start
+
+    # Tolerates both dict rows (list projections) and Document/FakeDoc objects
+    # (attribute access) — mirrors _assert_shift_assignment_cancel_safe.
+    def _g(k):
+        if isinstance(row, dict):
+            return row.get(k)
+        return getattr(row, k, None)
+
+    start = _g("start_date")
+    end = _g("end_date") or start
 
     def _count(doctype: str, date_field: str) -> int:
         try:
             rows = frappe.db.get_all(
                 doctype,
                 filters={
-                    "employee": row.get("employee"),
-                    "shift": row.get("shift_type"),
+                    "employee": _g("employee"),
+                    "shift": _g("shift_type"),
                     date_field: ["between", [start, end]],
                 },
                 pluck="name",
@@ -2097,7 +2115,7 @@ def list_shift_assignments(
             frappe.log_error(title="admin.list_shift_assignments failed")
             rows = []
         return {
-            "data": _apply_work_location_fallback([_shift_assignment_row(r) for r in rows]),
+            "data": _apply_work_location_fallback([_shift_assignment_row(r, True) for r in rows]),
             "total": summary["total"],
             "summary": summary,
         }
@@ -2116,7 +2134,7 @@ def list_shift_assignments(
         )
     except Exception:
         rows = []
-    return _apply_work_location_fallback([_shift_assignment_row(r) for r in rows])
+    return _apply_work_location_fallback([_shift_assignment_row(r, True) for r in rows])
 
 
 @frappe.whitelist()
@@ -2332,6 +2350,20 @@ def _create_shift_assignment_core(
     doc = frappe.get_doc(payload)
     doc.insert()
     doc.submit()
+
+    # materialise ngay khi gan ca — sinh phiên ca cho phần [start..today] thay
+    # vì đợi job 00:00 (chỉ nhìn về phía trước). Sự cố thực tế 2026-09-11: gán
+    # ca lùi từ 01/09 → 10 ngày không có phiên ca → popup sửa chấm công báo
+    # "chưa được gán ca". Idempotent — ngày đã có phiên sẽ bị bỏ qua.
+    try:
+        from gege_hr.gege_hr.api.shift import _materialise_shift_instances
+
+        today = getdate()
+        mat_end = min(today, end) if end else today
+        if start <= mat_end:
+            _materialise_shift_instances(from_date=start, to_date=mat_end, employee=employee)
+    except Exception:
+        frappe.log_error(title="create_shift_assignment: materialise instances failed")
 
     _audit_admin(
         _("Gán ca làm việc {0} cho {1}").format(shift_type, employee),
@@ -2606,6 +2638,15 @@ def delete_shift_assignment(name: str) -> dict:
     doc = frappe.get_doc("Shift Assignment", name)
     if doc.docstatus not in (0, 2):
         frappe.throw(_("Chỉ ca đã huỷ mới xoá được. Hãy huỷ ca trước."))
+    # An toàn dữ liệu (chuẩn Frappe): ca đã sinh chấm công / điểm danh thì
+    # KHÔNG bao giờ được xoá — lịch sử chấm công phụ thuộc span của ca.
+    counts = _shift_assignment_linked_counts(doc)
+    if counts["checkin_count"] or counts["attendance_count"]:
+        frappe.throw(
+            _(
+                "Ca đã có dữ liệu chấm công ({0} check-in, {1} điểm danh) — chỉ được Ngưng hoặc Đóng, không thể xoá."
+            ).format(counts["checkin_count"], counts["attendance_count"])
+        )
     employee = doc.employee
     company = doc.company or _company_for_employee(doc.employee)
     try:
@@ -2899,14 +2940,6 @@ def override_day_shift_assignment(
         work_location=wl or None,
     )
     created.append(one_day.get("name") if isinstance(one_day, dict) else one_day)
-
-    # Materialise the day's shift instance now (don't wait for the scheduler).
-    try:
-        from gege_hr.gege_hr.api.shift import _materialise_shift_instances
-
-        _materialise_shift_instances(from_date=day, to_date=day, employee=employee)
-    except Exception:
-        pass
 
     _audit_admin(
         _("Đổi ca ngày {0} của {1} sang {2}").format(day, employee, shift_type),

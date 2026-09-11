@@ -1166,14 +1166,18 @@ def test_c19_swap_happy_path(admin):
     db.exists_set.update(
         {("Employee", "E-1"), ("Employee", "E-2"), ("Shift Type", "Day"), ("Shift Type", "Evening")}
     )
+    # Relative dates: swap_shift_days compares against the REAL getdate() —
+    # hardcoded 2026-09-10/11 went stale on 2026-09-11 (past-day throw path).
+    _c19_tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+    _c19_day_after = (datetime.date.today() + datetime.timedelta(days=2)).isoformat()
     db.values[("VN Employee Shift Instance", "V-1")] = {
         "employee": "E-1",
-        "work_date": "2026-09-10",
+        "work_date": _c19_tomorrow,
         "shift_type": "Day",
     }
     db.values[("VN Employee Shift Instance", "V-2")] = {
         "employee": "E-2",
-        "work_date": "2026-09-11",
+        "work_date": _c19_day_after,
         "shift_type": "Evening",
     }
     res = mod.swap_shift_days("V-1", "V-2")
