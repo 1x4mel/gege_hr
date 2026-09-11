@@ -2350,6 +2350,20 @@ def _create_shift_assignment_core(
     doc.insert()
     doc.submit()
 
+    # materialise ngay khi gan ca — sinh phiên ca cho phần [start..today] thay
+    # vì đợi job 00:00 (chỉ nhìn về phía trước). Sự cố thực tế 2026-09-11: gán
+    # ca lùi từ 01/09 → 10 ngày không có phiên ca → popup sửa chấm công báo
+    # "chưa được gán ca". Idempotent — ngày đã có phiên sẽ bị bỏ qua.
+    try:
+        from gege_hr.gege_hr.api.shift import _materialise_shift_instances
+
+        today = getdate()
+        mat_end = min(today, end) if end else today
+        if start <= mat_end:
+            _materialise_shift_instances(from_date=start, to_date=mat_end, employee=employee)
+    except Exception:
+        frappe.log_error(title="create_shift_assignment: materialise instances failed")
+
     _audit_admin(
         _("Gán ca làm việc {0} cho {1}").format(shift_type, employee),
         reference_doctype="Shift Assignment",
@@ -2925,14 +2939,6 @@ def override_day_shift_assignment(
         work_location=wl or None,
     )
     created.append(one_day.get("name") if isinstance(one_day, dict) else one_day)
-
-    # Materialise the day's shift instance now (don't wait for the scheduler).
-    try:
-        from gege_hr.gege_hr.api.shift import _materialise_shift_instances
-
-        _materialise_shift_instances(from_date=day, to_date=day, employee=employee)
-    except Exception:
-        pass
 
     _audit_admin(
         _("Đổi ca ngày {0} của {1} sang {2}").format(day, employee, shift_type),
