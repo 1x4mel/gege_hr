@@ -3618,7 +3618,22 @@ def _upsert_employee_checkin(employee: str, docname: str | None, log_type: str, 
     if not docname:
         docname = _find_existing_checkin(employee, log_type, utc_time_str)
     if docname and frappe.db.exists("Employee Checkin", docname):
+        # FIX 2026-09-11: admin xác nhận giờ bằng tay = lượt chấm THẬT. Nếu row
+        # đang sửa là lượt OUT "giả" của auto-close (vn_auto_generated=1) mà chỉ
+        # đè time, marker còn sót → recalc vẫn gắn vn_auto_checkout=1 → UI che
+        # giờ ra thành "--:--" dù admin đã sửa + đóng ticket quên chấm ra.
         frappe.db.set_value("Employee Checkin", docname, "time", utc_time_str, update_modified=False)
+        frappe.db.set_value("Employee Checkin", docname, "vn_auto_generated", 0, update_modified=False)
+        # Xoá luôn cờ session cùng ngày (phòng thủ: job recalc trên worker nền
+        # có thể còn chạy bản code cũ chỉ ghi cờ 1, không bao giờ ghi 0).
+        _day = frappe.utils.getdate(utc_time_str)
+        frappe.db.set_value(
+            "VN Attendance Work Session",
+            {"employee": employee, "work_date": _day},
+            "vn_auto_checkout",
+            0,
+            update_modified=False,
+        )
         try:
             doc = frappe.get_doc("Employee Checkin", docname)
             att_api.on_employee_checkin_create(doc)
