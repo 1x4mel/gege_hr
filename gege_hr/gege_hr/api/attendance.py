@@ -1422,17 +1422,37 @@ def _day_detail_core(emp: str, day: date) -> dict:
     work_session = _ws_payload(ws_rows[0]) if ws_rows else None
 
     # Raw punches — reuse the portal-wall day window helper (attribute rows).
-    punches = [
-        {
-            "name": p.get("name"),
-            "time": str(p.get("time")) if p.get("time") else None,
-            "log_type": p.get("log_type"),
-            "device_id": p.get("device_id"),
-            "latitude": p.get("latitude"),
-            "longitude": p.get("longitude"),
-        }
-        for p in _checkins_for(emp, day)
-    ]
+    # `prev_session=True` với lượt chấm TRƯỚC giờ bắt đầu ca của ngày (ca qua
+    # đêm hôm trước kết thúc sáng nay — vd Ra 10:00 sáng 10/09 thuộc phiên
+    # 09/09, không phải giờ ra của ca 10/09) — để UI gắn nhãn tránh hiểu nhầm
+    # "đã có giờ ra mà vẫn báo quên chấm ra".
+    # Ngưỡng 4h: đến sớm hợp lý (vd 20:33 cho ca 21:00) vẫn thuộc ca này;
+    # lượt chấm sáng sớm (vd Ra 10:00 trước ca 21:00 tới 11h) mới là của
+    # phiên ca đêm hôm trước.
+    _ps = (work_session or {}).get("planned_start")
+    _ps_str = str(_ps)[:16] if _ps else None
+    _cutoff = None
+    if _ps_str:
+        try:
+            from datetime import datetime as _dt, timedelta as _td
+
+            _cutoff = (_dt.fromisoformat(_ps_str) - _td(minutes=240)).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            _cutoff = None
+    punches = []
+    for p in _checkins_for(emp, day):
+        t = str(p.get("time") or "")[:16]
+        punches.append(
+            {
+                "name": p.get("name"),
+                "time": str(p.get("time")) if p.get("time") else None,
+                "log_type": p.get("log_type"),
+                "device_id": p.get("device_id"),
+                "latitude": p.get("latitude"),
+                "longitude": p.get("longitude"),
+                "prev_session": bool(_cutoff and t and t < _cutoff),
+            }
+        )
 
     try:
         corrections = frappe.db.get_all(
