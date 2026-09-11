@@ -30,9 +30,7 @@ def _build_stub_frappe():
     mod.whitelist = lambda fn=None, **kw: fn if fn is not None else (lambda f: f)
 
     utils = types.ModuleType("frappe.utils")
-    utils.getdate = lambda v=None: (
-        dt.date.today() if v in (None, "") else dt.date.fromisoformat(str(v)[:10])
-    )
+    utils.getdate = lambda v=None: dt.date.today() if v in (None, "") else dt.date.fromisoformat(str(v)[:10])
     utils.now_datetime = lambda: dt.datetime(2026, 9, 11, 8, 0, 0)
     mod.utils = utils
 
@@ -184,8 +182,13 @@ def test_board_composes_shifts_leaves_and_counts(fake):
         _inst("SI-2", "HR-EMP-00002", TOMORROW, "Ca tối"),
     ]
     fake.leaves = [
-        {"employee": "HR-EMP-00002", "from_date": TOMORROW, "to_date": DAY_AFTER,
-         "leave_type": "Phép ốm", "status": "Approved"},
+        {
+            "employee": "HR-EMP-00002",
+            "from_date": TOMORROW,
+            "to_date": DAY_AFTER,
+            "leave_type": "Phép ốm",
+            "status": "Approved",
+        },
     ]
     fake.holidays = [{"holiday_date": DAY_AFTER, "description": "Lễ"}]
 
@@ -204,8 +207,13 @@ def test_board_composes_shifts_leaves_and_counts(fake):
 def test_board_scheduled_day_wins_over_overlapping_leave(fake):
     fake.instances = [_inst("SI-1", "HR-EMP-00001", TOMORROW, "Ca sáng")]
     fake.leaves = [
-        {"employee": "HR-EMP-00001", "from_date": TOMORROW, "to_date": TOMORROW,
-         "leave_type": "Phép năm", "status": "Open"},
+        {
+            "employee": "HR-EMP-00001",
+            "from_date": TOMORROW,
+            "to_date": TOMORROW,
+            "leave_type": "Phép năm",
+            "status": "Open",
+        },
     ]
     out = fake.api.board(TOMORROW, TOMORROW)
     days = {e["employee"]: e["days"] for e in out["employees"]}
@@ -218,7 +226,11 @@ def test_board_scheduled_day_wins_over_overlapping_leave(fake):
 # --------------------------------------------------------------------------- #
 def test_create_swap_rejects_foreign_instance(fake):
     fake.values = {
-        ("VN Employee Shift Instance", "SI-OTHER"): {"employee": "HR-EMP-00002", "work_date": TOMORROW, "shift_type": "Ca tối"},
+        ("VN Employee Shift Instance", "SI-OTHER"): {
+            "employee": "HR-EMP-00002",
+            "work_date": TOMORROW,
+            "shift_type": "Ca tối",
+        },
     }
     with pytest.raises(_FrappeError):
         fake.api.create_swap_request(
@@ -228,8 +240,16 @@ def test_create_swap_rejects_foreign_instance(fake):
 
 def test_create_swap_rejects_past_date(fake):
     fake.values = {
-        ("VN Employee Shift Instance", "SI-A"): {"employee": "HR-EMP-00001", "work_date": YESTERDAY, "shift_type": "Ca sáng"},
-        ("VN Employee Shift Instance", "SI-B"): {"employee": "HR-EMP-00002", "work_date": TOMORROW, "shift_type": "Ca tối"},
+        ("VN Employee Shift Instance", "SI-A"): {
+            "employee": "HR-EMP-00001",
+            "work_date": YESTERDAY,
+            "shift_type": "Ca sáng",
+        },
+        ("VN Employee Shift Instance", "SI-B"): {
+            "employee": "HR-EMP-00002",
+            "work_date": TOMORROW,
+            "shift_type": "Ca tối",
+        },
     }
     with pytest.raises(_FrappeError):
         fake.api.create_swap_request(
@@ -239,8 +259,16 @@ def test_create_swap_rejects_past_date(fake):
 
 def test_create_swap_rejects_short_reason(fake):
     fake.values = {
-        ("VN Employee Shift Instance", "SI-A"): {"employee": "HR-EMP-00001", "work_date": TOMORROW, "shift_type": "Ca sáng"},
-        ("VN Employee Shift Instance", "SI-B"): {"employee": "HR-EMP-00002", "work_date": DAY_AFTER, "shift_type": "Ca tối"},
+        ("VN Employee Shift Instance", "SI-A"): {
+            "employee": "HR-EMP-00001",
+            "work_date": TOMORROW,
+            "shift_type": "Ca sáng",
+        },
+        ("VN Employee Shift Instance", "SI-B"): {
+            "employee": "HR-EMP-00002",
+            "work_date": DAY_AFTER,
+            "shift_type": "Ca tối",
+        },
     }
     with pytest.raises(_FrappeError):
         fake.api.create_swap_request(from_instance="SI-A", target_instance="SI-B", reason="ok")
@@ -248,8 +276,16 @@ def test_create_swap_rejects_short_reason(fake):
 
 def test_create_swap_success(fake):
     fake.values = {
-        ("VN Employee Shift Instance", "SI-A"): {"employee": "HR-EMP-00001", "work_date": TOMORROW, "shift_type": "Ca sáng"},
-        ("VN Employee Shift Instance", "SI-B"): {"employee": "HR-EMP-00002", "work_date": DAY_AFTER, "shift_type": "Ca tối"},
+        ("VN Employee Shift Instance", "SI-A"): {
+            "employee": "HR-EMP-00001",
+            "work_date": TOMORROW,
+            "shift_type": "Ca sáng",
+        },
+        ("VN Employee Shift Instance", "SI-B"): {
+            "employee": "HR-EMP-00002",
+            "work_date": DAY_AFTER,
+            "shift_type": "Ca tối",
+        },
     }
     out = fake.api.create_swap_request(
         from_instance="SI-A", target_instance="SI-B", reason="Có việc gia đình"

@@ -1589,6 +1589,7 @@ def _shift_assignment_linked_counts(row: dict) -> dict:
     the SPA detail drawer's ``can`` hints (why a close/amend is blocked). Accepts
     a plain dict row so it works behind both ``get_doc`` and ``get_value``.
     """
+
     # Tolerates both dict rows (list projections) and Document/FakeDoc objects
     # (attribute access) — mirrors _assert_shift_assignment_cancel_safe.
     def _g(k):
@@ -2642,9 +2643,9 @@ def delete_shift_assignment(name: str) -> dict:
     counts = _shift_assignment_linked_counts(doc)
     if counts["checkin_count"] or counts["attendance_count"]:
         frappe.throw(
-            _("Ca đã có dữ liệu chấm công ({0} check-in, {1} điểm danh) — chỉ được Ngưng hoặc Đóng, không thể xoá.").format(
-                counts["checkin_count"], counts["attendance_count"]
-            )
+            _(
+                "Ca đã có dữ liệu chấm công ({0} check-in, {1} điểm danh) — chỉ được Ngưng hoặc Đóng, không thể xoá."
+            ).format(counts["checkin_count"], counts["attendance_count"])
         )
     employee = doc.employee
     company = doc.company or _company_for_employee(doc.employee)

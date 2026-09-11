@@ -33,9 +33,7 @@ _HR_ROLES = ("HR Manager", "System Manager")
 
 
 def _viewer_employee() -> str:
-    emp = frappe.db.get_value(
-        "Employee", {"user_id": frappe.session.user, "status": "Active"}, "name"
-    )
+    emp = frappe.db.get_value("Employee", {"user_id": frappe.session.user, "status": "Active"}, "name")
     if not emp:
         frappe.throw(_("Tài khoản không liên kết nhân viên."), frappe.PermissionError)
     return emp

@@ -67,7 +67,11 @@ def _viewer() -> dict:
             _("Tài khoản không liên kết nhân viên — không xem được bảng lịch."),
             frappe.PermissionError,
         )
-    return {"employee": emp.name if emp else None, "employee_name": emp.employee_name if emp else "", "is_hr": is_hr}
+    return {
+        "employee": emp.name if emp else None,
+        "employee_name": emp.employee_name if emp else "",
+        "is_hr": is_hr,
+    }
 
 
 def _viewer_employee() -> str:
@@ -105,8 +109,6 @@ def board(from_date: str | None = None, to_date: str | None = None) -> dict:
         order_by="employee_name",
         limit_page_length=0,
     )
-    by_emp = {e.name: e for e in emps}
-
     instances = frappe.get_all(
         "VN Employee Shift Instance",
         filters={
@@ -239,9 +241,7 @@ def create_swap_request(
     if not a or not b:
         frappe.throw(_("Không tìm thấy phiên ca cần hoán đổi."))
     if a["employee"] != emp:
-        frappe.throw(
-            _("Chỉ được đề xuất đổi ca của chính mình."), frappe.PermissionError
-        )
+        frappe.throw(_("Chỉ được đề xuất đổi ca của chính mình."), frappe.PermissionError)
     if a["employee"] == b["employee"]:
         frappe.throw(_("Không thể đổi ca với chính mình."))
     today = getdate()

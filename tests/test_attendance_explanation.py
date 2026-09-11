@@ -195,7 +195,13 @@ def expl(monkeypatch):
             self.saved = True
             return self
 
-    monkeypatch.setattr(mod, "get_doc", lambda payload_or_name, name=None: _Doc(payload_or_name) if isinstance(payload_or_name, dict) else _loaded[(payload_or_name, name)])
+    monkeypatch.setattr(
+        mod,
+        "get_doc",
+        lambda payload_or_name, name=None: (
+            _Doc(payload_or_name) if isinstance(payload_or_name, dict) else _loaded[(payload_or_name, name)]
+        ),
+    )
     _loaded = {}
     return ex, _loaded, created, mod
 
@@ -214,6 +220,7 @@ def test_decide_missing_ticket(expl):
 
 def test_decide_approve_flow(expl):
     ex, loaded, _, mod = expl
+
     class _Loaded:
         name = "EX-1"
         status = "Open"
