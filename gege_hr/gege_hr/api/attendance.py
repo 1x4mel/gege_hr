@@ -309,8 +309,8 @@ def _session_context(shift: dict | None, checkins: list[dict], now_local: dateti
         "checkout_status": checkout_status,
         "overtime_minutes": overtime_minutes,
         "early_exit_minutes": early_exit_minutes,
-        "actual_checkin": tz_utils.utc_iso(actual_in) if actual_in else None,
-        "actual_checkout": tz_utils.utc_iso(actual_out) if actual_out else None,
+        "actual_checkin": actual_in.isoformat() if actual_in else None,  # PORTAL WALL, no Z
+        "actual_checkout": actual_out.isoformat() if actual_out else None,  # PORTAL WALL, no Z
         "elapsed_minutes": elapsed,
         "remaining_minutes": remaining,
         "planned_duration_minutes": int(max(0, (planned_end - planned_start).total_seconds() / 60.0)),
