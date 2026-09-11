@@ -1064,8 +1064,10 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
 
     payload = _ws_payload(si, calc, policy)
     payload["review_reason"] = "\n".join(review_reasons) if review_reasons else None
-    if auto_checkout_flag:
-        payload["vn_auto_checkout"] = 1
+    # FIX 2026-09-11: ghi tường minh 0/1 mỗi lần recalc. Trước đây chỉ thêm key
+    # khi =1 — cờ 1 cũ KHÔNG BAO GIỜ được xoá (admin sửa giờ lượt OUT giả của
+    # auto-close → marker đã sạch nhưng cờ session vẫn 1 → UI che "--:--").
+    payload["vn_auto_checkout"] = 1 if auto_checkout_flag else 0
 
     if ws_name:
         ws = frappe.get_doc("VN Attendance Work Session", ws_name)
