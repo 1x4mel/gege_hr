@@ -145,6 +145,31 @@ def _clean_values(values) -> dict:
     return {k: v for k, v in values.items() if k not in _META_KEYS}
 
 
+# Leave Type: UI "Cài đặt" dùng cột tick `is_paid_leave` ("Có lương") — KHÔNG có
+# cột DB nào như vậy trên Leave Type, nên trước đây tick/bỏ tick bị lặng lẽ bỏ
+# qua (list qua _safe_fields bỏ field, save đeo attr không lưu). Cột chuẩn của
+# HRMS là `is_lwp` (Leave Without Pay) với NGHĨA NGƯỢC: có lương ⟺ is_lwp = 0.
+_LEAVE_TYPE_PAID_ALIAS = "is_paid_leave"
+
+
+def _alias_requested(doctype: str, fields) -> bool:
+    if doctype != "Leave Type":
+        return False
+    if isinstance(fields, str):
+        fields = [f for f in fields.split(",") if f]
+    return bool(fields) and _LEAVE_TYPE_PAID_ALIAS in {str(f).strip() for f in fields}
+
+
+def _apply_paid_alias(row) -> None:
+    """Gắn `is_paid_leave` = NOT is_lwp lên một row dict (list/get)."""
+    try:
+        # Không dùng cint từ frappe.utils: bench-free unit test stub cả module
+        # đó — giá trị tới từ JSON/DB chỉ là 0/1/bool nên chân trị là đủ.
+        row[_LEAVE_TYPE_PAID_ALIAS] = 0 if row.get("is_lwp") else 1
+    except Exception:
+        pass
+
+
 @frappe.whitelist()
 def list_catalog_masters(doctype: str, fields=None, search: str = "", limit: int = 200) -> list[dict]:
     """Return a field projection of a catalog DocType.
@@ -161,20 +186,27 @@ def list_catalog_masters(doctype: str, fields=None, search: str = "", limit: int
     # field that has no DB column (e.g. `is_paid_leave` on a Leave Type whose
     # column was never created) is dropped instead of raising
     # OperationalError 1054 "Unknown column". Always includes `name`.
+    wants_alias = _alias_requested(doctype, fields)
     fields = _safe_fields(doctype, fields)
+    if wants_alias and "is_lwp" not in fields:
+        fields.append("is_lwp")
 
     filters = []
     search = (search or "").strip()
     if search:
         filters.append(["name", "like", f"%{search}%"])
 
-    return frappe.get_all(
+    rows = frappe.get_all(
         doctype,
         fields=fields,
         filters=filters or None,
         limit_page_length=limit,
         order_by="name asc",
     )
+    if wants_alias:
+        for row in rows:
+            _apply_paid_alias(row)
+    return rows
 
 
 @frappe.whitelist()
@@ -187,7 +219,10 @@ def get_catalog_master(doctype: str, name: str) -> dict:
     if not name or not frappe.db.exists(doctype, name):
         frappe.throw(_('{0} "{1}" không tồn tại.').format(doctype, name))
     doc = frappe.get_doc(doctype, name)
-    return doc.as_dict()
+    out = doc.as_dict()
+    if doctype == "Leave Type":
+        _apply_paid_alias(out)
+    return out
 
 
 @frappe.whitelist()
@@ -205,6 +240,8 @@ def save_catalog_master(doctype: str, values=None, is_new: int = 0) -> dict:
     _require_writable(doctype)
 
     payload = _clean_values(values)
+    if doctype == "Leave Type" and _LEAVE_TYPE_PAID_ALIAS in payload:
+        payload["is_lwp"] = 0 if payload.pop(_LEAVE_TYPE_PAID_ALIAS) else 1
     name = (payload.pop("name", "") or "").strip()
     created = bool(int(is_new or 0)) or not name
 
