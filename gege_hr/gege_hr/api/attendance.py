@@ -426,7 +426,7 @@ def _window_violation(shift, log_type: str, at) -> dict | None:
             return {
                 "type": "Late Check-in",
                 "minutes": m,
-                "message": "Đi muộn {0} phút (quá mức cho phép)".format(m),
+                "message": f"Đi muộn {m} phút (quá mức cho phép)",
             }
         early = (ps - at).total_seconds() / 60.0
         if early > _shift_minutes("vn_earliest_checkin_minutes", 60):
@@ -434,7 +434,7 @@ def _window_violation(shift, log_type: str, at) -> dict | None:
             return {
                 "type": "Early Check-in (OT)",
                 "minutes": m,
-                "message": "Đến sớm {0} phút — cần giải trình để tính tăng ca".format(m),
+                "message": f"Đến sớm {m} phút — cần giải trình để tính tăng ca",
             }
         return None
     early = (pe - at).total_seconds() / 60.0
@@ -443,7 +443,7 @@ def _window_violation(shift, log_type: str, at) -> dict | None:
         return {
             "type": "Early Check-out",
             "minutes": m,
-            "message": "Về sớm {0} phút (quá mức cho phép)".format(m),
+            "message": f"Về sớm {m} phút (quá mức cho phép)",
         }
     late = (at - pe).total_seconds() / 60.0
     if late > _shift_minutes("vn_max_checkout_after_end_minutes", 360):
@@ -451,7 +451,7 @@ def _window_violation(shift, log_type: str, at) -> dict | None:
         return {
             "type": "Late Check-out (OT)",
             "minutes": m,
-            "message": "Check-out trễ {0} phút — cần giải trình để tính tăng ca".format(m),
+            "message": f"Check-out trễ {m} phút — cần giải trình để tính tăng ca",
         }
     return None
 
@@ -566,9 +566,9 @@ def mobile_checkin(
     violation = _window_violation(shift, log_type, server_now)
     if violation and not (reason or "").strip():
         frappe.throw(
-            _("CẦN GIẢI TRÌNH — {0}. Nhập lý do để hoàn tất lượt chấm; phiếu giải trình sẽ gửi tới HR.").format(
-                violation["message"]
-            ),
+            _(
+                "CẦN GIẢI TRÌNH — {0}. Nhập lý do để hoàn tất lượt chấm; phiếu giải trình sẽ gửi tới HR."
+            ).format(violation["message"]),
             frappe.ValidationError,
         )
 
@@ -1119,30 +1119,81 @@ def my_monthly_summary(
 ) -> dict:
     """Plan §10.2 — monthly worked/payable/late/absent/leave/OT totals.
 
-    Milestone-1 uses Attendance (Frappe HR) counts; the Work-Session engine
-    (M2) will replace these with precise payable/OT figures. Until then OT is
-    estimated per-day from out_time vs the shift planned end (see
-    ``_monthly_overtime_hours``).
+    FIX 2026-09-11 — aggregate from VN Attendance Work Sessions (engine truth)
+    instead of core ``Attendance`` rows, for two reasons found in production:
+    1. The sync projection (``build_attendance_fields``) never writes
+       late_entry / early_exit / working-hours onto Attendance, so every
+       Attendance-based counter (đi muộn, về sớm, OT) was permanently 0.
+    2. A whole-month ``backfill_attendance`` run created Present rows for
+       FUTURE dates — on 11/09 the tile showed "30 ca". The stat window is
+       now capped at today: a planned-only session (no punches yet) can
+       never count as worked.
     """
     emp = _resolve_employee(employee)
     now = tz_utils.now_in_portal()
     y, m = _parse_year_month(year, month, now)
     start = date(y, m, 1)
-    # Inclusive end = LAST day of the month. Frappe's ``between`` is inclusive on
-    # both bounds, so using the first day of the next month pulls in one extra
-    # day (e.g. 2026-08-01) and inflates the counts (32 "worked days" for July,
-    # which only has 31). Subtract one day to land on the actual month end.
     next_first = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
     end = next_first - timedelta(days=1)
+    # Session kế hoạch cho ngày tương lai không được tính vào thống kê.
+    stat_end = min(end, now.date())
 
-    def _count(status):
-        return frappe.db.count(
-            "Attendance", {"employee": emp, "status": status, "attendance_date": ["between", [start, end]]}
+    worked_days = 0
+    worked_minutes = 0.0
+    late_count = 0
+    late_minutes = 0.0
+    early_count = 0
+    early_minutes = 0.0
+    overtime_hours = 0.0
+    absent_count = 0
+    leave_days = 0
+    missing_checkout_count = 0
+    if start <= stat_end:
+        ws_rows = frappe.db.get_all(
+            "VN Attendance Work Session",
+            filters={
+                "employee": emp,
+                "work_date": ["between", [start, stat_end]],
+                "docstatus": ["!=", 2],
+            },
+            fields=[
+                "actual_checkin",
+                "actual_checkout",
+                "late_minutes",
+                "early_leave_minutes",
+                "total_actual_hours",
+                "raw_overtime_hours",
+                "approved_overtime_hours",
+                "absent",
+                "has_leave",
+                "missing_checkout",
+            ],
         )
+        for r in ws_rows:
+            if r.get("actual_checkin") or r.get("actual_checkout"):
+                worked_days += 1
+            worked_minutes += flt(r.get("total_actual_hours") or 0) * 60
+            lm = flt(r.get("late_minutes") or 0)
+            if lm > 0:
+                late_count += 1
+            late_minutes += lm
+            em = flt(r.get("early_leave_minutes") or 0)
+            if em > 0:
+                early_count += 1
+            early_minutes += em
+            overtime_hours += flt(r.get("approved_overtime_hours") or r.get("raw_overtime_hours") or 0)
+            if r.get("absent"):
+                absent_count += 1
+            if r.get("has_leave"):
+                leave_days += 1
+            if r.get("missing_checkout"):
+                missing_checkout_count += 1
 
+    # Legacy rows view (core Attendance) kept for compatibility consumers;
+    # bounded to stat_end so seeded future rows never leak into month views.
     rows = frappe.db.get_all(
         "Attendance",
-        filters={"employee": emp, "attendance_date": ["between", [start, end]]},
+        filters={"employee": emp, "attendance_date": ["between", [start, stat_end]]},
         fields=[
             "attendance_date",
             "status",
@@ -1155,45 +1206,36 @@ def my_monthly_summary(
         ],
         order_by="attendance_date desc",
     )
-    early_exit_days = frappe.db.count(
-        "Attendance",
-        {"employee": emp, "early_exit": 1, "attendance_date": ["between", [start, end]]},
-    )
-    # Totals are exposed at the TOP LEVEL because the SPA's MonthlyAttendanceView
-    # reads ``summary.worked_days`` / ``payable_days`` / ``late_count`` /
-    # ``absent_count`` / ``leave_days`` / ``overtime_hours`` directly off the
-    # response object. Previously they were nested under ``summary`` (and used
-    # different keys: late_days/absent/leave) so every tile resolved to 0.
-    worked_days = _count("Present") + 0.5 * _count("Half Day")
-    late_count = frappe.db.count(
-        "Attendance",
-        {"employee": emp, "late_entry": 1, "attendance_date": ["between", [start, end]]},
-    )
-    absent_count = _count("Absent")
-    leave_days = _count("On Leave")
-    overtime_hours = _monthly_overtime_hours(rows)
+
     return {
         "employee": emp,
         "year": y,
         "month": m,
-        # Top-level totals — the SPA contract (MonthlyAttendanceView tiles).
+        # Top-level totals — the SPA contract (AttendanceView check-in tiles +
+        # DashboardView KPIs). All Work-Session aggregates, capped at today.
         "worked_days": worked_days,
         "payable_days": worked_days,
         "late_count": late_count,
         "absent_count": absent_count,
         "leave_days": leave_days,
-        "overtime_hours": overtime_hours,
+        "overtime_hours": round(overtime_hours, 2),
+        # Tile extras for the check-in screen (AttendanceView summaryRows).
+        "worked_minutes": round(worked_minutes),
+        "late_minutes": round(late_minutes),
+        "early_leave_count": early_count,
+        "early_leave_minutes": round(early_minutes),
+        "missing_checkout_count": missing_checkout_count,
         # Nested view kept for other consumers / future use (key names unchanged).
         "summary": {
-            "present": _count("Present"),
+            "present": worked_days,
             "absent": absent_count,
             "leave": leave_days,
-            "half_day": _count("Half Day"),
+            "half_day": 0,
             "worked_days": worked_days,
             "payable_days": worked_days,
             "late_days": late_count,
-            "early_exit_days": early_exit_days,
-            "overtime_hours": overtime_hours,
+            "early_exit_days": early_count,
+            "overtime_hours": round(overtime_hours, 2),
         },
         "rows": rows,
     }
