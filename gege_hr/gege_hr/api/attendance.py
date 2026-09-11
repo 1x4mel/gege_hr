@@ -1966,10 +1966,27 @@ def _leave_meta_one(employee: str, day) -> dict | None:
     return _team_leave_by([employee], day).get(employee)
 
 
-def _checkout_miss_meta_one(employee: str) -> dict | None:
+def _checkout_miss_meta_one(employee: str, work_date: str | None = None) -> dict | None:
+    """Ticket "quên chấm ra" MỚI NHẤT của nhân viên — lọc theo ngày drawer.
+
+    FIX 2026-09-11: trước đây trả ticket bất kể ngày → ticket của phiên khác
+    (vd 03/09 ca đêm) hiện trên drawer của MỌI ngày (02/09 thiếu công cũng
+    hiện "Quên chấm ra" gây hiểu nhầm). Giờ chỉ hiện khi ngày drawer khớp
+    work_date của ticket, hoặc ngày hôm sau (ca qua đêm kết thúc sáng hôm sau).
+    """
     r = _team_checkout_miss_by([employee]).get(employee)
     if not r:
         return None
+    if work_date:
+        cm_day = str(r.get("work_date") or "")
+        try:
+            from frappe.utils import getdate as _gd
+
+            next_day = (_gd(cm_day) + timedelta(days=1)).isoformat() if cm_day else None
+        except Exception:
+            next_day = None
+        if work_date not in (cm_day, next_day):
+            return None
     return {
         "name": r.get("name"),
         "status": r.get("status"),
@@ -2027,7 +2044,7 @@ def team_member_day_detail(employee: str | None = None, date_str: str | None = N
         "status": status,
         "shift": _shift_meta_one(emp, day),
         "leave_application": _leave_meta_one(emp, day),
-        "checkout_miss": _checkout_miss_meta_one(emp),
+        "checkout_miss": _checkout_miss_meta_one(emp, work_date=date_str or str(day)),
         "pending_approvals": _member_pending_lists(emp),
         "can": team_day_can(
             status=status,
