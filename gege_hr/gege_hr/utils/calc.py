@@ -1256,9 +1256,63 @@ def _sum_night_hours(segments: list[dict], types: list[str]) -> float:
     return round(sum(s["hours"] for s in segments if s["segment_type"] in types), 4)
 
 
-def _maybe_raise_exceptions(ws_name: str, calc: dict, si: dict) -> None:
-    """Late-checkout warning (plan §10 note 9): OUT exists but > planned_end+360m."""
+def _raise_no_show_exception(ws_name: str, calc: dict, si: dict) -> None:
+    """Best-effort: nâng ngoại lệ Missing Check-in cho ngày thiếu công."""
     import frappe
+
+    try:
+        if not (calc.get("missing_checkin") and calc.get("missing_checkout")):
+            return
+        if calc.get("has_leave") or calc.get("absent"):
+            return  # đã được xử lý (có phép / đã đánh vắng)
+        pe = calc.get("_planned_end")
+        now = frappe.utils.now_datetime()
+        if not pe or (now - pe).total_seconds() / 60.0 < _NO_SHOW_GRACE_MINS:
+            return  # ca chưa kết thúc đủ lâu — có thể ca đêm đang tới hạn
+        if frappe.db.exists(
+            "VN Attendance Exception",
+            {"work_session": ws_name, "exception_type": "Missing Check-in"},
+        ):
+            return
+        frappe.get_doc(
+            {
+                "doctype": "VN Attendance Exception",
+                "work_session": ws_name,
+                "shift_instance": si["name"],
+                "employee": si["employee"],
+                "work_date": si["work_date"],
+                "exception_type": "Missing Check-in",
+                "severity": "High",
+                "status": "Open",
+                "description": (
+                    "Thiếu công: ca làm việc đã kết thúc nhưng không có lượt chấm nào "
+                    "(thiếu cả check-in lẫn check-out). Cần giải trình — nghỉ có phép "
+                    "(nộp đơn nghỉ phép) hoặc không phép (đánh dấu Absent)."
+                ),
+            }
+        ).insert(ignore_permissions=True)
+    except Exception:
+        pass  # best-effort: không bao giờ làm hỏng luồng tính công
+
+
+# Thiếu công — thời gian đệm sau kết thúc ca trước khi coi ngày không-chấm-đâu
+# là "thiếu công" cần giải trình (tránh báo động giữa ca / ca đêm chưa tới hạn).
+_NO_SHOW_GRACE_MINS = 240
+
+
+def _maybe_raise_exceptions(ws_name: str, calc: dict, si: dict) -> None:
+    """Engine exceptions sau mỗi lần tính Work Session.
+
+    - Thiếu công (2026-09-11): session KHÔNG có lượt chấm nào sau khi ca kết
+      thúc quá đệm → nâng "Missing Check-in" vào hàng đợi HR (/hr/exceptions)
+      — yêu cầu giải trình: nghỉ CÓ phép (nộp đơn nghỉ) hoặc KHÔNG phép (HR
+      Đánh dấu công = Absent). Không đụng luồng "quên chấm ra" (engine
+      auto-close chỉ dành cho session CÓ check-in).
+    - Late-checkout warning (plan §10 note 9): OUT > planned_end + 360m.
+    """
+    import frappe
+
+    _raise_no_show_exception(ws_name, calc, si)
 
     if calc["missing_checkout"] or not calc.get("_actual_checkout"):
         return
