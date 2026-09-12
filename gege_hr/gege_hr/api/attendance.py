@@ -1421,18 +1421,65 @@ def _day_detail_core(emp: str, day: date) -> dict:
     )
     work_session = _ws_payload(ws_rows[0]) if ws_rows else None
 
-    # Raw punches — reuse the portal-wall day window helper (attribute rows).
-    punches = [
-        {
-            "name": p.get("name"),
-            "time": str(p.get("time")) if p.get("time") else None,
-            "log_type": p.get("log_type"),
-            "device_id": p.get("device_id"),
-            "latitude": p.get("latitude"),
-            "longitude": p.get("longitude"),
-        }
-        for p in _checkins_for(emp, day)
-    ]
+    # Lượt chấm theo CỬA SỔ CỦA PHIÊN CA (2026-09-11 redesign), không theo
+    # ngày lịch — xử lý đúng mọi trường hợp ca qua đêm:
+    # - Ca đêm chuẩn: Vào tối D + Ra sáng D+1 cùng hiện trên thẻ ca D (ngày
+    #   lịch cũ sẽ KHÔNG thấy lượt Ra sáng hôm sau).
+    # - Lượt Ra sáng sớm đóng ca đêm HÔM TRƯỚC (vd 10:00 sáng 10/09 thuộc phiên
+    #   09/09) không còn lọt vào thẻ ca 10/09.
+    # - Cửa sổ: [planned_start − 4h, planned_end + 6h] — đến sớm ≤4h vẫn thuộc
+    #   ca; OT dài sau ca vẫn hiện; punch của phiên trước/sau bị loại.
+    # - `prev_session` (giờ tag "trước ca") giữ cho punch lệch trước giờ bắt đầu
+    #   trong cửa sổ (đến sớm); `vn_auto_generated` cho UI gắn nhãn lượt giả
+    #   của engine auto-close.
+    def _as_dt(v):
+        # Prod trả datetime; stub unit-test trả chuỗi — ép kiểu an toàn.
+        if isinstance(v, datetime):
+            return v
+        try:
+            return datetime.fromisoformat(str(v)[:19])
+        except Exception:
+            return None
+
+    punches = []
+    if ws_rows:
+        try:
+            _ps_dt = _as_dt(ws_rows[0].planned_start)
+            _pe_dt = _as_dt(ws_rows[0].planned_end)
+        except Exception:
+            _ps_dt = _pe_dt = None
+        if _ps_dt and _pe_dt:
+            win_start = (_ps_dt - timedelta(hours=4)).strftime("%Y-%m-%d %H:%M:%S")
+            win_end = (_pe_dt + timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S")
+            raw = frappe.db.get_all(
+                "Employee Checkin",
+                filters=[
+                    ["employee", "=", emp],
+                    ["time", ">=", win_start],
+                    ["time", "<=", win_end],
+                ],
+                fields=[
+                    "name",
+                    "employee",
+                    "time",
+                    "log_type",
+                    "device_id",
+                    "latitude",
+                    "longitude",
+                    "vn_auto_generated",
+                ],
+                order_by="time asc",
+            )
+            punches = [dict(r) for r in raw]
+    if not punches and not ws_rows:
+        raw = _checkins_for(emp, day)
+        punches = [dict(r) for r in raw]
+    for p in punches:
+        _ps_cmp = _as_dt(ws_rows[0].planned_start) if ws_rows else None
+        _t_cmp = _as_dt(p.get("time"))
+        p["prev_session"] = bool(_ps_cmp and _t_cmp and _t_cmp < _ps_cmp)
+        p["time"] = str(p["time"]) if p.get("time") else None
+        p["vn_auto_generated"] = bool(p.get("vn_auto_generated"))
 
     try:
         corrections = frappe.db.get_all(
