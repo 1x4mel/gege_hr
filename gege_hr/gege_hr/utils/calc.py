@@ -1045,7 +1045,16 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
     # admin period recalc, monthly close — SELF-HEALS vn_auto_checkout instead
     # of losing it (a lost flag flipped "Quên chấm ra" back to a green day and
     # hid the ticket state from payroll/UI).
-    auto_checkout_flag = any(lg.get("vn_auto_generated") and lg.get("log_type") == "OUT" for lg in logs)
+    # FIX 2026-09-12: cờ phải phản ánh lượt RA ĐƯỢC DÙNG (lượt OUT CUỐI trong
+    # cửa sổ), không phải "tồn tại bất kỳ lượt OUT giả nào" — khi lượt RA THẬT
+    # về muộn (sync máy chấm) đè lên lượt giả của auto-close, cờ cũ giữ 1
+    # khiến ô lưới treo "Thiếu chấm ra" dù giờ ra thật đã có (ca 20h-8h 10/09).
+    _out_logs = sorted(
+        (lg for lg in logs if lg.get("log_type") == "OUT"),
+        key=lambda lg: str(lg.get("time") or ""),
+    )
+    _last_out = _out_logs[-1] if _out_logs else None
+    auto_checkout_flag = bool(_last_out and _last_out.get("vn_auto_generated"))
 
     policy = load_policy(si.get("attendance_policy"), si["employee"])
 
@@ -1102,6 +1111,8 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
     _writeback_ot_request_hours(si, calc, ot_requests)
 
     _maybe_raise_exceptions(ws_name, calc, si)
+    # Giờ ra thật xuất hiện (kể cả muộn) → tự đóng ticket quên chấm ra đang treo.
+    _auto_resolve_checkout_miss(payload)
     return ws_name
 
 
@@ -1254,6 +1265,47 @@ def _ws_payload(si: dict, calc: dict, policy: dict) -> dict:
 
 def _sum_night_hours(segments: list[dict], types: list[str]) -> float:
     return round(sum(s["hours"] for s in segments if s["segment_type"] in types), 4)
+
+
+def _auto_resolve_checkout_miss(ws_payload: dict) -> None:
+    """Best-effort: session có giờ ra THẬT → tự đóng ticket "Quên chấm ra"
+    đang treo (Pending/Explained) của cùng (employee, work_date).
+
+    FIX 2026-09-12: khi lượt ra thật về muộn (sync máy chấm) đè lên lượt giả
+    của auto-close, ticket cũ vẫn treo Pending — HR phải đóng tay từng cái.
+    Chỉ đụng ticket CHƯA xử lý; Penalised/Waived/Closed (HR đã quyết) giữ nguyên.
+    """
+    import frappe
+
+    try:
+        if not ws_payload or ws_payload.get("vn_auto_checkout"):
+            return  # chưa có giờ ra thật (cờ giả vẫn thắng) hoặc thiếu dữ liệu
+        emp = ws_payload.get("employee")
+        day = str(ws_payload.get("work_date") or "")[:10]
+        if not emp or not day:
+            return
+        for t in frappe.get_all(
+            "VN Checkout Miss",
+            filters={
+                "employee": emp,
+                "work_date": day,
+                "status": ["in", ["Pending", "Explained"]],
+                "docstatus": ["!=", 2],
+            },
+            fields=["name"],
+            limit=5,
+        ):
+            frappe.db.set_value(
+                "VN Checkout Miss",
+                t.name,
+                {
+                    "status": "Closed",
+                    "explanation": (frappe.db.get_value("VN Checkout Miss", t.name, "explanation") or "")
+                    + " [tự đóng: đã có lượt chấm ra thật]",
+                },
+            )
+    except Exception:
+        pass
 
 
 def _raise_no_show_exception(ws_name: str, calc: dict, si: dict) -> None:
