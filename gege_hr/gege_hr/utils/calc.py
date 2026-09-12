@@ -1295,6 +1295,66 @@ def _raise_no_show_exception(ws_name: str, calc: dict, si: dict) -> None:
         pass  # best-effort: không bao giờ làm hỏng luồng tính công
 
 
+def recalc_stale_sessions(lookback_hours: int = 48, limit: int = 200) -> int:
+    """Scheduler self-heal (2026-09-12): tính lại các Work Session có lượt chấm
+    MỚI HƠN lần tính cuối.
+
+    Hook ``after_insert`` của Employee Checkin enqueue recalc lên queue
+    "short" — khi job queue lỗi/fail hàng loạt (đã xảy ra: đợt 10:56
+    11/09), mọi recalc theo hook chết ngầm → session thiếu giờ ra dù nhân
+    viên đã chấm (vd Minh Châu 11/09 Ra 20:12). Job này quét lượt chấm
+    gần đây, với mỗi (employee, ngày) có lượt chấm mới hơn ``calculated_at``
+    của session → tính lại qua ``persist_work_session`` (inline, không phụ
+    thuộc queue). Trả về số session đã tính lại.
+    """
+    import frappe
+    from frappe.utils import add_to_date
+
+    since = add_to_date(None, hours=-int(lookback_hours or 48))
+    punches = frappe.get_all(
+        "Employee Checkin",
+        filters={"creation": [">=", since]},
+        fields=["name", "employee", "time", "creation"],
+        order_by="creation asc",
+        limit=5000,
+    )
+    seen: set[tuple[str, str]] = set()
+    done = 0
+    for p in punches:
+        try:
+            day = str(p.get("time"))[:10]
+        except Exception:
+            continue
+        key = (p.get("employee"), day)
+        if key in seen:
+            continue
+        try:
+            ws = frappe.db.get_value(
+                "VN Attendance Work Session",
+                {"employee": p.get("employee"), "work_date": day},
+                ["name", "shift_instance", "calculated_at"],
+                as_dict=True,
+            )
+        except Exception:
+            ws = None
+        if not ws or not ws.shift_instance:
+            continue
+        if ws.calculated_at and str(ws.calculated_at) >= str(p.get("creation")):
+            continue  # session đã tính SAU lượt chấm này
+        seen.add(key)
+        try:
+            persist_work_session(ws.shift_instance, calculate_mode="recalc")
+            done += 1
+        except Exception:
+            try:
+                frappe.log_error(title=f"recalc_stale_sessions: {key}")
+            except Exception:
+                pass
+        if done >= limit:
+            break
+    return done
+
+
 # Thiếu công — thời gian đệm sau kết thúc ca trước khi coi ngày không-chấm-đâu
 # là "thiếu công" cần giải trình (tránh báo động giữa ca / ca đêm chưa tới hạn).
 _NO_SHOW_GRACE_MINS = 240

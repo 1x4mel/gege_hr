@@ -286,6 +286,10 @@ scheduler_events = {
         # Every hour: auto-close forgotten checkouts (employees who didn't
         # return) + flip expired Pending tickets to Penalised. Chính sách A.
         "0 * * * *": ["gege_hr.gege_hr.utils.checkout_miss.run_hourly"],
+        # Every 15 min: self-heal — tính lại session có lượt chấm mới hơn lần
+        # tính cuối (hook enqueue có thể fail hàng loạt khi queue lỗi; vụ
+        # 11/09 Minh Châu session thiếu giờ ra dù đã chấm Ra 20:12).
+        "*/15 * * * *": ["gege_hr.gege_hr.utils.calc.recalc_stale_sessions"],
         # WP4: every 10 minutes — a dead engine must be VISIBLE (Notification
         # to HR Managers + WARN Error Log) within ~2h, not after a week of
         # payroll complaints.
