@@ -1449,28 +1449,24 @@ def _day_detail_core(emp: str, day: date) -> dict:
         except Exception:
             _ps_dt = _pe_dt = None
         if _ps_dt and _pe_dt:
-            win_start = (_ps_dt - timedelta(hours=4)).strftime("%Y-%m-%d %H:%M:%S")
-            win_end = (_pe_dt + timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S")
-            raw = frappe.db.get_all(
-                "Employee Checkin",
-                filters=[
-                    ["employee", "=", emp],
-                    ["time", ">=", win_start],
-                    ["time", "<=", win_end],
-                ],
-                fields=[
-                    "name",
-                    "employee",
-                    "time",
-                    "log_type",
-                    "device_id",
-                    "latitude",
-                    "longitude",
-                    "vn_auto_generated",
-                ],
-                order_by="time asc",
-            )
-            punches = [dict(r) for r in raw]
+            # Đi qua `_checkins_for` (3 ngày liền kề phủ trọn cửa sổ
+            # [start−4h, end+6h]) rồi lọc bằng Python — dùng lại đúng helper
+            # đã có stub cho unit test; query db.get_all trực tiếp làm
+            # test_ta24 mất dữ liệu (CI đỏ).
+            raw = []
+            for _off in (-1, 0, 1):
+                raw.extend(_checkins_for(emp, day + timedelta(days=_off)))
+            win_start = _ps_dt - timedelta(hours=4)
+            win_end = _pe_dt + timedelta(hours=6)
+            for _r in raw:
+                _t = _as_dt(_r.get("time"))
+                if _t and win_start <= _t <= win_end:
+                    punches.append(dict(_r))
+            punches.sort(key=lambda x: str(x.get("time")))
+        else:
+            # Session không có planned hợp lệ (dữ liệu cũ / stub test) — fallback
+            # lượt chấm theo ngày lịch như hành vi gốc.
+            punches = [dict(r) for r in _checkins_for(emp, day)]
     if not punches and not ws_rows:
         raw = _checkins_for(emp, day)
         punches = [dict(r) for r in raw]
@@ -1479,7 +1475,15 @@ def _day_detail_core(emp: str, day: date) -> dict:
         _t_cmp = _as_dt(p.get("time"))
         p["prev_session"] = bool(_ps_cmp and _t_cmp and _t_cmp < _ps_cmp)
         p["time"] = str(p["time"]) if p.get("time") else None
-        p["vn_auto_generated"] = bool(p.get("vn_auto_generated"))
+        # `_checkins_for` không trả vn_auto_generated — lấy riêng từng lượt
+        # để UI gắn nhãn "tự động" cho lượt OUT giả của engine.
+        if "vn_auto_generated" not in p:
+            try:
+                p["vn_auto_generated"] = bool(
+                    frappe.db.get_value("Employee Checkin", p.get("name"), "vn_auto_generated")
+                )
+            except Exception:
+                p["vn_auto_generated"] = False
 
     try:
         corrections = frappe.db.get_all(
