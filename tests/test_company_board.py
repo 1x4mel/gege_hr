@@ -195,10 +195,13 @@ def test_board_composes_shifts_leaves_and_counts(fake):
     out = fake.api.board(TOMORROW, DAY_AFTER)
     days = {e["employee"]: e["days"] for e in out["employees"]}
     assert days["HR-EMP-00001"][TOMORROW]["shift"] == "Ca sáng"
-    # E2 duoc len lich ca TOMORROW (shift wins) — leave chi an DAY_AFTER.
+    # E2 duoc len lich ca TOMORROW — ngay do van co leave (fix 2026-09-12:
+    # ca sinh san khong duoc che di nghi da duyet): cell giu ca + co leave,
+    # leave_counts van dem.
     assert days["HR-EMP-00002"][TOMORROW]["shift"] == "Ca tối"
+    assert days["HR-EMP-00002"][TOMORROW]["leave"] == "Phép ốm"
     assert days["HR-EMP-00002"][DAY_AFTER]["leave"] == "Phép ốm"
-    assert out["leave_counts"].get(TOMORROW, 0) == 0
+    assert out["leave_counts"].get(TOMORROW, 0) == 1
     assert out["leave_counts"][DAY_AFTER] == 1
     assert out["holidays"][DAY_AFTER] == "Lễ"
     assert out["working_counts"][TOMORROW] == 2
@@ -218,7 +221,7 @@ def test_board_scheduled_day_wins_over_overlapping_leave(fake):
     out = fake.api.board(TOMORROW, TOMORROW)
     days = {e["employee"]: e["days"] for e in out["employees"]}
     assert days["HR-EMP-00001"][TOMORROW]["shift"] == "Ca sáng"
-    assert out["leave_counts"].get(TOMORROW, 0) == 0
+    assert out["leave_counts"].get(TOMORROW, 0) == 1
 
 
 # --------------------------------------------------------------------------- #

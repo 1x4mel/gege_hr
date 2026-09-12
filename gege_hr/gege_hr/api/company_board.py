@@ -155,20 +155,29 @@ def board(from_date: str | None = None, to_date: str | None = None) -> dict:
         if la.employee not in days:
             continue
         ld = getdate(la.from_date)
-        while ld <= end:
+        # FIX 2026-09-12: chặn đúng to_date của đơn nghỉ — vòng lặp cũ chạy
+        # tới hết CỬA SỔ truy vấn, đánh dấu nghỉ lố sang các ngày sau to_date.
+        leave_end = min(end, getdate(la.to_date))
+        while ld <= leave_end:
             iso = ld.isoformat()
             if iso >= start_iso:
                 cell = days[la.employee].get(iso)
-                # A leave day wins the cell unless the employee is scheduled
-                # that day (rare overlap — keep the shift visible).
-                if not cell:
+                # FIX 2026-09-12: ca được sinh sẵn cho cả tháng nên ô nào
+                # cũng có instance — kiểu "chỉ đánh dấu nghỉ khi ô trống" khiến
+                # nghỉ ĐÃ DUYỆT tàng hình trên ngày có ca (vd Thu Thuỷ
+                # 12-15/09). Giờ gắn cờ leave lên chính ô ca (UI ưu tiên render
+                # nghỉ, giữ tên ca làm phụ chú) và LUÔN đếm vào leave_counts.
+                if cell:
+                    cell["leave"] = la.leave_type
+                    cell["leave_status"] = la.status
+                else:
                     days[la.employee][iso] = {
                         "leave": la.leave_type,
                         "leave_status": la.status,
                     }
-                    leave_counts.setdefault(iso, [])
-                    if la.employee not in leave_counts[iso]:
-                        leave_counts[iso].append(la.employee)
+                leave_counts.setdefault(iso, [])
+                if la.employee not in leave_counts[iso]:
+                    leave_counts[iso].append(la.employee)
             ld += _dt.timedelta(days=1)
 
     working_counts = {}
