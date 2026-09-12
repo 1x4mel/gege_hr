@@ -1979,14 +1979,33 @@ def _checkout_miss_meta_one(employee: str, work_date: str | None = None) -> dict
         return None
     if work_date:
         cm_day = str(r.get("work_date") or "")
-        try:
+        if work_date != cm_day:
+            # FIX 2026-09-12: "ngày hôm sau" chỉ dành cho ca THẬT SỰ QUA ĐÊM
+            # của chính ticket đó VÀ ticket còn mở — trước đây cộng đại +1 ngày
+            # nên ticket Closed của ca NGÀY (vd VCM-00040, Ca 9h-21h, work_date
+            # 10/09) lọt sang drawer 11/09 dù ngày đó NV đã chấm ra đủ.
             from frappe.utils import getdate as _gd
 
-            next_day = (_gd(cm_day) + timedelta(days=1)).isoformat() if cm_day else None
-        except Exception:
-            next_day = None
-        if work_date not in (cm_day, next_day):
-            return None
+            end_day = None
+            try:
+                # Nguồn planned lấy từ WORK SESSION theo (employee, work_date)
+                # của ticket — cố định với lịch sử; shift_instance có thể được
+                # engine sinh lại (đổi planned) làm sai kết luận qua đêm.
+                ws = frappe.db.get_value(
+                    "VN Attendance Work Session",
+                    {"employee": employee, "work_date": cm_day},
+                    ["planned_start", "planned_end"],
+                    as_dict=True,
+                )
+                pe = _gd(ws.planned_end) if ws and ws.planned_end else None
+                ps = _gd(ws.planned_start) if ws and ws.planned_start else None
+                if pe and ps and pe > ps:
+                    end_day = pe.isoformat()  # ca qua đêm: planned_end sang ngày hôm sau
+            except Exception:
+                end_day = None
+            still_open = str(r.get("status") or "") != "Closed"
+            if not (end_day and work_date == end_day and still_open):
+                return None
     return {
         "name": r.get("name"),
         "status": r.get("status"),
