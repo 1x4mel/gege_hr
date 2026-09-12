@@ -1080,6 +1080,22 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
 
     if ws_name:
         ws = frappe.get_doc("VN Attendance Work Session", ws_name)
+        # FIX 2026-09-12: link Attendance treo (dòng đích đã bị xóa — vd đợt
+        # dọn Attendance tương lai) làm LinkValidationError crash TOÀN BỘ
+        # recalc → session đứng mãi dù có lượt chấm mới. Xóa link treo trước
+        # khi save; _sync_attendance_internal sẽ tự tái tạo link đúng sau đó.
+        if getattr(ws, "attendance", None) and not frappe.db.exists("Attendance", ws.attendance):
+            try:
+                frappe.db.set_value(
+                    "VN Attendance Work Session",
+                    ws_name,
+                    "attendance",
+                    None,
+                    update_modified=False,
+                )
+                ws.attendance = None
+            except Exception:
+                pass
         # CAS lock (plan §19.3): refuse to overwrite a Locked / Recalculating
         # session (the comment always said both — the code now matches it).
         if ws.calculation_status in ("Locked", "Recalculating"):
@@ -1345,6 +1361,66 @@ def _raise_no_show_exception(ws_name: str, calc: dict, si: dict) -> None:
         ).insert(ignore_permissions=True)
     except Exception:
         pass  # best-effort: không bao giờ làm hỏng luồng tính công
+
+
+def heal_stale_sessions(start_date, end_date, limit: int = 100) -> int:
+    """Heal-on-read (2026-09-12): tính lại NGAY các session trong một khoảng
+    ngày có lượt chấm mới hơn lần tính cuối.
+
+    Dùng ngay trước khi dựng team grid/roster để dữ liệu luôn tươi DÙ queue
+    nền đang chết (hook after_insert enqueue recalc lên "short" — khi worker
+    chạy code cũ/lỗi, session đứng yên dù nhân viên đã chấm, vd Lâm Hoan
+    Quốc 12/09 chấm 08:03/20:05 vẫn bị "Thiếu công"). Chỉ session LỆCH mới
+    bị tính lại nên chi phí gần như 0 khi hệ thống khỏe. Trả về số session
+    đã heal.
+    """
+    import frappe
+    from frappe.utils import getdate
+
+    try:
+        d0 = (getdate(start_date) - __import__("datetime").timedelta(days=1)).isoformat()
+        d1 = (getdate(end_date) + __import__("datetime").timedelta(days=1)).isoformat()
+    except Exception:
+        return 0
+    try:
+        punches = frappe.get_all(
+            "Employee Checkin",
+            filters=[["time", ">=", f"{d0} 00:00:00"], ["time", "<=", f"{d1} 23:59:59"]],
+            fields=["name", "employee", "time", "creation"],
+            order_by="creation asc",
+            limit=2000,
+        )
+    except Exception:
+        return 0
+    seen: set[tuple[str, str]] = set()
+    done = 0
+    for _p in punches:
+        day = str(_p.get("time"))[:10]
+        key = (_p.get("employee"), day)
+        if key in seen:
+            continue
+        try:
+            ws = frappe.db.get_value(
+                "VN Attendance Work Session",
+                {"employee": _p.get("employee"), "work_date": day},
+                ["name", "shift_instance", "calculated_at"],
+                as_dict=True,
+            )
+        except Exception:
+            ws = None
+        if not ws or not ws.shift_instance:
+            continue
+        if ws.calculated_at and str(ws.calculated_at) >= str(_p.get("creation")):
+            continue
+        seen.add(key)
+        try:
+            persist_work_session(ws.shift_instance, calculate_mode="recalc")
+            done += 1
+        except Exception:
+            pass
+        if done >= limit:
+            break
+    return done
 
 
 def recalc_stale_sessions(lookback_hours: int = 48, limit: int = 200) -> int:

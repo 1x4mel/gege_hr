@@ -2372,6 +2372,15 @@ def team_attendance(
     else:
         start = today_portal.replace(day=1)
         end = today_portal
+    # Heal-on-read: tính lại session lệch trong cửa sổ đang xem TRƯỚC khi dựng
+    # grid — team view luôn realtime dù queue nền đang chết (worker code cũ).
+    try:
+        from gege_hr.gege_hr.utils.calc import heal_stale_sessions
+
+        heal_stale_sessions(start.isoformat(), end.isoformat())
+    except Exception:
+        pass
+
     # Window clamp (plan WP2): a range grid must stay bounded — week views that
     # roll into the next month stay covered while absurd windows are rejected.
     if (end - start).days > TEAM_ATTENDANCE_MAX_DAYS:
