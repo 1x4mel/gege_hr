@@ -94,6 +94,10 @@ class VNEmployeeShiftInstance(Document):
                 "employee": self.employee,
                 "name": ["!=", self.name or "___"],
                 "docstatus": ["!=", 2],
+                # FIX 2026-09-16: instance đã Cancelled/Skipped không còn hiệu
+                # lực — không được chặn instance mới (đổi ca giữa kỳ: hủy ca cũ
+                # rồi gán ca mới cùng ngày phải thành công).
+                "status": ["not in", ["Cancelled", "Skipped"]],
                 "planned_start": ["<", self.planned_end],
                 "planned_end": [">", self.planned_start],
             },
