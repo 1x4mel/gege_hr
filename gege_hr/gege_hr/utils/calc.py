@@ -1065,13 +1065,19 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
     if policy.get("require_overtime_approval"):
         ot_requests = get_approved_ot_requests(si["employee"], si.get("work_date"))
 
-    calc = calculate_work_session(si, logs, policy, calculate_mode=calculate_mode, ot_requests=ot_requests)
+    # FIX 2026-09-16: query Approved Leave Application covering work_date —
+    # engine trước đây nhận leave_info=None mãi → has_leave không bao giờ được
+    # set trên WS (vd Vũ Winner nghỉ 13-14/09 Approved nhưng WS vẫn absent=1).
+    leave_info = _load_leave_info(si["employee"], si.get("work_date"))
+    calc = calculate_work_session(
+        si, logs, policy, calculate_mode=calculate_mode, leave_info=leave_info, ot_requests=ot_requests
+    )
     calc["segments"] = generate_segments(calc, holiday_dates)
 
     ws_name = frappe.db.get_value("VN Attendance Work Session", {"shift_instance": shift_instance_name})
     review_reasons = _review_reasons(calc)
 
-    payload = _ws_payload(si, calc, policy)
+    payload = _ws_payload(si, calc, policy, leave_info)
     payload["review_reason"] = "\n".join(review_reasons) if review_reasons else None
     # FIX 2026-09-11: ghi tường minh 0/1 mỗi lần recalc. Trước đây chỉ thêm key
     # khi =1 — cờ 1 cũ KHÔNG BAO GIỜ được xoá (admin sửa giờ lượt OUT giả của
@@ -1224,7 +1230,7 @@ def _review_reasons(calc: dict) -> list[str]:
     return reasons
 
 
-def _ws_payload(si: dict, calc: dict, policy: dict) -> dict:
+def _ws_payload(si: dict, calc: dict, policy: dict, leave_info: dict | None = None) -> dict:
     segments = [
         {
             "segment_type": s["segment_type"],
@@ -1270,6 +1276,7 @@ def _ws_payload(si: dict, calc: dict, policy: dict) -> dict:
         "missing_checkin": calc["missing_checkin"],
         "missing_checkout": calc["missing_checkout"],
         "absent": calc["absent"],
+        "has_leave": bool(calc.get("has_leave") or (leave_info and leave_info.get("has_leave"))),
         "need_review": calc["need_review"],
         "payable_regular_hours": calc["payable_regular_hours"],
         "payable_day": calc["payable_day"],
@@ -1361,6 +1368,43 @@ def _raise_no_show_exception(ws_name: str, calc: dict, si: dict) -> None:
         ).insert(ignore_permissions=True)
     except Exception:
         pass  # best-effort: không bao giờ làm hỏng luồng tính công
+
+
+def _load_leave_info(employee: str, work_date) -> dict | None:
+    """Best-effort: Approved Leave Application covering ``work_date``.
+
+    FIX 2026-09-16: engine trước đây không query nghỉ phép → WS có ngày nghỉ
+    đã duyệt vẫn absent=1, has_leave=0 (monthly view hiển thị "Cần xem xét"
+    thay vì "Nghỉ phép").
+    """
+    import frappe
+
+    if not employee or not work_date:
+        return None
+    try:
+        la = frappe.db.get_value(
+            "Leave Application",
+            {
+                "employee": employee,
+                "from_date": ["<=", str(work_date)[:10]],
+                "to_date": [">=", str(work_date)[:10]],
+                "status": "Approved",
+                "docstatus": 1,
+            },
+            ["name", "leave_type", "total_leave_days"],
+            as_dict=True,
+        )
+    except Exception:
+        return None
+    if not la:
+        return None
+    return {
+        "has_leave": True,
+        "leave_application": la.name,
+        "leave_type": la.leave_type,
+        "salary_impact_type": "Paid",  # giản lược — engine payable_day xử lý chi tiết
+        "leave_days_equivalent": float(la.total_leave_days or 1.0),
+    }
 
 
 def _ws_stale(ws, punch) -> bool:
