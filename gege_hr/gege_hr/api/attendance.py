@@ -2532,10 +2532,35 @@ def team_attendance(
                 leave_by_emp_date.setdefault(la.employee, {})[str(d)] = la.leave_type or ""
                 d += timedelta(days=1)
 
+    # ĐA CA TRONG CỬA SỔ (2026-09-16): nhóm hiển thị theo tập ca THỰC TẾ của
+    # từng NV trong cửa sổ (từ shift instances) — NV đổi ca giữa kỳ xuất hiện
+    # ở CẢ HAI nhóm; nhóm không còn ngày nào trong cửa sổ tự ẩn (tháng sau ca
+    # cũ biến mất). Fallback: NV không có instance (tháng cũ chỉ còn Attendance)
+    # dùng ca của assignment mới nhất như trước.
+    shifts_by_emp: dict[str, set] = {}
+    if members:
+        for r in frappe.db.get_all(
+            "VN Employee Shift Instance",
+            filters={
+                "employee": ["in", [m["name"] for m in members]],
+                "work_date": ["between", [start, end]],
+                "status": ["not in", ["Cancelled", "Skipped"]],
+                "docstatus": ["!=", 2],
+            },
+            fields=["employee", "shift_type"],
+        ):
+            if r.shift_type:
+                shifts_by_emp.setdefault(r.employee, set()).add(r.shift_type)
+    multi_shift: dict[str, set] = {}
+    for m in members:
+        multi_shift[m["name"]] = set(shifts_by_emp.get(m["name"], set())) or {
+            member_shift.get(m["name"], "Khác")
+        }
+
     # Shift Type start/end windows — used both for the per-group header and to
     # translate the raw Attendance row (status="Present" even when late) into a
     # UI-friendly per-day status + real late/early minutes.
-    shift_names = sorted(set(member_shift.values()))
+    shift_names = sorted(set().union(*multi_shift.values()) if multi_shift else set(member_shift.values()))
     shift_meta: dict[str, dict] = {}
     real_shift_names = [s for s in shift_names if s and s != "Khác"]
     if real_shift_names:
@@ -2590,6 +2615,19 @@ def team_attendance(
             order_by="attendance_date asc",
         ):
             att_by_emp.setdefault(r.employee, {})[str(r.attendance_date)] = r
+    inst_by_emp: dict[str, dict] = {}
+    if members:
+        for r in frappe.db.get_all(
+            "VN Employee Shift Instance",
+            filters={
+                "employee": ["in", [m["name"] for m in members]],
+                "work_date": ["between", [start, end]],
+                "status": ["not in", ["Cancelled", "Skipped"]],
+                "docstatus": ["!=", 2],
+            },
+            fields=["employee", "work_date", "shift_type"],
+        ):
+            inst_by_emp.setdefault(r.employee, {})[str(r.work_date)] = r.shift_type or ""
     ws_by_emp: dict[str, dict] = {}
     if members:
         for r in frappe.db.get_all(
@@ -2650,6 +2688,7 @@ def team_attendance(
                 days.append(
                     {
                         "work_date": str(cur),
+                        "shift": (inst_by_emp.get(m["name"], {}).get(str(cur)) or ""),
                         "status": "Not marked",
                         "checkin_time": None,
                         "checkout_time": None,
@@ -2668,6 +2707,7 @@ def team_attendance(
                 days.append(
                     {
                         "work_date": str(cur),
+                        "shift": (inst_by_emp.get(m["name"], {}).get(str(cur)) or ""),
                         "status": "On Leave",
                         "checkin_time": None,
                         "checkout_time": None,
@@ -2736,6 +2776,7 @@ def team_attendance(
             days.append(
                 {
                     "work_date": str(cur),
+                    "shift": (inst_by_emp.get(m["name"], {}).get(str(cur)) or ""),
                     "status": disp_status,
                     "checkin_time": checkin_time,
                     "checkout_time": checkout_time,
@@ -2780,14 +2821,20 @@ def team_attendance(
             "leaves": int(pc.get("leaves") or 0),
             "checkout_misses": 1 if checkout_miss_by.get(m["name"]) else 0,
         }
-        out = {**m, "days": days, "shift_type": member_shift[m["name"]], "pending": pending_badges}
+        out = {
+            **m,
+            "days": days,
+            "shift_type": member_shift[m["name"]],
+            "shifts": sorted(multi_shift.get(m["name"], set())),
+            "pending": pending_badges,
+        }
         out_members.append(out)
 
     # Post-build filters (plan WP2): shift group + derived status token over
     # the built day set, then member paging — ``summary`` above stays computed
     # on the FULL filtered set (DNA §6.6 A parity).
     if shift_type:
-        out_members = [o for o in out_members if o.get("shift_type") == shift_type]
+        out_members = [o for o in out_members if shift_type in (o.get("shifts") or [o.get("shift_type")])]
     if status_filter:
         token = status_filter.strip()
         out_members = [o for o in out_members if _member_matches_status_token(o, token)]
@@ -2804,7 +2851,8 @@ def team_attendance(
     out_members = out_members[(page_i - 1) * size : page_i * size]
     grouped = {sn: [] for sn in shift_names}
     for o in out_members:
-        grouped.setdefault(o["shift_type"], []).append(o)
+        for sn in o.get("shifts") or [o["shift_type"]]:
+            grouped.setdefault(sn, []).append(o)
 
     # Build one group per shift, preserving the sorted shift order so the UI is
     # deterministic. Empty shifts (no member after Attendance filtering) are
