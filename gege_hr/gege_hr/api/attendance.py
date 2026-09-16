@@ -2448,7 +2448,12 @@ def team_attendance(
                 "docstatus": 1,
             },
             fields=["employee", "shift_type", "start_date", "end_date"],
-            order_by="start_date asc",
+            # FIX 2026-09-16: lấy assignment MỚI NHẤT trong cửa sổ (desc) —
+            # đổi ca giữa kỳ thì nhân viên hiển thị ở nhóm CA MỚI (vd Châu/Dũng
+            # từ 11/09 thuộc Ca sáng/Ca tối), các ngày cũ vẫn giữ tooltip ca
+            # cũ trên ô. Cửa sổ thuần quá khứ (assignment mới chưa bắt đầu)
+            # tự rơi về ca cũ đúng.
+            order_by="start_date desc",
         )
         for a in assignments:
             a_end = getdate(a.end_date) if a.end_date else None
