@@ -355,7 +355,10 @@ def test_my_schedule_allows_manager_to_view_others(shift):
         "start_time": datetime.time(9, 0),
         "end_time": datetime.time(17, 0),
     }
-    rows = shift.mod.my_schedule(employee="E-2")
+    # Cửa sổ tường minh phủ đúng khoảng seed — module "today" là tz-stub
+    # (2026-09-02) trong khi _future() theo ngày thật; cửa sổ mặc định
+    # [today-7, today+7] chỉ giao seed khi ngày thật ≤ 2026-09-09 (time-bomb).
+    rows = shift.mod.my_schedule(employee="E-2", from_date=_future(-7), to_date=_future(7))
     assert isinstance(rows, list) and rows
     assert {r["shift_type"] for r in rows} == {"Day"}
     assert all(r["shift_assignment"] == "SA-X" for r in rows)
@@ -1185,9 +1188,22 @@ def test_c19_swap_happy_path(admin):
     assert res["adjusted"] == [] and res["cancelled"] == []
 
 
-def test_c20_copy_week_partial_safe(admin):
+def test_c20_copy_week_partial_safe(admin, monkeypatch):
     """C20: mid-batch conflict on E-1 is recorded; E-2 still copies fine."""
     mod, stub, db = admin.mod, admin.stub, admin.db
+    # Ghim "hôm nay" = 2026-09-02: tuần đích 09-07→09-14 của fixture là TƯƠNG
+    # LAI so với ngày ghim. Để ngày thật trôi qua 09-14 (xảy ra 16/09), guard
+    # "không copy vào quá khứ" đổi luồng → conflict None (time-bomb).
+    # Guard "bỏ qua ngày đích quá khứ" dùng getdate() NGÀY THẬT (dst_day <
+    # getdate() → continue, conflict không được ghi) — pin về 2026-09-02 để
+    # tuần đích 09-07→09-14 luôn là tương lai, bất kể ngày chạy test.
+    monkeypatch.setattr(
+        mod,
+        "getdate",
+        lambda v=None: (
+            datetime.date(2026, 9, 2) if v in (None, "") else datetime.date.fromisoformat(str(v)[:10])
+        ),
+    )
     stub._roles = {"HR Manager"}
     db.exists_set.update(
         {("Employee", "E-1"), ("Employee", "E-2"), ("Shift Type", "Day"), ("Shift Type", "Evening")}
