@@ -3602,6 +3602,48 @@ def _find_existing_checkin(employee: str, log_type: str, utc_time_str: str) -> s
     return rows[0] if rows else None
 
 
+def _sync_recalc_after_checkin(docname: str, employee: str) -> None:
+    """FIX 2026-09-12 (realtime): tính lại Work Session ĐỒNG BỘ ngay trong
+    request sửa chấm công (web process chạy code mới — có heal + guard link
+    treo) thay vì chỉ enqueue cho queue nền (đang chết/chậm → FE reload vội
+    vẫn thấy dữ liệu cũ, phải F5).
+
+    Gọi SAU frappe.db.commit() và đọc punch bằng db.get_value (xuyên document
+    cache — get_doc trả bản cache cũ khi vừa set_value trong cùng request).
+    Thất bại mới fallback về đường enqueue cũ (hook after_insert).
+    """
+    from gege_hr.gege_hr.api import attendance as att_api
+
+    try:
+        row = frappe.db.get_value("Employee Checkin", docname, ["employee", "time"], as_dict=True)
+    except Exception:
+        row = None
+    if not row:
+        # Fallback get_doc (stub unit test; prod hiếm khi cần).
+        try:
+            row = frappe.get_doc("Employee Checkin", docname)
+        except Exception:
+            return
+    if not row:
+        return
+    try:
+        si = att_api._resolve_shift_instance_for_checkin(row)
+        if si:
+            from gege_hr.gege_hr.utils import calc as _calc
+
+            _calc.persist_work_session(si, calculate_mode="realtime")
+            return
+    except Exception:
+        pass
+    try:
+        att_api.on_employee_checkin_create(row)
+    except Exception:
+        frappe.log_error(
+            title="admin_custom_checkin: recalc failed",
+            message=f"checkin={docname} employee={employee}",
+        )
+
+
 def _upsert_employee_checkin(employee: str, docname: str | None, log_type: str, utc_time_str: str) -> str:
     """Insert or update an ``Employee Checkin`` row and recalc its Work Session.
 
@@ -3613,8 +3655,6 @@ def _upsert_employee_checkin(employee: str, docname: str | None, log_type: str, 
     (:func:`attendance.on_employee_checkin_create`). On the insert path that
     hook fires automatically.
     """
-    from gege_hr.gege_hr.api import attendance as att_api
-
     if not docname:
         docname = _find_existing_checkin(employee, log_type, utc_time_str)
     if docname and frappe.db.exists("Employee Checkin", docname):
@@ -3634,14 +3674,6 @@ def _upsert_employee_checkin(employee: str, docname: str | None, log_type: str, 
             0,
             update_modified=False,
         )
-        try:
-            doc = frappe.get_doc("Employee Checkin", docname)
-            att_api.on_employee_checkin_create(doc)
-        except Exception:
-            frappe.log_error(
-                title="admin_custom_checkin: recalc failed",
-                message=f"checkin={docname} employee={employee}",
-            )
         return docname
 
     doc = frappe.get_doc(
@@ -3722,6 +3754,11 @@ def admin_custom_checkin(
         touched.append(_upsert_employee_checkin(employee, out_id, "OUT", utc_out))
 
     frappe.db.commit()
+
+    # Realtime (FIX 2026-09-12): tính lại phiên ĐỒNG BỘ sau khi punch đã commit —
+    # response xong dữ liệu đã sạch, FE reload là thấy ngay (không cần F5).
+    for _t in dict.fromkeys(touched):
+        _sync_recalc_after_checkin(_t, employee)
 
     _audit_admin(
         _("Sửa chấm công thủ công {0}").format(employee),
