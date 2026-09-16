@@ -1363,6 +1363,36 @@ def _raise_no_show_exception(ws_name: str, calc: dict, si: dict) -> None:
         pass  # best-effort: không bao giờ làm hỏng luồng tính công
 
 
+def _ws_stale(ws, punch) -> bool:
+    """Session có cần tính lại không?
+
+    FIX 2026-09-16: ngoài tiêu chí "lượt chấm MỚI hơn lần tính cuối" (so
+    creation — thua keo với lượt chấm sync từ máy chấm có creation backdate
+    nhỏ hơn calculated_at, vd Tiền ca đêm 12-14/09 đứng mãi thiếu giờ vào),
+    thêm tiêu chí NỘI DUNG: phiên thiếu IN/OUT trong khi CÓ lượt chấm cùng
+    loại nằm trong cửa sổ ca [start-4h, end+6h] → chắc chắn lệch, tính lại.
+    """
+    if not ws or not getattr(ws, "shift_instance", None):
+        return False
+    p = punch if isinstance(punch, dict) else {}
+    if not ws.calculated_at or str(ws.calculated_at) < str(p.get("creation")):
+        return True
+    t = _as_dt(p.get("time"))
+    ps = _as_dt(ws.planned_start)
+    pe = _as_dt(ws.planned_end)
+    if not t or not ps or not pe:
+        return False
+    from datetime import timedelta as _td
+
+    if ps - _td(hours=4) <= t <= pe + _td(hours=6):
+        lt = str(p.get("log_type") or "")
+        if lt == "IN" and not ws.actual_checkin:
+            return True
+        if lt == "OUT" and not ws.actual_checkout:
+            return True
+    return False
+
+
 def heal_stale_sessions(start_date, end_date, limit: int = 100) -> int:
     """Heal-on-read (2026-09-12): tính lại NGAY các session trong một khoảng
     ngày có lượt chấm mới hơn lần tính cuối.
@@ -1403,14 +1433,22 @@ def heal_stale_sessions(start_date, end_date, limit: int = 100) -> int:
             ws = frappe.db.get_value(
                 "VN Attendance Work Session",
                 {"employee": _p.get("employee"), "work_date": day},
-                ["name", "shift_instance", "calculated_at"],
+                [
+                    "name",
+                    "shift_instance",
+                    "calculated_at",
+                    "planned_start",
+                    "planned_end",
+                    "actual_checkin",
+                    "actual_checkout",
+                ],
                 as_dict=True,
             )
         except Exception:
             ws = None
         if not ws or not ws.shift_instance:
             continue
-        if ws.calculated_at and str(ws.calculated_at) >= str(_p.get("creation")):
+        if not _ws_stale(ws, _p):
             continue
         seen.add(key)
         try:
@@ -1460,15 +1498,23 @@ def recalc_stale_sessions(lookback_hours: int = 48, limit: int = 200) -> int:
             ws = frappe.db.get_value(
                 "VN Attendance Work Session",
                 {"employee": p.get("employee"), "work_date": day},
-                ["name", "shift_instance", "calculated_at"],
+                [
+                    "name",
+                    "shift_instance",
+                    "calculated_at",
+                    "planned_start",
+                    "planned_end",
+                    "actual_checkin",
+                    "actual_checkout",
+                ],
                 as_dict=True,
             )
         except Exception:
             ws = None
         if not ws or not ws.shift_instance:
             continue
-        if ws.calculated_at and str(ws.calculated_at) >= str(p.get("creation")):
-            continue  # session đã tính SAU lượt chấm này
+        if not _ws_stale(ws, p):
+            continue
         seen.add(key)
         try:
             persist_work_session(ws.shift_instance, calculate_mode="recalc")
