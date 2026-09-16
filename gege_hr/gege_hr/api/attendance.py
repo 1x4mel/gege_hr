@@ -2004,11 +2004,22 @@ def _shift_meta_one(employee: str, day) -> dict | None:
     for r in _covering_shift_assignments([employee], day):
         end = r.get("end_date")
         if not end or str(end) >= str(day):
+            # Giờ ca (HH:mm) từ Shift Type — drawer dùng khi ngày CHƯA có Work
+            # Session (vd nv chưa chấm ngày đó) để không báo nhầm "chưa gán ca".
+            st = None
+            try:
+                st = frappe.db.get_value(
+                    "Shift Type", r.get("shift_type"), ["start_time", "end_time"], as_dict=True
+                )
+            except Exception:
+                st = None
             return {
                 "name": r.get("name"),
                 "shift_type": r.get("shift_type"),
                 "start_date": str(r.get("start_date") or ""),
                 "end_date": str(end or ""),
+                "start_time": str(st.start_time)[:5] if st and st.start_time else "",
+                "end_time": str(st.end_time)[:5] if st and st.end_time else "",
             }
     return None
 
