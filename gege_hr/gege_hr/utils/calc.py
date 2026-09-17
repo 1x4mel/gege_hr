@@ -1398,12 +1398,14 @@ def _load_leave_info(employee: str, work_date) -> dict | None:
         return None
     if not la:
         return None
+    # Cap 1 ngày / session — Leave Application nhiều ngày (vd 4 ngày) trả
+    # total_leave_days=4 nhưng payable_day chỉ nhận 0/0.5/1.0.
     return {
         "has_leave": True,
         "leave_application": la.name,
         "leave_type": la.leave_type,
         "salary_impact_type": "Paid",  # giản lược — engine payable_day xử lý chi tiết
-        "leave_days_equivalent": float(la.total_leave_days or 1.0),
+        "leave_days_equivalent": min(float(la.total_leave_days or 1.0), 1.0),
     }
 
 
