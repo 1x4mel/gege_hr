@@ -351,15 +351,6 @@ def today_status(employee: str | None = None) -> dict:
     day = tz_utils.now_in_portal().date()
     shift = _today_shift(emp, day)
     checkins = _checkins_for(emp, day) if shift else []
-    # FIX 2026-09-17 ca qua đêm: gộp lượt chấm HÔM TRƯỚC — IN tối hôm trước
-    # (vd 20:39 ngày 16/09) nằm ngoài ngày lịch hôm nay (17/09) nên session
-    # context không thấy giờ vào, FE chỉ hiện giờ ra.
-    if shift:
-        try:
-            yst = _checkins_for(emp, day - timedelta(days=1))
-            checkins = list(yst) + list(checkins)
-        except Exception:
-            pass
     now_local = tz_utils.now_in_portal()
     button_state = _derive_button_state(shift, checkins, now_local)
 
@@ -379,7 +370,13 @@ def today_status(employee: str | None = None) -> dict:
 
     setting = _portal_setting()
     work_location = _work_location_for(emp, day)
-    session = _session_context(shift, checkins, now_local)
+
+    # FIX 2026-09-17: giờ vào/ra lấy từ WORK SESSION (engine truth) — đồng bộ
+    # với team grid. Trước đây session_context chỉ đọc lượt chấm thô theo
+    # ngày lịch → ca qua đêm thiếu IN hôm trước / lộn xộn OUT hôm kia.
+    ws_times = _today_ws_times(emp, day)
+    actual_checkin = ws_times.get("actual_checkin")
+    actual_checkout = ws_times.get("actual_checkout")
 
     return {
         "employee": emp,
@@ -389,13 +386,11 @@ def today_status(employee: str | None = None) -> dict:
         "times": {
             "last_checkin": checkins[-1]["time"] if checkins else None,
             "checkin_count": len(checkins),
-            # Expose the first-IN / last-OUT (UTC ISO) so the UI can show actual
-            # times + worked duration. These match what TodayStatusCard expects.
-            "actual_checkin": session["actual_checkin"] if session else None,
-            "actual_checkout": session["actual_checkout"] if session else None,
+            "actual_checkin": actual_checkin,
+            "actual_checkout": actual_checkout,
         },
         # Rich session block (plan v5 §10.2 + attendance-gamification-design).
-        "session": session,
+        "session": _session_context(shift, checkins, now_local),
         # Gamification snapshot (XP / streak / badges) — null if disabled.
         "gamification": game.get_snapshot(emp),
         "geo": {
@@ -404,6 +399,48 @@ def today_status(employee: str | None = None) -> dict:
         },
         "locked": _is_date_locked(day.isoformat()),
     }
+
+
+def _today_ws_times(emp: str, day) -> dict:
+    """Work Session times cho ca hiện tại (hoặc ca đêm hôm trước đang mở).
+
+    Nguồn: VN Attendance Work Session — cùng engine truth với team grid.
+    Với ca qua đêm (planned_end sang hôm sau), ưu tiên WS của work_date hôm
+    trước nếu planned_end ≥ now (ca đang làm / vừa kết thúc sáng nay).
+    """
+    from frappe.utils import getdate
+
+    try:
+        # WS hom nay
+        ws_today = frappe.db.get_value(
+            "VN Attendance Work Session",
+            {"employee": emp, "work_date": str(day), "docstatus": ["!=", 2]},
+            ["actual_checkin", "actual_checkout", "planned_start", "planned_end"],
+            as_dict=True,
+        )
+        if ws_today and ws_today.actual_checkin:
+            return {"actual_checkin": ws_today.actual_checkin, "actual_checkout": ws_today.actual_checkout}
+
+        # Ca qua đêm: WS hom truoc (planned_end sang hom nay)
+        ws_yst = frappe.db.get_value(
+            "VN Attendance Work Session",
+            {
+                "employee": emp,
+                "work_date": str(getdate(day) - timedelta(days=1)),
+                "docstatus": ["!=", 2],
+            },
+            ["actual_checkin", "actual_checkout", "planned_start", "planned_end"],
+            as_dict=True,
+        )
+        if ws_yst and ws_yst.planned_end and ws_yst.actual_checkin:
+            pe = ws_yst.planned_end
+            pe_date = pe.date() if hasattr(pe, "date") else getdate(pe)
+            if pe_date >= day:
+                return {"actual_checkin": ws_yst.actual_checkin, "actual_checkout": ws_yst.actual_checkout}
+
+        return {"actual_checkin": None, "actual_checkout": None}
+    except Exception:
+        return {"actual_checkin": None, "actual_checkout": None}
 
 
 # --------------------------------------------------------------------------- #
