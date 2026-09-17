@@ -147,8 +147,22 @@ def _derive_button_state(shift: dict | None, checkins: list[dict], now_local: da
     planned_start = tz_utils.wall(datetime.fromisoformat(shift["planned_start"].replace("Z", "+00:00")))
     earliest_in = planned_start - timedelta(minutes=_shift_minutes("vn_earliest_checkin_minutes", 60))
 
-    has_in = any((c.log_type or "").upper() in ("IN", "CLOCK IN") for c in checkins)
-    has_out = any((c.log_type or "").upper() in ("OUT", "CLOCK OUT") for c in checkins)
+    # FIX 2026-09-17: ca qua đêm — lọc punch theo CỬA SỔ ca hiện tại. Punch
+    # OUT sáng sớm (vd 08:23 đóng ca hôm trước) nằm TRƯỚC giờ earliest_in
+    # (19:00) → không thuộc ca hôm nay → không được tính là "đã chấm ra".
+    # Trước đây: has_in + has_out = CHECKED_OUT dù OUT thuộc ca hôm kia.
+    def _punch_dt(c):
+        t = c.get("time")
+        if isinstance(t, datetime):
+            return tz_utils.wall(t)
+        try:
+            return tz_utils.wall(datetime.fromisoformat(str(t)[:19]))
+        except Exception:
+            return None
+
+    window_checkins = [c for c in checkins if (_punch_dt(c) is None or _punch_dt(c) >= earliest_in)]
+    has_in = any((c.log_type or "").upper() in ("IN", "CLOCK IN") for c in window_checkins)
+    has_out = any((c.log_type or "").upper() in ("OUT", "CLOCK OUT") for c in window_checkins)
 
     if has_in and has_out:
         return STATE["CHECKED_OUT"]
