@@ -351,6 +351,15 @@ def today_status(employee: str | None = None) -> dict:
     day = tz_utils.now_in_portal().date()
     shift = _today_shift(emp, day)
     checkins = _checkins_for(emp, day) if shift else []
+    # FIX 2026-09-17 ca qua đêm: gộp lượt chấm HÔM TRƯỚC — IN tối hôm trước
+    # (vd 20:39 ngày 16/09) nằm ngoài ngày lịch hôm nay (17/09) nên session
+    # context không thấy giờ vào, FE chỉ hiện giờ ra.
+    if shift:
+        try:
+            yst = _checkins_for(emp, day - timedelta(days=1))
+            checkins = list(yst) + list(checkins)
+        except Exception:
+            pass
     now_local = tz_utils.now_in_portal()
     button_state = _derive_button_state(shift, checkins, now_local)
 
@@ -987,6 +996,11 @@ def my_logs(
     today = tz_utils.now_in_portal().date()
     start = getdate(from_date) if from_date else add_days(today, -30)
     end = getdate(to_date) if to_date else today
+    # FIX 2026-09-16: chặn ở hôm nay — trang chấm công tháng cá nhân không
+    # cần thấy session của NGÀY TƯƠNG LAI (backfill sẵn cho cả tháng, chưa
+    # chấm → need_review=1 hiển thị "Cần xem xét" gây hoang mang).
+    if end > today:
+        end = today
 
     # ── SOURCE OF TRUTH: VN Attendance Work Session ────────────────────────
     # The Work Session is computed by the gege_hr engine (calc.py) from raw
