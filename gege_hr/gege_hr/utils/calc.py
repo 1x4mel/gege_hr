@@ -1407,14 +1407,13 @@ def _load_leave_info(employee: str, work_date) -> dict | None:
     }
 
 
-def _find_ws_for_punch(employee: str, day: str):
-    """Tìm Work Session mà punch của ngày ``day`` có thể thuộc về.
+def _find_ws_for_punch(employee: str, day: str, punch_time=None):
+    """Tìm Work Session mà punch của ngày ``day`` thuộc về.
 
-    FIX 2026-09-17: ca qua đêm — OUT sáng ngày D+1 (vd 08:39 ngày 17/09)
-    thuộc WS work_date=16/09 (planned_end 08:00 ngày 17/09). Trước đây chỉ
-    tìm theo work_date=day (17/09) → WS 16/09 không bao giờ được heal.
-
-    Thứ tự: WS của chính ngày → WS hôm trước.
+    FIX 2026-09-17: ca qua đêm — punch sáng ngày D+1 thuộc WS work_date=D.
+    FIX 2026-09-17b: nhận punch_time trực tiếp (trước đây query punch đầu
+    tiên trong ngày → map nhầm WS khi có nhiều punch).
+    Thứ tự: WS hôm nay (punch trong cửa sổ) → WS hôm trước.
     """
     import frappe
     from frappe.utils import getdate as _gd
@@ -1429,9 +1428,9 @@ def _find_ws_for_punch(employee: str, day: str):
         "actual_checkout",
     ]
 
-    def _punch_in_window(ws, punch_time):
-        if not ws or not ws.planned_start or not ws.planned_end:
-            return False
+    def _in_window(ws):
+        if not punch_time or not ws or not ws.planned_start or not ws.planned_end:
+            return True
         from datetime import timedelta as _td
 
         ps = _as_dt(ws.planned_start)
@@ -1439,19 +1438,6 @@ def _find_ws_for_punch(employee: str, day: str):
         pt = _as_dt(punch_time)
         return bool(ps and pe and pt and ps - _td(hours=4) <= pt <= pe + _td(hours=6))
 
-    punch_time = None
-    try:
-        row = frappe.db.get_value(
-            "Employee Checkin",
-            {"employee": employee, "time": ["between", [f"{day} 00:00", f"{day} 23:59"]]},
-            "time",
-            order_by="time asc",
-        )
-        punch_time = row
-    except Exception:
-        pass
-
-    # 1) WS hom nay — chi tra ve neu punch thuoc cua so
     try:
         ws = frappe.db.get_value(
             "VN Attendance Work Session",
@@ -1459,11 +1445,10 @@ def _find_ws_for_punch(employee: str, day: str):
             fields,
             as_dict=True,
         )
-        if ws and ws.shift_instance and (punch_time is None or _punch_in_window(ws, punch_time)):
+        if ws and ws.shift_instance and _in_window(ws):
             return ws
     except Exception:
         pass
-    # 2) WS hom truoc (ca qua dem)
     try:
         prev = (_gd(day) - timedelta(days=1)).isoformat()
         ws_prev = frappe.db.get_value(
@@ -1545,7 +1530,7 @@ def heal_stale_sessions(start_date, end_date, limit: int = 100) -> int:
         key = (_p.get("employee"), day)
         if key in seen:
             continue
-        ws = _find_ws_for_punch(_p.get("employee"), day)
+        ws = _find_ws_for_punch(_p.get("employee"), day, _p.get("time"))
         if not ws:
             continue
         if not _ws_stale(ws, _p):
@@ -1594,7 +1579,7 @@ def recalc_stale_sessions(lookback_hours: int = 48, limit: int = 200) -> int:
         key = (p.get("employee"), day)
         if key in seen:
             continue
-        ws = _find_ws_for_punch(p.get("employee"), day)
+        ws = _find_ws_for_punch(p.get("employee"), day, p.get("time"))
         if not ws:
             continue
         if not _ws_stale(ws, p):

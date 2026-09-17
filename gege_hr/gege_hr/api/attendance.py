@@ -374,6 +374,14 @@ def today_status(employee: str | None = None) -> dict:
     # FIX 2026-09-17: giờ vào/ra lấy từ WORK SESSION (engine truth) — đồng bộ
     # với team grid. Trước đây session_context chỉ đọc lượt chấm thô theo
     # ngày lịch → ca qua đêm thiếu IN hôm trước / lộn xộn OUT hôm kia.
+    # FIX 2026-09-17b: HEAL session hôm nay TRƯỚC khi đọc — nv vừa chấm vào
+    # (vd 20:00) nhưng WS chưa tính lại → fallback nhầm WS hôm trước.
+    try:
+        from gege_hr.gege_hr.utils.calc import heal_stale_sessions
+
+        heal_stale_sessions(day.isoformat(), day.isoformat(), limit=5)
+    except Exception:
+        pass
     ws_times = _today_ws_times(emp, day)
     actual_checkin = ws_times.get("actual_checkin")
     actual_checkout = ws_times.get("actual_checkout")
@@ -418,7 +426,11 @@ def _today_ws_times(emp: str, day) -> dict:
             ["actual_checkin", "actual_checkout", "planned_start", "planned_end"],
             as_dict=True,
         )
-        if ws_today and ws_today.actual_checkin:
+        if ws_today:
+            # WS hôm nay TỒN TẠI → dùng nó (kể cả actual_checkin=None nếu nv
+            # chưa chấm). KHÔNG fallback về WS hôm trước — tránh hiển thị giờ
+            # của ca hôm trước trên card ca hôm nay (vd Phan Đức Anh 17/09
+            # 20:00 mới chấm vào, WS chưa kịp recalc → fallback nhầm 16/09).
             return {"actual_checkin": ws_today.actual_checkin, "actual_checkout": ws_today.actual_checkout}
 
         # Ca qua đêm: WS hom truoc (planned_end sang hom nay)
