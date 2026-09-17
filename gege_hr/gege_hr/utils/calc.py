@@ -1407,6 +1407,78 @@ def _load_leave_info(employee: str, work_date) -> dict | None:
     }
 
 
+def _find_ws_for_punch(employee: str, day: str):
+    """Tìm Work Session mà punch của ngày ``day`` có thể thuộc về.
+
+    FIX 2026-09-17: ca qua đêm — OUT sáng ngày D+1 (vd 08:39 ngày 17/09)
+    thuộc WS work_date=16/09 (planned_end 08:00 ngày 17/09). Trước đây chỉ
+    tìm theo work_date=day (17/09) → WS 16/09 không bao giờ được heal.
+
+    Thứ tự: WS của chính ngày → WS hôm trước.
+    """
+    import frappe
+    from frappe.utils import getdate as _gd
+
+    fields = [
+        "name",
+        "shift_instance",
+        "calculated_at",
+        "planned_start",
+        "planned_end",
+        "actual_checkin",
+        "actual_checkout",
+    ]
+
+    def _punch_in_window(ws, punch_time):
+        if not ws or not ws.planned_start or not ws.planned_end:
+            return False
+        from datetime import timedelta as _td
+
+        ps = _as_dt(ws.planned_start)
+        pe = _as_dt(ws.planned_end)
+        pt = _as_dt(punch_time)
+        return bool(ps and pe and pt and ps - _td(hours=4) <= pt <= pe + _td(hours=6))
+
+    punch_time = None
+    try:
+        row = frappe.db.get_value(
+            "Employee Checkin",
+            {"employee": employee, "time": ["between", [f"{day} 00:00", f"{day} 23:59"]]},
+            "time",
+            order_by="time asc",
+        )
+        punch_time = row
+    except Exception:
+        pass
+
+    # 1) WS hom nay — chi tra ve neu punch thuoc cua so
+    try:
+        ws = frappe.db.get_value(
+            "VN Attendance Work Session",
+            {"employee": employee, "work_date": day, "docstatus": ["!=", 2]},
+            fields,
+            as_dict=True,
+        )
+        if ws and ws.shift_instance and (punch_time is None or _punch_in_window(ws, punch_time)):
+            return ws
+    except Exception:
+        pass
+    # 2) WS hom truoc (ca qua dem)
+    try:
+        prev = (_gd(day) - timedelta(days=1)).isoformat()
+        ws_prev = frappe.db.get_value(
+            "VN Attendance Work Session",
+            {"employee": employee, "work_date": prev, "docstatus": ["!=", 2]},
+            fields,
+            as_dict=True,
+        )
+        if ws_prev and ws_prev.shift_instance:
+            return ws_prev
+    except Exception:
+        pass
+    return None
+
+
 def _ws_stale(ws, punch) -> bool:
     """Session có cần tính lại không?
 
@@ -1473,24 +1545,8 @@ def heal_stale_sessions(start_date, end_date, limit: int = 100) -> int:
         key = (_p.get("employee"), day)
         if key in seen:
             continue
-        try:
-            ws = frappe.db.get_value(
-                "VN Attendance Work Session",
-                {"employee": _p.get("employee"), "work_date": day},
-                [
-                    "name",
-                    "shift_instance",
-                    "calculated_at",
-                    "planned_start",
-                    "planned_end",
-                    "actual_checkin",
-                    "actual_checkout",
-                ],
-                as_dict=True,
-            )
-        except Exception:
-            ws = None
-        if not ws or not ws.shift_instance:
+        ws = _find_ws_for_punch(_p.get("employee"), day)
+        if not ws:
             continue
         if not _ws_stale(ws, _p):
             continue
@@ -1538,24 +1594,8 @@ def recalc_stale_sessions(lookback_hours: int = 48, limit: int = 200) -> int:
         key = (p.get("employee"), day)
         if key in seen:
             continue
-        try:
-            ws = frappe.db.get_value(
-                "VN Attendance Work Session",
-                {"employee": p.get("employee"), "work_date": day},
-                [
-                    "name",
-                    "shift_instance",
-                    "calculated_at",
-                    "planned_start",
-                    "planned_end",
-                    "actual_checkin",
-                    "actual_checkout",
-                ],
-                as_dict=True,
-            )
-        except Exception:
-            ws = None
-        if not ws or not ws.shift_instance:
+        ws = _find_ws_for_punch(p.get("employee"), day)
+        if not ws:
             continue
         if not _ws_stale(ws, p):
             continue
