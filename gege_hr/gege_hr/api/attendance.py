@@ -440,12 +440,37 @@ def _today_ws_times(emp: str, day) -> dict:
             ["actual_checkin", "actual_checkout", "planned_start", "planned_end"],
             as_dict=True,
         )
-        if ws_today:
-            # WS hôm nay TỒN TẠI → dùng nó (kể cả actual_checkin=None nếu nv
-            # chưa chấm). KHÔNG fallback về WS hôm trước — tránh hiển thị giờ
-            # của ca hôm trước trên card ca hôm nay (vd Phan Đức Anh 17/09
-            # 20:00 mới chấm vào, WS chưa kịp recalc → fallback nhầm 16/09).
+        if ws_today and ws_today.actual_checkin:
+            # WS hôm nay CÓ actual_checkin (nv đã chấm vào ca hôm nay) → dùng.
             return {"actual_checkin": ws_today.actual_checkin, "actual_checkout": ws_today.actual_checkout}
+
+        if ws_today and not ws_today.actual_checkin:
+            # WS hôm nay TỒN TẠI nhưng TRỐNG (ca chưa bắt đầu — vd Ca tối 20:00
+            # chưa tới giờ). Kiểm tra WS hôm trước: nếu ca qua đêm đang mở /
+            # vừa kết thúc sáng nay → hiển thị giờ của ca ĐANG LÀM.
+            try:
+                ws_prev = frappe.db.get_value(
+                    "VN Attendance Work Session",
+                    {
+                        "employee": emp,
+                        "work_date": str(getdate(day) - timedelta(days=1)),
+                        "docstatus": ["!=", 2],
+                    },
+                    ["actual_checkin", "actual_checkout", "planned_end"],
+                    as_dict=True,
+                )
+                if ws_prev and ws_prev.planned_end and ws_prev.actual_checkin:
+                    pe = ws_prev.planned_end
+                    pe_date = pe.date() if hasattr(pe, "date") else getdate(pe)
+                    if pe_date >= day:
+                        return {
+                            "actual_checkin": ws_prev.actual_checkin,
+                            "actual_checkout": ws_prev.actual_checkout,
+                        }
+            except Exception:
+                pass
+            # Không có WS hôm trước phù hợp → ca hôm nay chưa bắt đầu
+            return {"actual_checkin": None, "actual_checkout": None}
 
         # Ca qua đêm: WS hom truoc (planned_end sang hom nay)
         ws_yst = frappe.db.get_value(
@@ -635,7 +660,27 @@ def mobile_checkin(
     server_now = tz_utils.now_in_portal()
 
     # ── Ngoài cửa sổ ca → BẮT BUỘC lý do (phiếu giải trình cho HR) ────────
-    violation = _window_violation(shift, log_type, server_now)
+    # FIX 2026-09-18: ca qua đêm — NV chấm RA sáng hôm sau, shift từ
+    # _today_shift là ca HÔM NAY (kết thúc sáng mai) → so planned_end sai
+    # ("về sớm 1414 phút"). Kiểm tra ca HÔM TRƯỚC nếu planned_end của nó
+    # bao giờ hiện tại (phiên đang mở cần đóng).
+    violation_shift = shift
+    if shift and log_type and str(log_type).upper() == "OUT":
+        try:
+            from frappe.utils import getdate as _gd
+
+            prev_day = str(_gd(day) - timedelta(days=1))
+            prev_shift = _today_shift(emp, prev_day)
+            if prev_shift and prev_shift.get("planned_end"):
+                pe = tz_utils.wall(
+                    datetime.fromisoformat(str(prev_shift["planned_end"]).replace("Z", "+00:00"))
+                )
+                if pe.date() >= day:
+                    # Ca hôm trước kết thúc hôm nay → lượt OUT này đóng ca đó
+                    violation_shift = prev_shift
+        except Exception:
+            pass
+    violation = _window_violation(violation_shift, log_type, server_now)
     if violation and not (reason or "").strip():
         frappe.throw(
             _(
