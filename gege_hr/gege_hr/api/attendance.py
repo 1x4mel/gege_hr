@@ -669,7 +669,7 @@ def mobile_checkin(
         try:
             from frappe.utils import getdate as _gd
 
-            prev_day = str(_gd(day) - timedelta(days=1))
+            prev_day = _gd(day) - timedelta(days=1)  # date object, KHÔNG string
             prev_shift = _today_shift(emp, prev_day)
             if prev_shift and prev_shift.get("planned_end"):
                 pe = tz_utils.wall(
