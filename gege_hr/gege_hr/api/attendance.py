@@ -391,9 +391,14 @@ def today_status(employee: str | None = None) -> dict:
     # FIX 2026-09-17b: HEAL session hôm nay TRƯỚC khi đọc — nv vừa chấm vào
     # (vd 20:00) nhưng WS chưa tính lại → fallback nhầm WS hôm trước.
     try:
+        from frappe.utils import add_days
+
         from gege_hr.gege_hr.utils.calc import heal_stale_sessions
 
-        heal_stale_sessions(day.isoformat(), day.isoformat(), limit=5)
+        # Heal hôm nay + HÔM TRƯỚC — ca đêm chấm RA sáng nay thuộc WS hôm
+        # trước; không heal hôm trước thì WS hôm trước chưa pair → fallback
+        # hiển thị giờ vào cũ / FE thấy ca trước (lỗi 1/10 Phí Minh Thắng).
+        heal_stale_sessions(add_days(day, -1).isoformat(), day.isoformat(), limit=10)
     except Exception:
         pass
     ws_times = _today_ws_times(emp, day)
