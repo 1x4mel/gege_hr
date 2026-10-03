@@ -697,6 +697,24 @@ def test_ta12c_member_carries_department(env):
     assert _member(res, "E2").get("department") is None
 
 
+def test_ta12d_leave_day_without_session_is_on_leave(env):
+    """TA12d: an approved leave day with NO Work Session / Attendance shows
+    "On Leave" — it used to fall into the "Not marked" branch first."""
+    _seed_team(env.fr)
+    _seed_month(env.fr)
+    env.fr.stores[LA_DT]["LA-E1-22"] = {
+        "name": "LA-E1-22",
+        "employee": "E1",
+        "from_date": "2026-09-22",
+        "to_date": "2026-09-22",
+        "leave_type": "Annual Leave",
+        "status": "Approved",
+        "docstatus": 1,
+    }
+    res = env.att.team_attendance(manager="M1", from_date="2026-09-01", to_date="2026-09-30")
+    assert _day(_member(res, "E1"), "2026-09-22")["status"] == "On Leave"
+
+
 def test_ta12b_cell_matrix_locks_and_badges_wired(env):
     """Companion: cell extras wired into every branch — locked day read-only
     even for HR; checkout-miss + OT chips on the right cell; future day blocks
@@ -1083,3 +1101,60 @@ def test_ta27_correction_on_behalf_gates(env, monkeypatch):
             employee="E2", work_date="2026-09-14", correction_type="missing_checkout", reason="thử quyền"
         )
     assert ei.value.kind == "Permission"
+
+
+# --------------------------------------------------------------------------- #
+# employee_month_sheet (plans/plan-employee-month-sheet.md)
+# --------------------------------------------------------------------------- #
+def _month_sheet(env):
+    ms_api = importlib.import_module("gege_hr.gege_hr.api.month_sheet")
+    importlib.reload(ms_api)
+    ms_api.att_api = env.att
+    ms_api.emp_utils = env.att.emp_utils
+    ms_api.tz_utils = env.att.tz_utils
+    return ms_api
+
+
+def test_ms1_month_sheet_days_and_totals(env):
+    """MS1: one employee × one month — 24/7 day grid, late day from WS, leave
+    day from Leave Application, past days without punch/leave = absent."""
+    _seed_team(env.fr)
+    _seed_month(env.fr)
+    ms_api = _month_sheet(env)
+    res = ms_api.employee_month_sheet(employee="E1", year=2026, month=9)
+    assert res["from_date"] == "2026-09-01" and res["to_date"] == "2026-09-30"
+    assert len(res["days"]) == 30
+    by = {d["date"]: d for d in res["days"]}
+    assert by["2026-09-14"]["status"] == "worked"
+    assert by["2026-09-14"]["late_minutes"] == 10
+    assert by["2026-09-16"]["status"] == "future"  # portal "now" = 2026-09-15
+    t = res["totals"]
+    assert t["standard_days"] == 30
+    assert t["late"]["days"] >= 1
+    assert res["can_edit"] is True  # HR Manager
+
+    e2 = ms_api.employee_month_sheet(employee="E2", year=2026, month=9)
+    e2_by = {d["date"]: d for d in e2["days"]}
+    assert e2_by["2026-09-14"]["status"] == "leave_paid"
+    assert e2_by["2026-09-13"]["status"] == "absent"
+    assert e2_by["2026-09-20"]["pending"][0]["doctype"] == "Leave Application"
+
+
+def test_ms2_month_sheet_line_manager_read_only_and_scoped(env):
+    """MS2: Line Manager sees own reports_to member read-only; others → 403."""
+    _seed_team(env.fr)
+    _seed_month(env.fr)
+    ms_api = _month_sheet(env)
+    env.state["roles"] = ["Line Manager"]
+    res = ms_api.employee_month_sheet(employee="E1", year=2026, month=9)
+    assert res["can_edit"] is False
+    with pytest.raises(Exception):
+        ms_api.employee_month_sheet(employee="E3", year=2026, month=9)
+
+
+def test_ms3_month_sheet_hr_user_read_only(env):
+    _seed_team(env.fr)
+    _seed_month(env.fr)
+    ms_api = _month_sheet(env)
+    env.state["roles"] = ["HR User"]
+    assert ms_api.employee_month_sheet(employee="E3", year=2026, month=9)["can_edit"] is False

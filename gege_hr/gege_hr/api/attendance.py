@@ -2811,24 +2811,9 @@ def team_attendance(
                 "open_checkout_miss": cm_row.get("name") if cm_open_today else None,
                 "can": cell_can,
             }
-            if not att and not ws:
-                days.append(
-                    {
-                        "work_date": str(cur),
-                        "shift": (inst_by_emp.get(m["name"], {}).get(str(cur)) or ""),
-                        "status": "Not marked",
-                        "checkin_time": None,
-                        "checkout_time": None,
-                        "late_minutes": 0,
-                        "early_leave_minutes": 0,
-                        **cell_extras,
-                    }
-                )
-                cur += timedelta(days=1)
-                continue
-
             # Approved Leave Application for this day → "On Leave" (sync with
-            # /hr/schedule which reads Leave Application directly).
+            # /hr/schedule which reads Leave Application directly). Checked BEFORE
+            # the "Not marked" branch: a leave day usually has no WS/Attendance.
             la_type = leave_by_emp_date.get(m["name"], {}).get(str(cur))
             if la_type is not None:
                 days.append(
@@ -2845,6 +2830,22 @@ def team_attendance(
                     }
                 )
                 summary["on_leave"] += 1
+                cur += timedelta(days=1)
+                continue
+
+            if not att and not ws:
+                days.append(
+                    {
+                        "work_date": str(cur),
+                        "shift": (inst_by_emp.get(m["name"], {}).get(str(cur)) or ""),
+                        "status": "Not marked",
+                        "checkin_time": None,
+                        "checkout_time": None,
+                        "late_minutes": 0,
+                        "early_leave_minutes": 0,
+                        **cell_extras,
+                    }
+                )
                 cur += timedelta(days=1)
                 continue
 
