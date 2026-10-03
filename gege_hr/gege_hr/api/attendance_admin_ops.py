@@ -239,18 +239,29 @@ def _audit(
     reference_doctype: str | None = None,
     reference_name: str | None = None,
     description: str = "",
+    work_date: str | None = None,
 ) -> None:
-    """Best-effort VN Audit Event write — never blocks the business operation."""
+    """Best-effort VN Audit Event write — never blocks the business operation.
+
+    ``audit_type`` is the Select-safe ``"Manual Override"`` (``action`` names
+    like "Admin Edit Checkin" are not Select options, so the insert used to
+    fail) and ``company`` comes from the employee — ``audit.log`` skips rows
+    without a company, which left every punch edit here unaudited.
+    """
     try:
         from gege_hr.gege_hr.api import audit as audit_api
 
+        company = None
+        if employee:
+            company = frappe.db.get_value("Employee", employee, "company")
         audit_api.log(
-            action,
-            company=None,
+            "Manual Override",
+            company=company,
             employee=employee,
+            work_date=work_date or None,
             reference_doctype=reference_doctype,
             reference_name=reference_name,
-            description=description,
+            description=f"[{action}] {description}".strip(),
         )
     except Exception:
         try:
@@ -535,6 +546,7 @@ def create_checkin(
         reference_doctype=CHECKIN_DOCTYPE,
         reference_name=getattr(doc, "name", None),
         description=f"HR tạo lượt chấm {lt} {dt.strftime('%Y-%m-%d %H:%M:%S')} — lý do: {reason}",
+        work_date=work_date,
     )
     _commit()
     _publish_att_updated(employee, work_date)
@@ -601,6 +613,7 @@ def update_checkin(
             f"{(old_dt.strftime('%Y-%m-%d %H:%M:%S') if old_dt else '?')}"
             f"{'/' + new_dt.strftime('%Y-%m-%d %H:%M:%S') if new_dt else ''} — lý do: {reason}"
         ),
+        work_date=((new_dt or old_dt).date().isoformat() if (new_dt or old_dt) else None),
     )
     _commit()
     _publish_att_updated(
@@ -635,6 +648,7 @@ def delete_checkin(name: str | None = None, reason: str | None = None) -> dict:
         reference_doctype=CHECKIN_DOCTYPE,
         reference_name=name,
         description=(f"HR xoá lượt chấm {name} ({work_date or '?'}) — lý do: {reason}"),
+        work_date=work_date,
     )
     _commit()
     _publish_att_updated(getattr(existing, "employee", None), work_date)
@@ -774,6 +788,7 @@ def mark_attendance_bulk(
                 reference_doctype=ATTENDANCE_DOCTYPE,
                 reference_name=att_name,
                 description=f"HR chấm thủ công {st} ngày {work_date} (overwrite={int(overwrite or 0)})",
+                work_date=work_date,
             )
         except Exception:
             frappe.log_error(title=f"mark_attendance_bulk failed for {emp}")
@@ -849,6 +864,7 @@ def approve_session_overtime(
             f"HR duyệt OT phiên {ws_name}: raw={raw} → approved={approved}"
             f"{(' — ' + (note or '').strip()) if (note or '').strip() else ''}"
         ),
+        work_date=str(getattr(ws, "work_date", "") or "") or None,
     )
     _commit()
     _publish_att_updated(getattr(ws, "employee", None), str(getattr(ws, "work_date", "") or ""))

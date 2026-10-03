@@ -660,3 +660,29 @@ def test_approve_ot_requires_hr_manager_or_system(env):
     # …while the punch write path stays allowed for HR User
     res = m.create_checkin(employee="E2", time="2026-08-08 08:30", log_type="IN", reason="abc")
     assert res["ok"] is True
+
+
+def test_audit_writes_manual_override_with_employee_company(monkeypatch):
+    """_audit must use a Select-safe audit_type + the employee's company —
+    ``audit.log`` drops rows without company, and "Admin …" action names are
+    not VN Audit Event options (both left punch edits unaudited)."""
+    stub = _new_stub()
+    monkeypatch.setitem(sys.modules, "frappe", stub)
+    m = importlib.import_module("gege_hr.gege_hr.api.attendance_admin_ops")
+    importlib.reload(m)
+    stub.stores["Employee"] = {"E1": {"name": "E1", "company": "Gege"}}
+
+    calls = []
+    fake_audit = types.SimpleNamespace(log=lambda audit_type, **kw: calls.append((audit_type, kw)))
+    api_pkg = importlib.import_module("gege_hr.gege_hr.api")
+    monkeypatch.setattr(api_pkg, "audit", fake_audit, raising=False)
+    monkeypatch.setitem(sys.modules, "gege_hr.gege_hr.api.audit", fake_audit)
+
+    m._audit("Admin Delete Checkin", employee="E1", description="xoá", work_date="2026-10-01")
+
+    assert len(calls) == 1
+    audit_type, kw = calls[0]
+    assert audit_type == "Manual Override"
+    assert kw["company"] == "Gege"
+    assert kw["work_date"] == "2026-10-01"
+    assert kw["description"].startswith("[Admin Delete Checkin]")
