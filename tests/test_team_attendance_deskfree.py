@@ -697,6 +697,24 @@ def test_ta12c_member_carries_department(env):
     assert _member(res, "E2").get("department") is None
 
 
+def test_ta12d_leave_day_without_session_is_on_leave(env):
+    """TA12d: an approved leave day with NO Work Session / Attendance shows
+    "On Leave" — it used to fall into the "Not marked" branch first."""
+    _seed_team(env.fr)
+    _seed_month(env.fr)
+    env.fr.stores[LA_DT]["LA-E1-22"] = {
+        "name": "LA-E1-22",
+        "employee": "E1",
+        "from_date": "2026-09-22",
+        "to_date": "2026-09-22",
+        "leave_type": "Annual Leave",
+        "status": "Approved",
+        "docstatus": 1,
+    }
+    res = env.att.team_attendance(manager="M1", from_date="2026-09-01", to_date="2026-09-30")
+    assert _day(_member(res, "E1"), "2026-09-22")["status"] == "On Leave"
+
+
 def test_ta12b_cell_matrix_locks_and_badges_wired(env):
     """Companion: cell extras wired into every branch — locked day read-only
     even for HR; checkout-miss + OT chips on the right cell; future day blocks
