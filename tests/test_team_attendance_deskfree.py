@@ -602,10 +602,16 @@ def test_ta18_approve_ot_requires_approver_and_raw_ot(env):
 
 
 def test_ta18b_happy_paths_for_hr_and_lm(env):
-    """Companion: HR on a past unlocked day with a punch → everything on;
-    LM on own member → manage flags on but mark/recalc/CM/OT off."""
+    """Companion: HR Manager on a past unlocked day with a punch → everything
+    on; LM / HR User (owner D1: read-only) → only requests + nudge."""
     hr = env.att._team_att_cell_can(
-        is_hr=True, is_lm_of=False, has_punch=True, raw_ot=1.0, open_cm=True, is_ot_approver=True
+        is_hr=True,
+        is_lm_of=False,
+        has_punch=True,
+        raw_ot=1.0,
+        open_cm=True,
+        is_ot_approver=True,
+        is_editor=True,
     )
     assert hr["fix_punch"] is True
     assert hr["delete_punch"] is True
@@ -616,12 +622,18 @@ def test_ta18b_happy_paths_for_hr_and_lm(env):
     assert hr["nudge"] is True
 
     lm = env.att._team_att_cell_can(is_hr=False, is_lm_of=True, has_punch=True)
-    assert lm["fix_punch"] is True
+    assert lm["fix_punch"] is False
+    assert lm["delete_punch"] is False
     assert lm["create_request"] is True
     assert lm["nudge"] is True
-    assert lm["mark_attendance"] is False  # HR-only (Employee Attendance Tool parity)
+    assert lm["mark_attendance"] is False
     assert lm["recalc"] is False
     assert lm["approve_ot"] is False
+
+    hr_user = env.att._team_att_cell_can(is_hr=True, is_lm_of=False, has_punch=True, is_editor=False)
+    assert hr_user["fix_punch"] is False
+    assert hr_user["mark_attendance"] is False
+    assert hr_user["recalc"] is False
 
 
 # --------------------------------------------------------------------------- #
@@ -802,14 +814,16 @@ def _set_roles(env, roles):
 
 
 def test_ta1_context_line_manager_scope(env):
-    """TA1: LM context — team scope, manage flags on, OT approval off."""
+    """TA1: LM context — team scope, read-only (owner D1), OT approval off."""
     _seed_team(env.fr)
     _seed_month(env.fr)
     _set_roles(env, ["Line Manager", "Employee"])
     res = env.att.team_attendance_context(from_date="2026-09-01", to_date="2026-09-30")
     assert res["scope"] == {"mode": "team", "member_count": 2}
     assert res["viewer_employee"] == "M1"
-    assert res["can"]["fix_punch"] is True
+    assert res["can"]["fix_punch"] is False
+    assert res["can"]["mark_attendance"] is False
+    assert res["can"]["create_request"] is True
     assert res["can"]["approve_ot"] is False
     assert res["can"]["manage_period"] is False
 
@@ -902,41 +916,31 @@ def ops_env(monkeypatch):
     return types.SimpleNamespace(ops=ops, fr=mod, state=state, audits=audits, recalcs=recalcs, rec_ws=rec_ws)
 
 
-def test_ta13_mark_bulk_lm_own_team(ops_env):
-    """TA13: a Line Manager may bulk-mark their own reports."""
+def test_ta13_mark_bulk_lm_read_only(ops_env):
+    """TA13 (owner D1): a Line Manager may NOT bulk-mark, even own reports."""
     _seed_team(ops_env.fr)
     ops_env.state["roles"] = ["Line Manager", "Employee"]
-    res = ops_env.ops.mark_attendance_bulk(
-        employees=["E1", "E2"], attendance_date="2026-09-20", status="Present"
-    )
-    assert res["created"] == 2
-    assert res["skipped"] == 0
-    assert all(r["ok"] for r in res["results"])
-    marked = [
+    with pytest.raises(Exception):
+        ops_env.ops.mark_attendance_bulk(
+            employees=["E1", "E2"], attendance_date="2026-09-20", status="Present"
+        )
+    assert not [
         r
         for r in ops_env.fr.stores.get("Attendance", {}).values()
         if r.get("attendance_date") == "2026-09-20"
     ]
-    assert len(marked) == 2
 
 
-def test_ta14_mark_bulk_lm_mixed_partial_safe(ops_env):
-    """TA14: an LM mixing own + foreign members → foreign rows refused, the
-    batch itself is NOT aborted (partial-safe)."""
+def test_ta14_mark_bulk_hr_user_read_only(ops_env):
+    """TA14 (owner D1): HR User may NOT bulk-mark."""
     _seed_team(ops_env.fr)
-    ops_env.state["roles"] = ["Line Manager"]
-    res = ops_env.ops.mark_attendance_bulk(
-        employees=["E1", "E3"], attendance_date="2026-09-20", status="Absent"
-    )
-    by_emp = {r["employee"]: r for r in res["results"]}
-    assert by_emp["E1"]["ok"] is True
-    assert by_emp["E3"]["ok"] is False
-    assert res["created"] == 1
+    ops_env.state["roles"] = ["HR User"]
+    with pytest.raises(Exception):
+        ops_env.ops.mark_attendance_bulk(employees=["E1"], attendance_date="2026-09-20", status="Absent")
 
 
-def test_ta15_delete_checkin_lm_own_team(ops_env):
-    """TA15: an LM deletes a stray punch of their OWN member → ok + audit +
-    Work-Session recalc fired."""
+def test_ta15_delete_checkin_lm_read_only(ops_env):
+    """TA15 (owner D1): an LM may NOT delete a punch of their own member."""
     _seed_team(ops_env.fr)
     ops_env.fr.stores.setdefault("Employee Checkin", {})["CH-1"] = {
         "name": "CH-1",
@@ -946,11 +950,9 @@ def test_ta15_delete_checkin_lm_own_team(ops_env):
         "device_id": "gege_hr-admin",
     }
     ops_env.state["roles"] = ["Line Manager"]
-    res = ops_env.ops.delete_checkin(name="CH-1", reason="punch trùng")
-    assert res["ok"] is True
-    assert "CH-1" not in ops_env.fr.stores["Employee Checkin"]
-    assert ops_env.rec_ws and ops_env.rec_ws[0][0] == "E1"
-    assert ops_env.audits  # VN Audit Event written
+    with pytest.raises(Exception):
+        ops_env.ops.delete_checkin(name="CH-1", reason="punch trùng")
+    assert "CH-1" in ops_env.fr.stores["Employee Checkin"]
 
 
 def test_ta15b_delete_checkin_lm_foreign_denied(ops_env):

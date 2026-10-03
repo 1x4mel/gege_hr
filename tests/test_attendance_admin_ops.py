@@ -654,12 +654,12 @@ def test_all_endpoints_deny_plain_employee(env, monkeypatch):
 def test_approve_ot_requires_hr_manager_or_system(env):
     m, stub, _ = env
     _seed_base(stub)
-    stub._roles = {"HR User"}  # HR User may read/write punches but NOT approve OT
+    stub._roles = {"HR User"}  # HR User is read-only (owner D1): no OT approval…
     with pytest.raises(_PermErr):
         m.approve_session_overtime(work_session="WS-1")
-    # …while the punch write path stays allowed for HR User
-    res = m.create_checkin(employee="E2", time="2026-08-08 08:30", log_type="IN", reason="abc")
-    assert res["ok"] is True
+    # …and no punch writes either
+    with pytest.raises(_Thrown):
+        m.create_checkin(employee="E2", time="2026-08-08 08:30", log_type="IN", reason="abc")
 
 
 def test_audit_writes_manual_override_with_employee_company(monkeypatch):

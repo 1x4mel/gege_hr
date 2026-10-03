@@ -41,6 +41,10 @@ EXCEPTION_DOCTYPE = "VN Attendance Exception"
 
 HR_ROLES = ["HR Manager", "HR User", "System Manager"]
 OT_APPROVER_ROLES = ["HR Manager", "System Manager"]
+# Owner D1 (plans/plan-employee-month-sheet.md): only HR Manager / System Manager
+# EDIT attendance (create/update/delete punch, mark, generate). HR User and Line
+# Manager keep read access (list_checkins / work-session detail).
+EDIT_ROLES = ["HR Manager", "System Manager"]
 
 _VALID_LOG_TYPES = ("IN", "OUT")
 _VALID_ATTENDANCE_STATUSES = ("Present", "Absent", "Half Day", "Work From Home")
@@ -95,6 +99,11 @@ _CHECKIN_FIELDS = [
 # --------------------------------------------------------------------------- #
 def _require_hr() -> None:
     frappe.only_for(HR_ROLES)
+
+
+def _require_editor() -> None:
+    if not set(frappe.get_roles()) & set(EDIT_ROLES):
+        frappe.throw(frappe._("Chỉ HR Manager mới được sửa chấm công."), frappe.PermissionError)
 
 
 def _require_ot_approver() -> None:
@@ -517,7 +526,7 @@ def create_checkin(
     employee = (employee or "").strip()
     if not employee or not frappe.db.exists("Employee", employee):
         frappe.throw(frappe._("Nhân viên không tồn tại."), frappe.DoesNotExistError)
-    _require_hr_or_lm_of(employee)
+    _require_editor()
     lt = _norm_log_type(log_type)
     reason = _require_reason(reason)
     dt = _parse_dt(time)
@@ -579,7 +588,7 @@ def update_checkin(
     existing = frappe.db.get_value(CHECKIN_DOCTYPE, name, ["employee", "time"], as_dict=True)
     if not existing or not getattr(existing, "employee", None):
         frappe.throw(frappe._("Lượt chấm {0} không tồn tại.").format(name), frappe.DoesNotExistError)
-    _require_hr_or_lm_of(getattr(existing, "employee", None))
+    _require_editor()
 
     old_dt = _parse_dt(getattr(existing, "time", None))
     new_dt = _parse_dt(time) if time else None
@@ -633,7 +642,7 @@ def delete_checkin(name: str | None = None, reason: str | None = None) -> dict:
     existing = frappe.db.get_value(CHECKIN_DOCTYPE, name, ["employee", "time"], as_dict=True)
     if not existing or not getattr(existing, "employee", None):
         frappe.throw(frappe._("Lượt chấm {0} không tồn tại.").format(name), frappe.DoesNotExistError)
-    _require_hr_or_lm_of(getattr(existing, "employee", None))
+    _require_editor()
 
     old_dt = _parse_dt(getattr(existing, "time", None))
     work_date = old_dt.date().isoformat() if old_dt else None
@@ -671,7 +680,7 @@ def generate_attendance(
     inside a Locked monthly period. Audited here because the sync module is
     also invoked doc-event-side where the actor is a background job.
     """
-    _require_hr()
+    _require_editor()
     start = _parse_date(from_date) or (_dt.date.today() - _dt.timedelta(days=7))
     end = _parse_date(to_date) or _dt.date.today()
     if start > end:
@@ -718,12 +727,8 @@ def mark_attendance_bulk(
     rows submit only when the date sits in a Locked monthly period (same
     decision as ``attendance_sync``).
     """
-    # WP4: Line Manager may bulk-mark their OWN reports only (per-row scope
-    # check below); HR roles keep company-wide reach.
-    caller_roles = set(frappe.get_roles())
-    if not (caller_roles & (set(HR_ROLES) | {"Line Manager"})):
-        frappe.throw(frappe._("Bạn không có quyền thực hiện thao tác này."), frappe.PermissionError)
-    is_hr_caller = bool(caller_roles & set(HR_ROLES))
+    # Owner D1: only HR Manager / System Manager may mark (company-wide).
+    _require_editor()
     day = _parse_date(attendance_date)
     if not day:
         frappe.throw(frappe._("Thiếu ngày chấm công."), frappe.MandatoryError)
@@ -745,9 +750,6 @@ def mark_attendance_bulk(
     for emp in emps:
         if not frappe.db.exists("Employee", emp):
             results.append({"employee": emp, "ok": False, "error": "Nhân viên không tồn tại"})
-            continue
-        if not is_hr_caller and not _is_lm_of(emp):
-            results.append({"employee": emp, "ok": False, "error": "Ngoài phạm vi team của bạn"})
             continue
         existing = frappe.db.get_value(
             ATTENDANCE_DOCTYPE,

@@ -2054,22 +2054,35 @@ def team_daily_status(
     }
 
 
-def team_day_can(*, status, locked, is_hr, is_lm_of, ws=None, is_today=False) -> dict:
+# Owner D1 (plans/plan-employee-month-sheet.md, 2026-10-03): only HR Manager /
+# System Manager may EDIT attendance (fix/delete punches, mark, recalc,
+# generate). HR User + Line Manager are read-only; they may still file requests
+# on an employee's behalf (those go through approval) and nudge.
+ATTENDANCE_EDIT_ROLES = {"HR Manager", "System Manager"}
+
+
+def _is_attendance_editor(roles=None) -> bool:
+    if roles is None:
+        roles = emp_utils.get_user_roles() or []
+    return bool(set(roles) & ATTENDANCE_EDIT_ROLES)
+
+
+def team_day_can(*, status, locked, is_hr, is_lm_of, ws=None, is_today=False, is_editor=False) -> dict:
     """Pure — server-driven action matrix cho Team Today drawer (plan §2.2).
 
-    FE chỉ render theo matrix này; BE là nguồn sự thật duy nhất.
+    FE chỉ render theo matrix này; BE là nguồn sự thật duy nhất. Sửa chấm
+    công (``fix_punch`` / ``mark_attendance``) chỉ dành cho ``is_editor``
+    (HR Manager / System Manager — owner D1).
     """
     ws = ws or {}
     manage = bool(is_hr or is_lm_of) and not bool(locked)
+    edit = bool(is_editor) and not bool(locked)
     needs_checkin_nudge = str(status) == "Not Checked In"
     needs_checkout_nudge = str(status) in ("Present", "Late") and bool(ws.get("missing_checkout"))
     return {
         "view_detail": True,
-        "fix_punch": manage,
-        # mark_attendance yêu cầu thêm is_hr: ``mark_attendance_bulk``
-        # (Employee Attendance Tool parity) chỉ mở cho HR roles — LM sẽ bị
-        # 403 nếu gọi (P2: nới gate theo scope reports_to nếu cần).
-        "mark_attendance": bool(is_hr) and not bool(locked),
+        "fix_punch": edit,
+        "mark_attendance": edit,
         "request_correction": manage,
         "override_shift": manage and bool(is_today),
         "nudge": needs_checkin_nudge or needs_checkout_nudge,
@@ -2088,6 +2101,7 @@ def _team_att_cell_can(
     raw_ot: float = 0.0,
     open_cm: bool = False,
     is_ot_approver: bool = False,
+    is_editor: bool = False,
 ) -> dict:
     """Pure — per-day-cell action matrix cho /hr/team/attendance (plan
     plan-team-attendance-desk-free.md §4 WP2).
@@ -2105,7 +2119,9 @@ def _team_att_cell_can(
         (``is_lm_of``) — member ngoài team mọi cờ manage = false;
       * ``approve_ot`` yêu cầu role OT approver (HR Manager / System Manager,
         parity ``OT_APPROVER_ROLES``) VÀ session có raw OT > 0;
-      * ``resolve_checkout_miss`` yêu cầu HR + ticket đang mở.
+      * ``resolve_checkout_miss`` yêu cầu HR + ticket đang mở;
+      * sửa chấm công (fix/delete punch, mark, recalc) chỉ ``is_editor``
+        (HR Manager / System Manager — owner D1); HR User / LM chỉ xem.
     """
     manage = bool(is_hr or is_lm_of)
     writable_day = manage and not bool(locked) and not bool(is_future)
@@ -2113,15 +2129,16 @@ def _team_att_cell_can(
         raw_ot_hours = float(raw_ot or 0)
     except (TypeError, ValueError):
         raw_ot_hours = 0.0
+    editable_day = bool(is_editor) and not bool(locked) and not bool(is_future)
     return {
         "view_detail": True,
-        "fix_punch": writable_day,
-        "delete_punch": writable_day and bool(has_punch),
-        "mark_attendance": bool(is_hr) and not bool(locked) and not bool(is_future),
+        "fix_punch": editable_day,
+        "delete_punch": editable_day and bool(has_punch),
+        "mark_attendance": editable_day,
         "create_request": writable_day,
         "approve_ot": bool(is_ot_approver) and raw_ot_hours > 0 and not bool(locked),
         "resolve_checkout_miss": bool(is_hr) and bool(open_cm) and not bool(locked),
-        "recalc": bool(is_hr) and not bool(locked),
+        "recalc": bool(is_editor) and not bool(locked),
         "nudge": manage,
     }
 
@@ -2261,6 +2278,7 @@ def team_member_day_detail(employee: str | None = None, date_str: str | None = N
             is_lm_of=_is_line_manager_of(manager_emp, emp),
             ws=ws,
             is_today=is_today,
+            is_editor=_is_attendance_editor(),
         ),
     }
 
@@ -2296,6 +2314,7 @@ def nudge_team_member(
         is_lm_of=_is_line_manager_of(manager_emp, emp),
         ws=ws,
         is_today=str(day) == str(tz_utils.now_in_portal().date()),
+        is_editor=_is_attendance_editor(),
     )
     if not can["nudge"]:
         frappe.throw(
@@ -2486,6 +2505,7 @@ def team_attendance(
     # ``attendance_admin_ops.OT_APPROVER_ROLES`` (HR Manager / System Manager).
     is_hr = bool(caller_roles & {"HR Manager", "System Manager", "HR User"})
     is_ot_approver = bool(caller_roles & {"HR Manager", "System Manager"})
+    is_editor = _is_attendance_editor(caller_roles)
     # Non-company-wide viewers (Line Manager / HR User) only ever see their own
     # reports → every roster member is "lm_of" by construction.
     lm_of_roster = not is_company_wide
@@ -2804,6 +2824,7 @@ def team_attendance(
                 raw_ot=flt(getattr(ws, "raw_overtime_hours", 0) or 0, 4) if ws else 0.0,
                 open_cm=cm_open_today,
                 is_ot_approver=is_ot_approver,
+                is_editor=is_editor,
             )
             cell_extras = {
                 "locked": cur_locked,
@@ -3026,6 +3047,7 @@ def team_attendance_context(manager: str = "", from_date: str = "", to_date: str
     is_hr = bool(caller_roles & {"HR Manager", "System Manager", "HR User"})
     is_lm = bool(caller_roles & {"Line Manager"})
     is_ot_approver = bool(caller_roles & {"HR Manager", "System Manager"})
+    is_editor = _is_attendance_editor(caller_roles)
 
     # IDOR-safe viewer resolution — identical semantics to team_attendance().
     if manager and is_company_wide:
@@ -3091,14 +3113,14 @@ def team_attendance_context(manager: str = "", from_date: str = "", to_date: str
 
     can = {
         "view_grid": True,
-        "fix_punch": bool(is_hr or is_lm),
-        "delete_punch": bool(is_hr or is_lm),
-        "mark_attendance": bool(is_hr or is_lm),
+        "fix_punch": is_editor,
+        "delete_punch": is_editor,
+        "mark_attendance": is_editor,
         "create_request": bool(is_hr or is_lm),
         "approve_ot": is_ot_approver,
         "resolve_checkout_miss": is_hr,
-        "recalc": is_hr,
-        "generate": is_hr,
+        "recalc": is_editor,
+        "generate": is_editor,
         "nudge": True,
         "export": True,
         "manage_period": bool(caller_roles & {"HR Manager", "System Manager"}),
@@ -3706,7 +3728,7 @@ def recalculate_work_session(work_session: str | None = None, shift_instance: st
     Pass either ``work_session`` or ``shift_instance``. Returns the recomputed
     Work Session name + key totals.
     """
-    frappe.only_for(["HR Manager", "HR User", "System Manager"])
+    frappe.only_for(sorted(ATTENDANCE_EDIT_ROLES))
     if not shift_instance and work_session:
         shift_instance = frappe.db.get_value("VN Attendance Work Session", work_session, "shift_instance")
     if not shift_instance:
@@ -3775,7 +3797,7 @@ def recalculate_period(
     Returns counts: ``instances_created``, ``sessions_recalculated``,
     ``exceptions_resolved``. Safe to run repeatedly (idempotent).
     """
-    frappe.only_for(["HR Manager", "HR User", "System Manager"])
+    frappe.only_for(sorted(ATTENDANCE_EDIT_ROLES))
     from gege_hr.gege_hr.api import shift as shift_api
     from gege_hr.gege_hr.utils import calc
 
