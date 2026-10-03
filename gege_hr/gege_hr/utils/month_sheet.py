@@ -86,6 +86,7 @@ def leaves_by_date(leaves: Iterable[dict], lwp_types: set[str], start, end) -> d
                 "leave_type": la.get("leave_type") or "",
                 "paid": (la.get("leave_type") or "") not in lwp_types,
                 "fraction": frac,
+                "reason": (la.get("description") or "").strip(),
             }
     return out
 
@@ -128,6 +129,7 @@ def build_day(
     checkout_miss: dict | None = None,
     pending: list[dict] | None = None,
     explanations: dict | None = None,
+    reasons: dict | None = None,
     edited: int = 0,
     locked: bool = False,
 ) -> dict:
@@ -135,7 +137,9 @@ def build_day(
 
     ``sessions`` are raw Work Session dicts of that day; ``leave`` the expanded
     approved-leave entry (see :func:`leaves_by_date`); ``explanations`` maps
-    ``"late"`` / ``"early"`` → explanation status for the day.
+    ``"late"`` / ``"early"`` → explanation status for the day; ``reasons``
+    maps ``"late"`` / ``"early"`` / ``"checkout_miss"`` → the employee's
+    written reason (the "Nội dung" column of the monthly review).
     """
     sv = [_session_view(ws) for ws in (sessions or [])]
     punched = [s for s in sv if s["has_punch"]]
@@ -177,6 +181,9 @@ def build_day(
         sum(max(0.0, s["ot_raw_hours"] - s["ot_approved_hours"]) for s in punched) if counted else 0.0
     )
     expl = explanations or {}
+    why = {k: v for k, v in (reasons or {}).items() if v}
+    if leave_frac and (leave or {}).get("reason"):
+        why["leave"] = leave["reason"]
     return {
         "date": day.isoformat(),
         "weekday": day.weekday(),  # 0 = Monday
@@ -218,6 +225,7 @@ def build_day(
         "multi_session": len(punched) > 1,
         "need_review": any(s["need_review"] or s["calc_error"] for s in punched),
         "worked_on_leave": status in (LEAVE_PAID, LEAVE_UNPAID) and leave_frac >= 1 and has_punch,
+        "reasons": why,
     }
 
 
@@ -294,6 +302,119 @@ def aggregate_month(days: list[dict]) -> dict:
     for k in ("approved_hours", "pending_hours", "night_hours"):
         t["ot"][k] = round(t["ot"][k], 2)
     return t
+
+
+# ---- monthly review (team view + legacy Excel, plan §7) -------------------- #
+def compress_days(days: Iterable[tuple[int, float]]) -> str:
+    """``[(2, 1), (3, 1), (4, 1), (9, 0.5), (23, 1)]`` → ``"2 - 4, 9 (½), 23"``.
+
+    Full days in a row collapse to a range (the legacy sheet wrote "2 - 9, 23");
+    half days stay single with a ``(½)`` marker.
+    """
+    out: list[str] = []
+    run: list[int] = []
+
+    def flush() -> None:
+        if run:
+            out.append(str(run[0]) if len(run) == 1 else f"{run[0]} - {run[-1]}")
+            run.clear()
+
+    for day, frac in sorted(days):
+        if frac < 1:
+            flush()
+            out.append(f"{day} (½)")
+        elif run and day == run[-1] + 1:
+            run.append(day)
+        else:
+            flush()
+            run.append(day)
+    flush()
+    return ", ".join(out)
+
+
+def _ddmm(iso: str) -> str:
+    return f"{iso[8:10]}/{iso[5:7]}"
+
+
+def _join_reasons(values: Iterable[str]) -> str:
+    seen: list[str] = []
+    for v in values:
+        v = (v or "").strip()
+        if v and v not in seen:
+            seen.append(v)
+    return "; ".join(seen)
+
+
+def review_items(days: list[dict]) -> dict:
+    """The 4 sections of the legacy monthly review sheet for ONE employee.
+
+    * ``forgot``      — one line per day: "Ngày 04/08: Chấm ra" (+ reason)
+    * ``late_early``  — one line per day: "Ngày 28/08: Trễ 12 phút, Về sớm 228 phút"
+    * ``leave_unpaid``/``leave_paid`` — one line: "Nghỉ việc riêng: 2 - 9, 23"
+    * ``absent``      — one line: "Thiếu công: 1 - 30"
+    """
+    forgot, late_early = [], []
+    unpaid: dict[str, list] = {}
+    paid: dict[str, list] = {}
+    absent: list[tuple[int, float]] = []
+    leave_reasons: dict[str, list[str]] = {"paid": [], "unpaid": []}
+    for d in days or []:
+        if not d.get("counted"):
+            continue
+        iso, why = d["date"], d.get("reasons") or {}
+        miss = [
+            label
+            for flag, label in (("checkin_miss", "Chấm vào"), ("checkout_miss", "Chấm ra"))
+            if d.get(flag)
+        ]
+        if miss:
+            forgot.append(
+                {
+                    "date": iso,
+                    "text": f"Ngày {_ddmm(iso)}: {', '.join(miss)}",
+                    "reason": why.get("checkout_miss", ""),
+                }
+            )
+        parts = []
+        if d.get("late_minutes"):
+            parts.append(f"Trễ {d['late_minutes']} phút")
+        if d.get("early_minutes"):
+            parts.append(f"Về sớm {d['early_minutes']} phút")
+        if parts:
+            late_early.append(
+                {
+                    "date": iso,
+                    "text": f"Ngày {_ddmm(iso)}: {', '.join(parts)}",
+                    "reason": _join_reasons([why.get("late", ""), why.get("early", "")]),
+                }
+            )
+        lv = d.get("leave")
+        if lv:
+            bucket = paid if lv["paid"] else unpaid
+            bucket.setdefault(lv["leave_type"], []).append((int(iso[8:10]), lv["fraction"]))
+            leave_reasons["paid" if lv["paid"] else "unpaid"].append(why.get("leave", ""))
+        if d.get("absent"):
+            absent.append((int(iso[8:10]), d["absent"]))
+
+    def leave_line(groups: dict, key: str) -> dict:
+        days_all = [x for v in groups.values() for x in v]
+        return {
+            "count": sum(f for _, f in days_all),
+            "text": "; ".join(f"{t}: {compress_days(v)}" for t, v in sorted(groups.items())),
+            "reason": _join_reasons(leave_reasons[key]),
+        }
+
+    return {
+        "forgot": forgot,
+        "late_early": late_early,
+        "leave_unpaid": leave_line(unpaid, "unpaid"),
+        "leave_paid": leave_line(paid, "paid"),
+        "absent": {
+            "count": sum(f for _, f in absent),
+            "text": f"Thiếu công: {compress_days(absent)}" if absent else "",
+            "reason": "",
+        },
+    }
 
 
 # ---- small private helpers ------------------------------------------------- #

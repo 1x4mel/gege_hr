@@ -1160,3 +1160,34 @@ def test_ms3_month_sheet_hr_user_read_only(env):
     ms_api = _month_sheet(env)
     env.state["roles"] = ["HR User"]
     assert ms_api.employee_month_sheet(employee="E3", year=2026, month=9)["can_edit"] is False
+
+
+def test_ms4_team_month_review_scope_and_rows(env):
+    """MS4: HR sees every rostered employee (Shift Assignment / WS in month);
+    a Line Manager only their reports_to members."""
+    _seed_team(env.fr)
+    _seed_month(env.fr)
+    env.fr.stores["Shift Assignment"]["SA-E3"] = {
+        "name": "SA-E3",
+        "employee": "E3",
+        "shift_type": "Ca Sáng",
+        "status": "Active",
+        "start_date": "2026-09-01",
+        "end_date": None,
+        "docstatus": 1,
+    }
+    ms_api = _month_sheet(env)
+    res = ms_api.team_month_review(year=2026, month=9)
+    assert res["scope"] == "company"
+    names = [r["name"] for r in res["employees"]]
+    assert sorted(names) == ["E1", "E2", "E3"]  # M1 has no shift / sessions → off roster
+    e1 = next(r for r in res["employees"] if r["name"] == "E1")
+    assert e1["totals"]["late"]["days"] >= 1
+    assert any("Trễ 10 phút" in x["text"] for x in e1["items"]["late_early"])
+    assert len(e1["days"]) == 30 and "sessions" not in e1["days"][0]
+    assert res["summary"]["employees"] == 3
+
+    env.state["roles"] = ["Line Manager"]
+    lm = ms_api.team_month_review(year=2026, month=9)
+    assert lm["scope"] == "team"
+    assert sorted(r["name"] for r in lm["employees"]) == ["E1", "E2"]
