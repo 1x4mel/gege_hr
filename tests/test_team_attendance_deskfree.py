@@ -367,6 +367,7 @@ def _seed_team(fr):
             "status": "Active",
             "reports_to": "M1",
             "designation": "Sale",
+            "department": "Trader - GG",
         },
         "E2": {
             "name": "E2",
@@ -684,6 +685,16 @@ def test_ta12_legacy_response_shape_preserved(env):
     on_leave = _day(_member(res, "E2"), "2026-09-14")
     assert on_leave["status"] == "On Leave"
     assert res["summary"]["on_leave"] == 1
+
+
+def test_ta12c_member_carries_department(env):
+    """TA12c: member rows carry ``department`` so the grid can group by team
+    (None when the Employee has no department)."""
+    _seed_team(env.fr)
+    _seed_month(env.fr)
+    res = env.att.team_attendance(manager="M1", from_date="2026-09-01", to_date="2026-09-30")
+    assert _member(res, "E1")["department"] == "Trader - GG"
+    assert _member(res, "E2").get("department") is None
 
 
 def test_ta12b_cell_matrix_locks_and_badges_wired(env):
