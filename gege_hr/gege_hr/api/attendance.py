@@ -2543,7 +2543,7 @@ def team_attendance(
         members = frappe.db.get_all(
             "Employee",
             filters=member_filters,
-            fields=["name", "employee_name", "designation", "date_of_joining"],
+            fields=["name", "employee_name", "designation", "department", "date_of_joining"],
         )
         if manager_emp:
             members = [m for m in members if m.name != manager_emp]
@@ -2551,7 +2551,7 @@ def team_attendance(
         members = frappe.db.get_all(
             "Employee",
             filters={"status": "Active", "reports_to": manager_emp},
-            fields=["name", "employee_name", "designation", "date_of_joining"],
+            fields=["name", "employee_name", "designation", "department", "date_of_joining"],
         )
 
     # Roster membership for [start, end]:
