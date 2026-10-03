@@ -319,8 +319,8 @@ def test_line_manager_blocked_outside_team(admin_module):
     assert exc.value.kind == "Permission"
 
 
-def test_line_manager_allows_own_team(admin_module):
-    """R4: Line Manager editing a direct report → allowed (insert happens)."""
+def test_line_manager_read_only_even_for_own_team(admin_module):
+    """Owner D1: Line Manager is read-only — even a direct report → denied."""
     admin, stub = admin_module
     stub._roles = {"Line Manager"}
 
@@ -328,9 +328,17 @@ def test_line_manager_allows_own_team(admin_module):
         return "HR-EMP-ME"
 
     stub.db.get_value = reports_to_me
-    res = admin.admin_custom_checkin("HR-EMP-1", time_in="2026-08-12 08:00")
-    assert res["status"] == "ok"
-    assert len(stub._created) == 1  # one IN inserted
+    with pytest.raises(Exception):
+        admin.admin_custom_checkin("HR-EMP-1", time_in="2026-08-12 08:00")
+    assert not stub._created
+
+
+def test_hr_user_read_only(admin_module):
+    """Owner D1: HR User is read-only."""
+    admin, stub = admin_module
+    stub._roles = {"HR User"}
+    with pytest.raises(Exception):
+        admin.admin_custom_checkin("HR-EMP-1", time_in="2026-08-12 08:00")
 
 
 def test_insert_new_in_uses_utc_and_logs_type(admin_module):

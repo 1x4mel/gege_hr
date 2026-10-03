@@ -595,8 +595,8 @@ def test_tt08_team_member_day_detail_full_shape(_env_for_roster):
     assert [c["name"] for c in res["pending_approvals"]["corrections"]] == ["CR-E1"]
     can = res["can"]
     assert can["view_detail"] is True
-    assert can["fix_punch"] is True
-    # mark_attendance là HR-only (mark_attendance_bulk gate) — LM thấy False
+    # Owner D1: Line Manager chỉ xem — không sửa / mark chấm công
+    assert can["fix_punch"] is False
     assert can["mark_attendance"] is False
     assert can["request_correction"] is True
     assert can["override_shift"] is True  # DAY == today của stub

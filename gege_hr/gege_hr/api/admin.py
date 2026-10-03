@@ -3502,33 +3502,21 @@ def _copy_week_schedule_job(src: str, dst: str, employees: list[str]) -> dict:
 # used by ``Employee Checkin.time``. Existing rows are updated in place; missing
 # rows are inserted. Each affected day's Work Session is recalculated so the grid
 # reflects the change immediately.
-ATTENDANCE_EDITOR_ROLES = ["HR Manager", "System Manager", "HR User", "Line Manager"]
+# Owner D1 (plans/plan-employee-month-sheet.md, 2026-10-03): only HR Manager /
+# System Manager edit attendance — HR User and Line Manager are read-only.
+ATTENDANCE_EDITOR_ROLES = ["HR Manager", "System Manager"]
 
 
 def _require_attendance_editor_for(employee: str) -> None:
     """Permission gate for :func:`admin_custom_checkin`.
 
-    HR Manager / System Manager / HR User may edit anyone (HR User kept because
-    the company roster is its scope). ``Line Manager`` may only edit employees
-    whose ``reports_to`` is them — preventing cross-team privilege escalation
-    (plan §6 risk R4). Raises ``PermissionError`` otherwise.
+    Only HR Manager / System Manager (``ATTENDANCE_EDITOR_ROLES``) may fix
+    punches — HR User and Line Manager are read-only (owner D1). ``employee``
+    is kept in the signature for the call sites / future scoping.
     """
-    roles = set(frappe.get_roles())
-    if roles & {"System Manager", "HR Manager", "HR User"}:
+    if set(frappe.get_roles()) & set(ATTENDANCE_EDITOR_ROLES):
         return
-    if roles & {"Line Manager"}:
-        from gege_hr.gege_hr.utils import employee as emp_utils
-
-        me = emp_utils.get_employee_for_user()
-        if me:
-            reports_to = frappe.db.get_value("Employee", employee, "reports_to")
-            if reports_to == me:
-                return
-        frappe.throw(
-            _("Bạn chỉ được sửa chấm công của nhân viên trong team của mình."),
-            frappe.PermissionError,
-        )
-    frappe.throw(_("Bạn không có quyền thực hiện thao tác này."), frappe.PermissionError)
+    frappe.throw(_("Chỉ HR Manager mới được sửa chấm công."), frappe.PermissionError)
 
 
 def _parse_portal_dt(value):
