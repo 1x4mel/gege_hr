@@ -64,3 +64,19 @@ Mọi số phải tính bằng 1 hàm thuần `utils/month_sheet.py` (có test) 
 - **P1**: hàm thuần + endpoint + FE route/lịch/thống kê/lọc theo chỉ số/◀▶ đổi NV; sửa #2 #3; siết D1.
 - **P2**: thao tác sửa trên màn (theo `can`), dấu ✎ + lịch sử sửa, Excel từng người + tổng hợp cả team.
 - **P3**: sửa engine (phép LWP, khoá kỳ), `my_monthly_summary` dùng chung hàm mới.
+
+## 7. Đánh giá công tháng — cả team (`/hr/team/attendance/review`)
+
+Owner chốt 2026-10-03: thay bảng Excel HR vẫn gõ tay (nhân viên theo cột, 4 khối Quên điểm danh /
+Đi trễ-Về sớm / Nghỉ việc riêng / Thiếu điểm danh cả ngày). **Chỉ xem + tính tay** — chưa chốt tháng,
+không xếp loại, quên chấm chỉ đếm số lần. Cột "Nội dung" = **lý do chi tiết**: tự điền từ giải trình
+trễ/sớm (VN Attendance Explanation.reason), giải trình quên chấm ra (VN Checkout Miss.explanation),
+lý do đơn nghỉ (Leave Application.description).
+
+- API `month_sheet.team_month_review(year, month, department)`: HR → mọi nhân viên trên roster chấm
+  công (Shift Assignment giao tháng hoặc có WS trong tháng, còn làm trong tháng); Line Manager → team
+  `reports_to`. Mỗi dòng: totals + `items` (4 khối mẫu cũ, `utils.month_sheet.review_items`) + dải ngày
+  gọn. Dùng chung `build_day` / `aggregate_month` với bảng công 1 người → số luôn khớp.
+- API `month_sheet.team_month_review_xlsx(...)`: file Excel **đúng mẫu cũ** (openpyxl, có màu / merge /
+  viền đỏ, in ngang vừa 1 trang) — `utils/month_review_xlsx.legacy_layout` (thuần, có test) +
+  `render_xlsx`. Thêm 1 dòng "Nghỉ phép có lương" (mẫu cũ không có).

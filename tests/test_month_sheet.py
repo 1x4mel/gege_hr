@@ -170,3 +170,117 @@ def test_aggregate_month_totals():
     assert t["ot"] == {"days": 1, "approved_hours": 2.0, "pending_hours": 0.0, "night_hours": 0.0}
     assert t["checkout_miss_count"] == 1
     assert t["pending_count"] == 1
+
+
+# ---- monthly review (team view + legacy Excel) ------------------------------- #
+def test_compress_days_ranges_and_half_days():
+    assert ms.compress_days([(2, 1), (3, 1), (4, 1), (9, 0.5), (23, 1)]) == "2 - 4, 9 (½), 23"
+    assert ms.compress_days([(5, 1)]) == "5"
+    assert ms.compress_days([]) == ""
+
+
+def test_review_items_legacy_sections_and_reasons():
+    leaves = {
+        "2026-10-02": {
+            "name": "L1",
+            "leave_type": "Nghỉ việc riêng",
+            "paid": False,
+            "fraction": 1.0,
+            "reason": "Việc nhà",
+        },
+        "2026-10-03": {
+            "name": "L1",
+            "leave_type": "Nghỉ việc riêng",
+            "paid": False,
+            "fraction": 1.0,
+            "reason": "Việc nhà",
+        },
+        "2026-10-07": {"name": "L2", "leave_type": "Phép năm", "paid": True, "fraction": 0.5, "reason": ""},
+    }
+    sessions = {
+        "2026-10-01": [_ws(late_minutes=12, early_leave_minutes=228)],
+        "2026-10-04": [_ws(vn_auto_checkout=1)],
+        "2026-10-05": [_ws(actual_checkin=None)],
+    }
+    days = [
+        ms.build_day(
+            d,
+            today=TODAY,
+            sessions=sessions.get(d.isoformat()),
+            leave=leaves.get(d.isoformat()),
+            reasons={"late": "Kẹt xe", "checkout_miss": "Quên"} if d.day in (1, 4) else None,
+        )
+        for d in ms.iter_days(D(2026, 10, 1), D(2026, 10, 9))
+    ]
+    items = ms.review_items(days)
+    assert items["late_early"] == [
+        {"date": "2026-10-01", "text": "Ngày 01/10: Trễ 12 phút, Về sớm 228 phút", "reason": "Kẹt xe"}
+    ]
+    assert [(f["text"], f["reason"]) for f in items["forgot"]] == [
+        ("Ngày 04/10: Chấm ra", "Quên"),
+        ("Ngày 05/10: Chấm vào", ""),
+    ]
+    assert items["leave_unpaid"] == {"count": 2.0, "text": "Nghỉ việc riêng: 2 - 3", "reason": "Việc nhà"}
+    assert items["leave_paid"]["text"] == "Phép năm: 7 (½)"
+    # 06, 08, 09 absent + the other half of 07
+    assert items["absent"]["text"] == "Thiếu công: 6, 7 (½), 8 - 9"
+    assert items["absent"]["count"] == 3.5
+
+
+def test_legacy_layout_shape():
+    from gege_hr.gege_hr.utils import month_review_xlsx as mrx
+
+    emps = [
+        {
+            "employee_name": "PLA Tuấn",
+            "items": {
+                "forgot": [{"text": "Ngày 04/08: Chấm ra", "reason": "Quên"}],
+                "late_early": [{"text": f"Ngày {d:02d}/08: Trễ 10 phút", "reason": ""} for d in range(1, 6)],
+                "leave_unpaid": {"count": 9, "text": "Nghỉ việc riêng: 2 - 9, 23", "reason": ""},
+                "leave_paid": {"count": 0, "text": "", "reason": ""},
+                "absent": {"count": 0, "text": "", "reason": ""},
+            },
+        },
+        {
+            "employee_name": "Châu",
+            "items": {
+                "forgot": [],
+                "late_early": [],
+                "leave_unpaid": {"count": 0, "text": "", "reason": ""},
+                "leave_paid": {"count": 0, "text": "", "reason": ""},
+                "absent": {"count": 30, "text": "Thiếu công: 1 - 30", "reason": ""},
+            },
+        },
+    ]
+    lay = mrx.legacy_layout(emps)
+    cell = {(r, c): v for r, c, v, _ in lay["cells"]}
+    assert cell[(1, 2)] == "PLA Tuấn" and cell[(1, 4)] == "Châu"
+    assert (cell[(2, 2)], cell[(2, 3)]) == ("Ngày", "Nội dung")
+    # forgot block = MIN_BLOCK_ROWS (3) rows from row 3; late block = 5 rows from row 6
+    assert cell[(3, 1)] == "Quên điểm danh" and (3, 1, 5, 1) in lay["merges"]
+    assert (cell[(3, 2)], cell[(3, 3)]) == ("Ngày 04/08: Chấm ra", "Quên")
+    assert cell[(6, 1)] == "Đi trễ/Về sớm" and (6, 1, 10, 1) in lay["merges"]
+    assert cell[(11, 2)] == "Nghỉ việc riêng: 2 - 9, 23 (9 ngày)"
+    assert cell[(13, 4)] == "Thiếu công: 1 - 30 (30 ngày)"
+    assert lay["rows"] == 13
+
+
+def test_render_xlsx_roundtrip():
+    openpyxl = __import__("pytest").importorskip("openpyxl")
+    import io
+
+    from gege_hr.gege_hr.utils import month_review_xlsx as mrx
+
+    lay = mrx.legacy_layout(
+        [
+            {
+                "employee_name": "A",
+                "items": {"forgot": [], "late_early": [], "leave_unpaid": {}, "leave_paid": {}, "absent": {}},
+            }
+        ]
+    )
+    wb = openpyxl.load_workbook(io.BytesIO(mrx.render_xlsx(lay, "Thang 10-2026")))
+    ws = wb.active
+    assert ws.title == "Thang 10-2026"
+    assert ws["B1"].value == "A"
+    assert ws["A3"].fill.fgColor.rgb.endswith("000000")
