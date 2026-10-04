@@ -1355,3 +1355,75 @@ def test_ta32_checkin_recalc_enqueued_after_commit(env, monkeypatch):
     assert method == "gege_hr.gege_hr.utils.calc.persist_work_session"
     assert kw["enqueue_after_commit"] is True
     assert kw["shift_instance_name"] == "SI-D22"
+
+
+# --------------------------------------------------------------------------- #
+# FIX 2026-10-04 "phải F5 mới thấy giờ": a mobile punch is recalculated INLINE
+# after its commit; the after_insert hook does not race it with a job
+# --------------------------------------------------------------------------- #
+def _seed_si_d22(env):
+    env.fr.stores.setdefault("VN Employee Shift Instance", {})["SI-D22"] = {
+        "name": "SI-D22",
+        "employee": "E1",
+        "work_date": "2026-09-22",
+        "planned_start": "2026-09-22 08:00:00",
+        "planned_end": "2026-09-22 20:00:00",
+        "docstatus": 1,
+    }
+
+
+def _punch(**flags):
+    return types.SimpleNamespace(
+        employee="E1",
+        time=datetime(2026, 9, 22, 8, 3),
+        log_type="IN",
+        name="CK-1",
+        flags=types.SimpleNamespace(**flags),
+    )
+
+
+def _wire_engine(env, monkeypatch, persist):
+    calc = importlib.import_module("gege_hr.gege_hr.utils.calc")
+    monkeypatch.setattr(calc, "persist_work_session", persist)
+    events = []
+    monkeypatch.setattr(env.fr, "enqueue", lambda method, **kw: events.append(("enqueue", kw)), raising=False)
+    monkeypatch.setattr(env.fr.db, "commit", lambda: events.append(("commit",)), raising=False)
+    monkeypatch.setattr(env.fr.db, "rollback", lambda: events.append(("rollback",)), raising=False)
+    return events
+
+
+def test_ta33_hook_skips_job_for_inline_recalculated_punch(env, monkeypatch):
+    _seed_si_d22(env)
+    events = _wire_engine(env, monkeypatch, lambda si, calculate_mode=None: None)
+    env.att.on_employee_checkin_create(_punch(vn_recalc_inline=True))
+    assert events == []
+
+
+def test_ta34_recalc_session_now_persists_then_commits(env, monkeypatch):
+    _seed_si_d22(env)
+    calls = []
+    events = _wire_engine(
+        env, monkeypatch, lambda si, calculate_mode=None: calls.append((si, calculate_mode))
+    )
+    env.att._recalc_session_now(_punch(vn_recalc_inline=True))
+    assert calls == [("SI-D22", "realtime")]
+    assert events == [("commit",)]
+
+
+def test_ta35_recalc_session_now_failure_falls_back_to_job(env, monkeypatch):
+    """Inline recalc fails → rollback + the regular after-commit job, so the
+    punch is never left uncounted."""
+    _seed_si_d22(env)
+
+    def boom(si, calculate_mode=None):
+        raise RuntimeError("lock wait timeout")
+
+    events = _wire_engine(env, monkeypatch, boom)
+    punch = _punch(vn_recalc_inline=True)
+    env.att._recalc_session_now(punch)
+    assert events[0] == ("rollback",)
+    kinds = [e[0] for e in events]
+    assert "enqueue" in kinds
+    kw = next(e[1] for e in events if e[0] == "enqueue")
+    assert kw["enqueue_after_commit"] is True and kw["shift_instance_name"] == "SI-D22"
+    assert punch.flags.vn_recalc_inline is False
