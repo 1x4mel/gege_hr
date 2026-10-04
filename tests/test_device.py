@@ -101,6 +101,14 @@ def test_status_idle_no_sync():
     assert device.derive_device_status(is_active=1, last_sync_at=None) == "Idle"
 
 
+def test_status_naive_db_datetime_is_portal_wall():
+    """FIX 2026-10-04: a naive DB datetime is PORTAL WALL (PHASE-1) — read as
+    UTC it was +7h, so a device silent 30h still looked "Synced"."""
+    wall_now = tz_utils.now_in_portal().replace(tzinfo=None)
+    assert device.derive_device_status(is_active=1, last_sync_at=wall_now - timedelta(hours=30)) == "Offline"
+    assert device.derive_device_status(is_active=1, last_sync_at=wall_now - timedelta(hours=1)) == "Synced"
+
+
 # --------------------------------------------------------------------------- #
 # normalize_upload_log
 # --------------------------------------------------------------------------- #

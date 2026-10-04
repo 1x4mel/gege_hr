@@ -280,6 +280,13 @@ def _fake_month_totals(monkeypatch, totals):
     calls = []
     mod = types.ModuleType("gege_hr.gege_hr.api.month_sheet")
     mod.month_totals = lambda emp, y, m: calls.append((emp, y, m)) or totals
+    mod.month_view = lambda emp, y, m: (
+        calls.append((emp, y, m))
+        or {
+            "totals": totals,
+            "days": {"2026-09-10": {"date": "2026-09-10", "status": "worked", "checkout_miss": False}},
+        }
+    )
     monkeypatch.setitem(sys.modules, "gege_hr.gege_hr.api.month_sheet", mod)
     monkeypatch.setattr(importlib.import_module("gege_hr.gege_hr.api"), "month_sheet", mod, raising=False)
     return calls
@@ -453,6 +460,8 @@ class TestMyMonthMeta:
             "overtime_pending_hours": 2.0,
             "missing_checkout_count": 1,
         }
+        # the month calendar gets the sheet's own day rows
+        assert meta["days"]["2026-09-10"]["status"] == "worked"
         assert meta["has_attendance"] is True
 
     def test_my_monthly_summary_tiles_are_month_sheet_totals(self, env, monkeypatch):

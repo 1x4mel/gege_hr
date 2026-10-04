@@ -77,6 +77,15 @@ def _build_gege_submodules(recalc_sink, tz_get_tzinfo):
 
     attendance_mod.on_employee_checkin_create = _recalc
 
+    # Pure, stdlib-only module → load the real file (shift-aware punch lookup).
+    cp_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "gege_hr", "gege_hr", "utils", "checkin_parity.py")
+    )
+    cp_spec = importlib.util.spec_from_file_location("gege_hr.gege_hr.utils.checkin_parity", cp_path)
+    checkin_parity_mod = importlib.util.module_from_spec(cp_spec)
+    cp_spec.loader.exec_module(checkin_parity_mod)
+    pkg_utils.checkin_parity = checkin_parity_mod
+
     return {
         "gege_hr": pkg_root,
         "gege_hr.gege_hr": pkg_app,
@@ -87,6 +96,7 @@ def _build_gege_submodules(recalc_sink, tz_get_tzinfo):
         "gege_hr.gege_hr.utils.pagination": pagination_mod,
         "gege_hr.gege_hr.utils.tz": tz_mod,
         "gege_hr.gege_hr.utils.employee": employee_mod,
+        "gege_hr.gege_hr.utils.checkin_parity": checkin_parity_mod,
     }
 
 
@@ -155,14 +165,20 @@ def _build_frappe_stub(*, roles, employee_exists, checkin_exists_map, reports_to
 
     class _DB:
         def __init__(self):
-            # Names returned by db.get_all() lookups (the existing-checkin search).
+            # Rows returned by db.get_all() lookups (the existing-checkin search):
+            # bare names (legacy same-day lookup) or punch dicts {name,time,log_type}.
             self.checkin_rows = []
+            # VN Employee Shift Instance rows for the shift-aware lookup.
+            self.si_rows = []
+
+        def _checkin_names(self):
+            return [r.get("name") if isinstance(r, dict) else r for r in self.checkin_rows]
 
         def exists(self, doctype, name):
             if doctype == "Employee":
                 return bool(employee_exists)
             if doctype == "Employee Checkin":
-                return name in checkin_exists_map or name in self.checkin_rows
+                return name in checkin_exists_map or name in self._checkin_names()
             return False
 
         def get_value(self, doctype, name, field):
@@ -174,6 +190,10 @@ def _build_frappe_stub(*, roles, employee_exists, checkin_exists_map, reports_to
             set_values.append((doctype, name, field, value))
 
         def get_all(self, doctype, filters=None, pluck=None, order_by=None, limit=1, **kw):
+            if doctype == "VN Employee Shift Instance":
+                return list(self.si_rows)
+            if pluck:
+                return self._checkin_names()
             return list(self.checkin_rows)
 
         def commit(self):
@@ -545,3 +565,42 @@ def test_new_out_waives_ticket_whose_shift_window_holds_it(admin_module, monkeyp
     assert res["status"] == "ok"
     assert stub._created[0][0]["log_type"] == "OUT"
     assert [e[:2] for e in events if e[0] == "waive"] == [("waive", "VCM-1")]
+
+
+# --------------------------------------------------------------------------- #
+# FIX 2026-10-04: an edit updates the punch of the SAME SHIFT, not the same
+# calendar day (two night shifts share 14/09: IN 04:45 + IN 22:54)
+# --------------------------------------------------------------------------- #
+def _night_si(name, d):
+    return {
+        "name": name,
+        "work_date": f"2026-09-{d:02d}",
+        "planned_start": f"2026-09-{d:02d} 20:00:00",
+        "planned_end": f"2026-09-{d + 1:02d} 08:00:00",
+    }
+
+
+def _seed_nights(stub):
+    stub.db.si_rows = [_night_si("N12", 12), _night_si("N13", 13), _night_si("N14", 14)]
+    stub.db.checkin_rows = [
+        {"name": "CK-IN-12", "time": "2026-09-13 00:52:00", "log_type": "IN"},
+        {"name": "CK-IN-14", "time": "2026-09-14 22:54:00", "log_type": "IN"},
+    ]
+
+
+def test_edit_other_night_shift_inserts_instead_of_moving_neighbour(admin_module):
+    """Trọng Tiền 16/09: IN 04:45 belongs to the 13/09 night shift, which has no
+    IN → INSERT. It must NOT move the 14/09 shift's 22:54 IN (same calendar day)."""
+    admin, stub = admin_module
+    _seed_nights(stub)
+    admin.admin_custom_checkin("HR-EMP-1", time_in="2026-09-14 04:45")
+    assert [p["time"] for p, _ in stub._created] == ["2026-09-14 04:45:00"]
+    assert not [v for v in stub._set_values if v[1] == "CK-IN-14"]
+
+
+def test_edit_same_night_shift_updates_its_own_punch(admin_module):
+    admin, stub = admin_module
+    _seed_nights(stub)
+    admin.admin_custom_checkin("HR-EMP-1", time_in="2026-09-14 22:50")
+    assert stub._created == []
+    assert stub._set_values[0][:4] == ("Employee Checkin", "CK-IN-14", "time", "2026-09-14 22:50:00")

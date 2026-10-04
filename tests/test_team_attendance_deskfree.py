@@ -1232,7 +1232,9 @@ def test_ms5_self_tiles_equal_month_sheet_totals(env):
     ws15 = env.fr.stores[WS_DT]["WS-E1-15"]  # today: checked in, still working
     ws15.update(actual_checkout=None, missing_checkout=1)
     ms_api = _month_sheet(env)
-    sheet = ms_api.employee_month_sheet(employee="E1", year=2026, month=9)["totals"]
+    sheet_full = ms_api.employee_month_sheet(employee="E1", year=2026, month=9)
+    sheet = sheet_full["totals"]
+    sheet_days = {d["date"]: d for d in sheet_full["days"]}
 
     env.state.update(emp="E1", roles=["Employee"])
     tiles = env.att.my_monthly_summary(year=2026, month=9)
@@ -1242,9 +1244,17 @@ def test_ms5_self_tiles_equal_month_sheet_totals(env):
     assert tiles["early_leave_count"] == sheet["early"]["days"]
     assert tiles["missing_checkout_count"] == sheet["checkout_miss_count"] == 1  # CM-E1 only
     assert tiles["overtime_hours"] == sheet["ot"]["approved_hours"] == 0.5  # raw 1.0 not counted
-    meta = env.att.my_month_meta(year=2026, month=9)["ws_summary"]
+    meta_full = env.att.my_month_meta(year=2026, month=9)
+    meta = meta_full["ws_summary"]
     for key in ("worked_days", "late_count", "absent_count", "missing_checkout_count"):
         assert meta[key] == tiles[key], key
+    # /hr/attendance/monthly colours each day from the SAME day rows as the sheet
+    assert set(meta_full["days"]) == set(sheet_days)
+    for iso, day in meta_full["days"].items():
+        assert (day["status"], day["checkout_miss"]) == (
+            sheet_days[iso]["status"],
+            sheet_days[iso]["checkout_miss"],
+        )
 
 
 def test_ms6_off_roster_staff_have_no_absent_days(env):
@@ -1320,3 +1330,28 @@ def test_ta31_resolver_wall_frame_day_and_night_shifts(env):
     assert resolve(punch(datetime(2026, 9, 22, 8, 3), "IN")) == "SI-D22"
     assert resolve(punch(datetime(2026, 9, 28, 8, 0), "OUT")) == "SI-N27"
     assert resolve(punch(datetime(2026, 9, 28, 20, 5), "IN")) == "SI-N28"
+
+
+def test_ta32_checkin_recalc_enqueued_after_commit(env, monkeypatch):
+    """FIX 2026-10-04: the punch → recalc job is enqueued AFTER the request
+    commits; mid-request the worker computed the session before the punch was
+    visible (Cao Sơn 28/09: OUT 16:16 lost)."""
+    env.fr.stores.setdefault("VN Employee Shift Instance", {})["SI-D22"] = {
+        "name": "SI-D22",
+        "employee": "E1",
+        "work_date": "2026-09-22",
+        "planned_start": "2026-09-22 08:00:00",
+        "planned_end": "2026-09-22 20:00:00",
+        "docstatus": 1,
+    }
+    calls = []
+    monkeypatch.setattr(env.fr, "enqueue", lambda method, **kw: calls.append((method, kw)), raising=False)
+    punch = types.SimpleNamespace(
+        employee="E1", time=datetime(2026, 9, 22, 16, 16), log_type="OUT", name="CK-1"
+    )
+    env.att.on_employee_checkin_create(punch)
+    assert len(calls) == 1
+    method, kw = calls[0]
+    assert method == "gege_hr.gege_hr.utils.calc.persist_work_session"
+    assert kw["enqueue_after_commit"] is True
+    assert kw["shift_instance_name"] == "SI-D22"
