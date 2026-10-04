@@ -124,13 +124,26 @@ def _session_view(ws: dict) -> dict:
     }
 
 
-def is_checkout_miss(checkout_miss: dict | None, auto_checkout: bool) -> bool:
+def is_checkout_miss(checkout_miss: dict | None, auto_checkout: bool, overdue: bool = False) -> bool:
     """THE "Quên chấm ra" rule — one rule for the month sheet, the team grid
     and the employee's /hr/attendance tiles (owner 2026-10-04): a ticket for
-    the day or the engine's fake OUT, unless the ticket is Waived."""
+    the day, the engine's fake OUT, or a session still open past the
+    auto-close cutoff (:func:`is_checkout_overdue` — its ticket is about to be
+    raised), unless the ticket is Waived."""
     if (checkout_miss or {}).get("status") == "Waived":
         return False
-    return bool(checkout_miss) or bool(auto_checkout)
+    return bool(checkout_miss) or bool(auto_checkout) or bool(overdue)
+
+
+def is_checkout_overdue(checkin, checkout, planned_end, now, buffer_minutes: int) -> bool:
+    """IN without OUT and ``now`` past ``planned_end + buffer_minutes`` — the
+    exact cutoff the hourly auto-close uses (``vn_cm_buffer_minutes``), so every
+    screen turns "Quên chấm ra" at the same moment. Naive PORTAL WALL values."""
+    pe = as_datetime(planned_end)
+    now = as_datetime(now)
+    if not checkin or checkout or pe is None or now is None:
+        return False
+    return now > pe + _dt.timedelta(minutes=int(buffer_minutes or 0))
 
 
 def build_day(
@@ -148,6 +161,8 @@ def build_day(
     edited: int = 0,
     locked: bool = False,
     on_roster: bool = True,
+    now: _dt.datetime | None = None,
+    checkout_buffer_minutes: int = 360,
 ) -> dict:
     """Classify one calendar day + its flags (plan §2).
 
@@ -157,7 +172,9 @@ def build_day(
     maps ``"late"`` / ``"early"`` / ``"checkout_miss"`` → the employee's
     written reason (the "Nội dung" column of the monthly review).
     ``on_roster=False`` (no Shift Assignment / Work Session in the month):
-    an unpunched past day is :data:`OFF_ROSTER`, not absent.
+    an unpunched past day is :data:`OFF_ROSTER`, not absent. ``now`` (naive
+    portal wall) + ``checkout_buffer_minutes`` flag a session still open past
+    the auto-close cutoff as "Quên chấm ra" (see :func:`is_checkout_overdue`).
     """
     sv = [_session_view(ws) for ws in (sessions or [])]
     punched = [s for s in sv if s["has_punch"]]
@@ -201,6 +218,10 @@ def build_day(
         sum(max(0.0, s["ot_raw_hours"] - s["ot_approved_hours"]) for s in punched) if counted else 0.0
     )
     auto_out = any(s["auto_checkout"] for s in punched)
+    overdue_out = bool(now) and any(
+        is_checkout_overdue(s["checkin"], s["checkout"], s["planned_end"], now, checkout_buffer_minutes)
+        for s in punched
+    )
     expl = explanations or {}
     why = {k: v for k, v in (reasons or {}).items() if v}
     if leave_frac and (leave or {}).get("reason"):
@@ -237,7 +258,7 @@ def build_day(
         "ot_night_hours": round(sum(s["ot_night_hours"] for s in punched), 2) if counted else 0.0,
         "regular_hours": round(sum(s["regular_hours"] for s in punched), 2),
         "actual_hours": round(sum(s["actual_hours"] for s in punched), 2),
-        "checkout_miss": counted and is_checkout_miss(checkout_miss, auto_out),
+        "checkout_miss": counted and is_checkout_miss(checkout_miss, auto_out, overdue_out),
         "checkout_miss_status": (checkout_miss or {}).get("status"),
         "checkin_miss": counted and any(s["checkin_miss"] for s in punched),
         "pending": list(pending or []),
@@ -454,6 +475,17 @@ def _truthy(v) -> bool:
 
 def _s(v) -> str | None:
     return str(v) if v not in (None, "") else None
+
+
+def as_datetime(v) -> _dt.datetime | None:
+    if v in (None, ""):
+        return None
+    if isinstance(v, _dt.datetime):
+        return v.replace(tzinfo=None) if v.tzinfo else v
+    try:
+        return _dt.datetime.fromisoformat(str(v)[:19])
+    except ValueError:
+        return None
 
 
 def as_date(v) -> _dt.date | None:

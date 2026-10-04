@@ -125,7 +125,10 @@ def _employee_days(info: dict, start: date, end: date, today: date) -> tuple[lis
     src = _load_sources([emp], start, end)
     locked_dates, period = att_api._locked_days_between(start, end)
     on_roster = emp in _on_roster([emp], start, end)
-    return _build_days(info, src, start, end, today, locked_dates, on_roster=on_roster), locked_dates, period
+    days = _build_days(
+        info, src, start, end, today, locked_dates, on_roster=on_roster, cutoff=att_api._checkout_cutoff()
+    )
+    return days, locked_dates, period
 
 
 @frappe.whitelist()
@@ -168,9 +171,10 @@ def _team_review(year, month, department) -> dict:
     src = _load_sources(names, start, end)
     locked_dates, period = att_api._locked_days_between(start, end)
 
+    cutoff = att_api._checkout_cutoff()
     rows = []
     for info in infos:
-        days = _build_days(info, src, start, end, today, locked_dates)
+        days = _build_days(info, src, start, end, today, locked_dates, cutoff=cutoff)
         totals = ms.aggregate_month(days)
         rows.append(
             {
@@ -305,8 +309,19 @@ def _load_sources(emps: list[str], start: date, end: date) -> dict:
 
 
 def _build_days(
-    info: dict, src: dict, start: date, end: date, today: date, locked_dates, on_roster: bool = True
+    info: dict,
+    src: dict,
+    start: date,
+    end: date,
+    today: date,
+    locked_dates,
+    on_roster: bool = True,
+    cutoff: tuple | None = None,
 ) -> list[dict]:
+    """Day rows of one employee. ``cutoff`` = ``attendance._checkout_cutoff()``
+    (now, buffer) — an open session past it is "Quên chấm ra" (same instant as
+    the auto-close ticket / the team grid)."""
+    now, buffer = cutoff or (None, 0)
     emp = info["name"]
     sessions = src["sessions"].get(emp, {})
     leaves = src["leaves"].get(emp, {})
@@ -338,6 +353,8 @@ def _build_days(
                 edited=edited.get(iso, 0),
                 locked=iso in locked_dates,
                 on_roster=on_roster,
+                now=now,
+                checkout_buffer_minutes=buffer,
             )
         )
     return days

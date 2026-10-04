@@ -27,6 +27,7 @@ from gege_hr.gege_hr.utils.checkin_parity import (
     has_out_only,
     is_duplicate_intent,
     parse_log_dt,
+    pick_shift_instance,
 )
 
 Y, T = "2026-08-31", "2026-09-01"  # yesterday / today fixtures
@@ -173,3 +174,92 @@ def test_s03_has_in_only_kept_for_backcompat():
     assert has_in_only([log(T, "08:00", "IN")]) is True
     assert has_in_only([log(T, "08:00", "IN"), log(T, "17:00", "OUT")]) is False
     assert has_in_only([]) is False
+
+
+# --------------------------------------------------------------------------- #
+# pick_shift_instance — which Shift Instance a punch belongs to (FIX 2026-10-04:
+# the old resolver read wall times as UTC +7h → 164/234 punches mis-routed)
+# --------------------------------------------------------------------------- #
+def _day(name, d):
+    return {
+        "name": name,
+        "planned_start": f"2026-09-{d:02d} 08:00:00",
+        "planned_end": f"2026-09-{d:02d} 20:00:00",
+    }
+
+
+def _night(name, d):
+    return {
+        "name": name,
+        "planned_start": f"2026-09-{d:02d} 20:00:00",
+        "planned_end": f"2026-09-{d + 1:02d} 08:00:00",
+    }
+
+
+@pytest.mark.parametrize(
+    "candidates, punch, kind, expected",
+    [
+        # day shift 08-20: the evening OUT stays on ITS day (was: next day)
+        ([_day("D21", 21), _day("D22", 22)], "2026-09-22 20:13:26", "OUT", "D22"),
+        ([_day("D21", 21), _day("D22", 22)], "2026-09-22 08:03:00", "IN", "D22"),
+        ([_day("D21", 21), _day("D22", 22)], "2026-09-22 15:00:00", "OUT", "D22"),  # early leave
+        ([_day("D21", 21), _day("D22", 22)], "2026-09-23 01:00:00", "OUT", "D22"),  # very late OUT
+        # night shift 20-08: the morning OUT closes YESTERDAY's shift (was: tonight's)
+        ([_night("N27", 27), _night("N28", 28)], "2026-09-28 08:00:00", "OUT", "N27"),
+        ([_night("N27", 27), _night("N28", 28)], "2026-09-28 20:05:00", "IN", "N28"),
+        # two shifts the same day
+        (
+            [
+                _day("D22", 22),
+                {
+                    "name": "LATE",
+                    "planned_start": "2026-09-22 20:00:00",
+                    "planned_end": "2026-09-23 02:00:00",
+                },
+            ],
+            "2026-09-22 20:05:00",
+            "OUT",
+            "D22",
+        ),
+        (
+            [
+                _day("D22", 22),
+                {
+                    "name": "LATE",
+                    "planned_start": "2026-09-22 20:00:00",
+                    "planned_end": "2026-09-23 02:00:00",
+                },
+            ],
+            "2026-09-22 19:55:00",
+            "IN",
+            "LATE",
+        ),
+    ],
+)
+def test_pick_shift_instance_matrix(candidates, punch, kind, expected):
+    assert pick_shift_instance(candidates, punch, kind) == expected
+
+
+def test_pick_shift_instance_follows_engine_window():
+    """Night shift 21h-9h: a stray 20:22 OUT is outside yesterday's engine
+    window (ps + 20h = 17:00) → today's shift, the session the engine credits."""
+    n03 = {"name": "N03", "planned_start": "2026-09-03 21:00:00", "planned_end": "2026-09-04 09:00:00"}
+    n04 = {"name": "N04", "planned_start": "2026-09-04 21:00:00", "planned_end": "2026-09-05 09:00:00"}
+    assert pick_shift_instance([n03, n04], "2026-09-04 20:22:00", "OUT") == "N04"
+    assert pick_shift_instance([n03, n04], "2026-09-04 09:05:00", "OUT") == "N03"
+    # an explicit SI check-out window widens the engine window
+    n03_wide = {**n03, "max_checkout_time": "2026-09-04 21:00:00"}
+    assert pick_shift_instance([n03_wide, n04], "2026-09-04 20:22:00", "OUT") == "N03"
+
+
+def test_pick_shift_instance_without_log_type_uses_window():
+    cands = [_night("N27", 27), _night("N28", 28)]
+    assert pick_shift_instance(cands, "2026-09-28 07:58:00") == "N27"  # inside N27
+    assert pick_shift_instance(cands, datetime(2026, 9, 28, 21, 0)) == "N28"
+
+
+def test_pick_shift_instance_fallback_and_empty():
+    # nothing within ±24h → still the closest instance (never drop the punch)
+    assert pick_shift_instance([_day("D20", 20)], "2026-09-22 21:00:00", "OUT") == "D20"
+    assert pick_shift_instance([], "2026-09-22 21:00:00", "OUT") is None
+    assert pick_shift_instance([_day("D22", 22)], None, "OUT") is None
