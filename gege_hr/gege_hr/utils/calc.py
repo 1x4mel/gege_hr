@@ -1409,61 +1409,84 @@ def _load_leave_info(employee: str, work_date) -> dict | None:
     }
 
 
+_PUNCH_WS_FIELDS = [
+    "name",
+    "shift_instance",
+    "calculated_at",
+    "planned_start",
+    "planned_end",
+    "actual_checkin",
+    "actual_checkout",
+]
+
+
+def _punch_in_ws_window(ws, punch_time) -> bool:
+    """A punch sits in a session's window [planned_start - 4h, planned_end + 6h]
+    (no time / no planned window → True, as before)."""
+    if not punch_time or not ws or not ws.planned_start or not ws.planned_end:
+        return True
+    ps = _as_dt(ws.planned_start)
+    pe = _as_dt(ws.planned_end)
+    pt = _as_dt(punch_time)
+    return bool(ps and pe and pt and ps - timedelta(hours=4) <= pt <= pe + timedelta(hours=6))
+
+
+def _ws_finder(pairs):
+    """Batched :func:`_find_ws_for_punch`: ONE query loads every Work Session of
+    the ``(employee, day)`` pairs (+ the day before, for overnight shifts) and
+    returns ``find(employee, day, punch_time)`` applying the same rules.
+
+    PERF 2026-10-04: heal-on-read called _find_ws_for_punch once per punch — 1 009
+    queries / 4.6 s for September in the team grid (and on every today_status).
+    """
+    import frappe
+    from frappe.utils import getdate as _gd
+
+    emps = sorted({e for e, _d in pairs if e})
+    days = sorted({d for _e, d in pairs if d})
+    by: dict = {}
+    if emps and days:
+        try:
+            rows = frappe.get_all(
+                "VN Attendance Work Session",
+                filters={
+                    "employee": ["in", emps],
+                    "work_date": ["between", [(_gd(days[0]) - timedelta(days=1)).isoformat(), days[-1]]],
+                    "docstatus": ["!=", 2],
+                },
+                fields=[*_PUNCH_WS_FIELDS, "employee", "work_date"],
+                order_by="modified desc",
+                limit_page_length=0,
+            )
+        except Exception:
+            rows = []
+        for r in rows or []:
+            by.setdefault((r.get("employee"), str(r.get("work_date"))[:10]), r)
+
+    def find(employee: str, day: str, punch_time=None):
+        ws = by.get((employee, day))
+        if ws and ws.shift_instance and _punch_in_ws_window(ws, punch_time):
+            return ws
+        try:
+            prev = (_gd(day) - timedelta(days=1)).isoformat()
+        except Exception:
+            return None
+        ws_prev = by.get((employee, prev))
+        return ws_prev if ws_prev and ws_prev.shift_instance else None
+
+    return find
+
+
 def _find_ws_for_punch(employee: str, day: str, punch_time=None):
     """Tìm Work Session mà punch của ngày ``day`` thuộc về.
 
     FIX 2026-09-17: ca qua đêm — punch sáng ngày D+1 thuộc WS work_date=D.
     FIX 2026-09-17b: nhận punch_time trực tiếp (trước đây query punch đầu
     tiên trong ngày → map nhầm WS khi có nhiều punch).
-    Thứ tự: WS hôm nay (punch trong cửa sổ) → WS hôm trước.
+    Thứ tự: WS hôm nay (punch trong cửa sổ) → WS hôm trước. Nhiều punch một
+    lượt → dùng :func:`_ws_finder` (một truy vấn cho tất cả).
     """
-    import frappe
-    from frappe.utils import getdate as _gd
-
-    fields = [
-        "name",
-        "shift_instance",
-        "calculated_at",
-        "planned_start",
-        "planned_end",
-        "actual_checkin",
-        "actual_checkout",
-    ]
-
-    def _in_window(ws):
-        if not punch_time or not ws or not ws.planned_start or not ws.planned_end:
-            return True
-        from datetime import timedelta as _td
-
-        ps = _as_dt(ws.planned_start)
-        pe = _as_dt(ws.planned_end)
-        pt = _as_dt(punch_time)
-        return bool(ps and pe and pt and ps - _td(hours=4) <= pt <= pe + _td(hours=6))
-
-    try:
-        ws = frappe.db.get_value(
-            "VN Attendance Work Session",
-            {"employee": employee, "work_date": day, "docstatus": ["!=", 2]},
-            fields,
-            as_dict=True,
-        )
-        if ws and ws.shift_instance and _in_window(ws):
-            return ws
-    except Exception:
-        pass
-    try:
-        prev = (_gd(day) - timedelta(days=1)).isoformat()
-        ws_prev = frappe.db.get_value(
-            "VN Attendance Work Session",
-            {"employee": employee, "work_date": prev, "docstatus": ["!=", 2]},
-            fields,
-            as_dict=True,
-        )
-        if ws_prev and ws_prev.shift_instance:
-            return ws_prev
-    except Exception:
-        pass
-    return None
+    return _ws_finder([(employee, day)])(employee, day, punch_time)
 
 
 def _ws_stale(ws, punch) -> bool:
@@ -1526,18 +1549,23 @@ def heal_stale_sessions(start_date, end_date, limit: int = 100) -> int:
     except Exception:
         return 0
     seen: set[tuple[str, str]] = set()
+    healed: set[str] = set()
+    find_ws = _ws_finder({(_p.get("employee"), str(_p.get("time"))[:10]) for _p in punches})
     done = 0
     for _p in punches:
         day = str(_p.get("time"))[:10]
         key = (_p.get("employee"), day)
         if key in seen:
             continue
-        ws = _find_ws_for_punch(_p.get("employee"), day, _p.get("time"))
-        if not ws:
+        ws = find_ws(_p.get("employee"), day, _p.get("time"))
+        # The batch row is a pre-loop snapshot: a session healed above must not
+        # be recalculated again for a later punch of another day.
+        if not ws or ws.name in healed:
             continue
         if not _ws_stale(ws, _p):
             continue
         seen.add(key)
+        healed.add(ws.name)
         try:
             persist_work_session(ws.shift_instance, calculate_mode="recalc")
             done += 1
@@ -1572,6 +1600,8 @@ def recalc_stale_sessions(lookback_hours: int = 48, limit: int = 200) -> int:
         limit=5000,
     )
     seen: set[tuple[str, str]] = set()
+    healed: set[str] = set()
+    find_ws = _ws_finder({(p.get("employee"), str(p.get("time"))[:10]) for p in punches})
     done = 0
     for p in punches:
         try:
@@ -1581,12 +1611,13 @@ def recalc_stale_sessions(lookback_hours: int = 48, limit: int = 200) -> int:
         key = (p.get("employee"), day)
         if key in seen:
             continue
-        ws = _find_ws_for_punch(p.get("employee"), day, p.get("time"))
-        if not ws:
+        ws = find_ws(p.get("employee"), day, p.get("time"))
+        if not ws or ws.name in healed:
             continue
         if not _ws_stale(ws, p):
             continue
         seen.add(key)
+        healed.add(ws.name)
         try:
             persist_work_session(ws.shift_instance, calculate_mode="recalc")
             done += 1
