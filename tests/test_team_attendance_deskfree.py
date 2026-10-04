@@ -1268,3 +1268,55 @@ def test_ms6_off_roster_staff_have_no_absent_days(env):
     }
     on = ms_api.employee_month_sheet(employee="E3", year=2026, month=9)
     assert on["totals"]["absent_days"] > 0
+
+
+def test_ta30_overdue_open_session_same_cutoff_grid_and_sheet(env):
+    """An IN without OUT past planned_end + auto-close buffer (360') is "Quên
+    chấm ra" in the grid AND the sheet at the same moment; today's shift that
+    is still inside the window is not (portal now = 2026-09-15 10:00)."""
+    _seed_team(env.fr)
+    _seed_month(env.fr)
+    env.fr.stores[MISS_DT].clear()
+    ws = env.fr.stores[WS_DT]
+    ws["WS-E1-14"].update(actual_checkout=None, planned_end="2026-09-14 17:00:00")  # cutoff 14/09 23:00
+    ws["WS-E1-15"].update(actual_checkout=None, planned_end="2026-09-15 17:00:00")  # cutoff 15/09 23:00
+    res = env.att.team_attendance(manager="M1", from_date="2026-09-01", to_date="2026-09-30")
+    e1 = _member(res, "E1")
+    assert _day(e1, "2026-09-14")["checkout_miss"] is True
+    assert _day(e1, "2026-09-15")["checkout_miss"] is False
+    sheet = {
+        d["date"]: d
+        for d in _month_sheet(env).employee_month_sheet(employee="E1", year=2026, month=9)["days"]
+    }
+    assert sheet["2026-09-14"]["checkout_miss"] is True
+    assert sheet["2026-09-15"]["checkout_miss"] is False
+
+
+def test_ta31_resolver_wall_frame_day_and_night_shifts(env):
+    """FIX 2026-10-04: the checkin → shift resolver compares in the WALL frame
+    (no +7h): a 20:13 OUT stays on its day shift, a 08:00 OUT closes
+    yesterday's night shift."""
+    si = env.fr.stores.setdefault("VN Employee Shift Instance", {})
+    for name, wd, ps, pe in (
+        ("SI-D21", "2026-09-21", "2026-09-21 08:00:00", "2026-09-21 20:00:00"),
+        ("SI-D22", "2026-09-22", "2026-09-22 08:00:00", "2026-09-22 20:00:00"),
+        ("SI-N27", "2026-09-27", "2026-09-27 20:00:00", "2026-09-28 08:00:00"),
+        ("SI-N28", "2026-09-28", "2026-09-28 20:00:00", "2026-09-29 08:00:00"),
+    ):
+        si[name] = {
+            "name": name,
+            "employee": "E1",
+            "work_date": wd,
+            "planned_start": ps,
+            "planned_end": pe,
+            "docstatus": 1,
+        }
+
+    def punch(t, kind):
+        return types.SimpleNamespace(employee="E1", time=t, log_type=kind)
+
+    resolve = env.att._resolve_shift_instance_for_checkin
+    assert resolve(punch(datetime(2026, 9, 22, 20, 13), "OUT")) == "SI-D22"
+    assert resolve(punch(datetime(2026, 9, 22, 8, 3), "IN")) == "SI-D22"
+    assert resolve(punch(datetime(2026, 9, 28, 8, 0), "OUT")) == "SI-N27"
+    assert resolve(punch(datetime(2026, 9, 28, 20, 5), "IN")) == "SI-N28"

@@ -128,6 +128,38 @@ def test_off_roster_unpunched_day_is_not_absent():
     assert (t["absent_days"], t["worked_days"], t["standard_days"]) == (0, 1, 1)
 
 
+def test_open_session_past_cutoff_is_checkout_miss():
+    """One cutoff for every screen: planned_end + auto-close buffer (360')."""
+    open_ws = _ws(actual_checkout=None, planned_end="2026-10-01 17:00:00")
+    before = ms.build_day(
+        D(2026, 10, 1), today=TODAY, sessions=[open_ws], now=dt.datetime(2026, 10, 1, 22, 59)
+    )
+    assert before["checkout_miss"] is False  # still inside the late-checkout window
+    after = ms.build_day(D(2026, 10, 1), today=TODAY, sessions=[open_ws], now=dt.datetime(2026, 10, 1, 23, 1))
+    assert after["checkout_miss"] is True
+    waived = ms.build_day(
+        D(2026, 10, 1),
+        today=TODAY,
+        sessions=[open_ws],
+        now=dt.datetime(2026, 10, 2, 9, 0),
+        checkout_miss={"status": "Waived"},
+    )
+    assert waived["checkout_miss"] is False
+    closed = ms.build_day(D(2026, 10, 1), today=TODAY, sessions=[_ws()], now=dt.datetime(2026, 10, 2, 9, 0))
+    assert closed["checkout_miss"] is False  # has an OUT → never overdue
+
+
+def test_is_checkout_overdue_edges():
+    assert ms.is_checkout_overdue(
+        "2026-10-01 08:00:00", None, "2026-10-01 20:00:00", "2026-10-02 02:01:00", 360
+    )
+    assert not ms.is_checkout_overdue(
+        "2026-10-01 08:00:00", None, "2026-10-01 20:00:00", "2026-10-02 02:00:00", 360
+    )
+    assert not ms.is_checkout_overdue(None, None, "2026-10-01 20:00:00", "2026-10-03 00:00:00", 360)
+    assert not ms.is_checkout_overdue("2026-10-01 08:00:00", None, None, "2026-10-03 00:00:00", 360)
+
+
 def test_checkin_miss_only_when_out_without_in():
     day = ms.build_day(D(2026, 10, 1), today=TODAY, sessions=[_ws(actual_checkin=None, late_minutes=40)])
     assert day["checkin_miss"] is True

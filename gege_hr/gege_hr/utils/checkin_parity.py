@@ -12,6 +12,8 @@ payroll integrity is unit-testable without a bench:
                                re-taps that would emit OUT-seconds-after-IN.
   - :func:`has_in_only` / :func:`has_out_only` — day-shape detectors (open
                                session / orphan OUT).
+  - :func:`pick_shift_instance` — which Shift Instance a punch belongs to
+                               (drives the Employee Checkin after_insert recalc).
 
 Fixes two payroll-corrupting scenarios (see tests/test_mobile_checkin_parity.py
 for the full matrix):
@@ -31,7 +33,7 @@ for the full matrix):
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 __all__ = [
     "parse_log_dt",
@@ -39,6 +41,7 @@ __all__ = [
     "is_duplicate_intent",
     "has_in_only",
     "has_out_only",
+    "pick_shift_instance",
 ]
 
 _IN_TOKENS = ("IN", "CLOCK IN")
@@ -137,3 +140,69 @@ def is_duplicate_intent(last_log_time, intent_time, gap_minutes: int = 2) -> boo
         return False
     delta = (intent - last).total_seconds()
     return 0 <= delta < int(gap_minutes) * 60
+
+
+# utils.calc default ``vn_max_total_work_hours`` — the engine credits a log to a
+# shift only inside [planned_end - cap, planned_start + cap] (_filter_logs_to_window).
+_ENGINE_CAP_HOURS = 20.0
+
+
+def _engine_window(c: dict, ps: datetime, pe: datetime) -> tuple[datetime, datetime]:
+    """The engine's own log window for one Shift Instance (utils.calc
+    ``_filter_logs_to_window``): ``[pe - cap, ps + cap]`` widened — never
+    narrowed — by the instance check-in / check-out window."""
+    try:
+        cap = timedelta(hours=float(c.get("vn_max_total_work_hours") or _ENGINE_CAP_HOURS))
+    except (TypeError, ValueError):
+        cap = timedelta(hours=_ENGINE_CAP_HOURS)
+    lo, hi = pe - cap, ps + cap
+    cws, mco = parse_log_dt(c.get("checkin_window_start")), parse_log_dt(c.get("max_checkout_time"))
+    if cws is not None and cws < lo:
+        lo = cws
+    if mco is not None and mco > hi:
+        hi = mco
+    return lo, hi
+
+
+def pick_shift_instance(candidates: list[dict], punch_time, log_type: str | None = None) -> str | None:
+    """Name of the Shift Instance a punch belongs to (``None`` if no candidate).
+
+    ``candidates``: the employee's instances of the punch day AND the day before
+    (an overnight shift started yesterday), each with ``planned_start`` /
+    ``planned_end`` (+ optional ``checkin_window_start`` / ``max_checkout_time``).
+    PHASE-1 FRAME — every value is naive PORTAL WALL; compare as-is.
+    Instances whose ENGINE log window (:func:`_engine_window`) holds the punch
+    win — so the recalc hook targets the session the engine will actually
+    credit it to; among them an IN goes to the closest ``planned_start``, an
+    OUT to the closest ``planned_end``, an unknown type to the closest window.
+    No instance qualifies → the closest window (never drop a punch while there
+    are candidates — same as the old resolver).
+
+    FIX 2026-10-04: the old resolver read the punch as UTC (+7h), so a day
+    shift's 20:xx OUT and a night shift's 08:xx OUT resolved to the WRONG
+    instance — 164 of 234 punches 28/09–04/10 recalculated the wrong session.
+    """
+    t = parse_log_dt(punch_time)
+    if t is None:
+        return None
+    kind = str(log_type or "").strip().upper()
+    best = None
+    for c in candidates or []:
+        ps, pe = parse_log_dt(c.get("planned_start")), parse_log_dt(c.get("planned_end"))
+        if ps is None or pe is None:
+            continue
+        outside = max(ps - t, t - pe, timedelta(0))
+        lo, hi = _engine_window(c, ps, pe)
+        if lo <= t <= hi:
+            if kind in _IN_TOKENS:
+                gap = abs(t - ps)
+            elif kind in _OUT_TOKENS:
+                gap = abs(t - pe)
+            else:
+                gap = outside
+            key = (0, gap)
+        else:
+            key = (1, outside)
+        if best is None or key < best[0]:
+            best = (key, c.get("name"))
+    return best[1] if best else None

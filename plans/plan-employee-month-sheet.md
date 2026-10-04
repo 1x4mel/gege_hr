@@ -40,6 +40,9 @@ cho tổng tháng: bảng công tháng, ô thống kê `/hr/attendance` (`attend
 Lưới team nhận cờ ô `checkout_miss` = `ms.is_checkout_miss` (cùng luật). "Làm thêm" = OT **đã duyệt**;
 OT chưa duyệt trả riêng `overtime_pending_hours`. Người **không** có Shift Assignment / Work Session
 trong tháng: ngày không chấm = `off_roster` (không tính vắng) — cùng luật roster của review team.
+**Một mốc "quá hạn chấm ra"** (04/10): ca có IN, chưa OUT, quá `planned_end + vn_cm_buffer_minutes`
+(360') = "Quên chấm ra" ở cả 3 màn (`ms.is_checkout_overdue`, `attendance._checkout_cutoff`) — đúng mốc
+auto-close tạo ticket; FE lưới dùng cờ BE thay cửa sổ 5h riêng.
 
 ## 3. Thống kê (đếm theo NGÀY, cộng PHÚT/GIỜ)
 

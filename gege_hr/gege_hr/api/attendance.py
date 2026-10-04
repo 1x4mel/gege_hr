@@ -885,6 +885,7 @@ from gege_hr.gege_hr.utils.checkin_parity import (  # noqa: E402
     has_out_only as _has_out_only,
     is_duplicate_intent as _is_duplicate_intent,
     parse_log_dt as _parse_log_dt,
+    pick_shift_instance as _pick_shift_instance,
 )
 
 
@@ -1941,6 +1942,22 @@ def _checkout_miss_by_day(emps: list[str], start, end) -> dict:
     return {(r.get("employee"), str(r.get("work_date"))[:10]): r for r in rows}
 
 
+def _checkout_cutoff() -> tuple:
+    """``(now, buffer_minutes)`` for "quá hạn chấm ra": an open session past
+    ``planned_end + vn_cm_buffer_minutes`` is "Quên chấm ra" on every screen —
+    the same cutoff the hourly auto-close uses to raise the ticket, so the grid
+    no longer runs ahead of the sheet (owner 2026-10-04). ``now`` = naive
+    PORTAL WALL (PHASE-1 frame, like planned_end)."""
+    from gege_hr.gege_hr.utils import checkout_miss as cm_utils
+
+    now = tz_utils.wall(tz_utils.now_in_portal())
+    try:
+        buffer = int(cm_utils._config().get("buffer_minutes") or cm_utils.DEFAULTS["buffer_minutes"])
+    except Exception:
+        buffer = int(cm_utils.DEFAULTS["buffer_minutes"])
+    return now, buffer
+
+
 def _team_leave_by(emps: list[str], day) -> dict:
     """``{employee: approved Leave Application covering ``day``}``."""
     if not emps:
@@ -2637,6 +2654,7 @@ def team_attendance(
     # One "Quên chấm ra" rule for every view (owner 2026-10-04): per-cell flag
     # by the month-sheet rule (ticket not Waived, or the engine's fake OUT).
     miss_by_day = _checkout_miss_by_day(emp_names, start, end)
+    cutoff_now, cutoff_buffer = _checkout_cutoff()
     locked_dates, period_info = _locked_days_between(start, end)
 
     # Approved Leave Applications per member/day — so leave days show correctly
@@ -2772,6 +2790,7 @@ def team_attendance(
                 "raw_overtime_hours",
                 "missing_checkout",
                 "vn_auto_checkout",
+                "planned_end",
             ],
         ):
             ws_by_emp.setdefault(r.employee, {})[str(r.work_date)] = r
@@ -2923,9 +2942,19 @@ def team_attendance(
                     "missing_checkout": bool(ws and ws.missing_checkout),
                     "vn_auto_checkout": bool(ws and ws.vn_auto_checkout),
                     # Unified flag (utils.month_sheet.is_checkout_miss) — the grid
-                    # renders "Thiếu chấm ra" from this, exactly like the sheet.
+                    # renders "Thiếu chấm ra" from this, exactly like the sheet
+                    # (ticket not Waived, fake OUT, or open past the cutoff).
                     "checkout_miss": ms_utils.is_checkout_miss(
-                        miss_by_day.get((m["name"], str(cur))), bool(ws and ws.vn_auto_checkout)
+                        miss_by_day.get((m["name"], str(cur))),
+                        bool(ws and ws.vn_auto_checkout),
+                        bool(ws)
+                        and ms_utils.is_checkout_overdue(
+                            ws.actual_checkin,
+                            ws.actual_checkout,
+                            ws.get("planned_end"),
+                            cutoff_now,
+                            cutoff_buffer,
+                        ),
                     ),
                     **cell_extras,
                 }
@@ -3628,7 +3657,7 @@ def _raise_unmatched_checkin(checkin_doc) -> None:
     check_dt = getattr(checkin_doc, "time", None)
     if check_dt is None:
         return
-    work_date = tz_utils.to_portal(get_datetime(check_dt)).date()
+    work_date = tz_utils.wall(get_datetime(check_dt)).date()  # PHASE-1: wall, not +7h
     employee = getattr(checkin_doc, "employee", None)
     if not employee:
         return
@@ -3666,44 +3695,30 @@ def _raise_unmatched_checkin(checkin_doc) -> None:
 
 
 def _resolve_shift_instance_for_checkin(checkin_doc) -> str | None:
-    """Find the VN Employee Shift Instance whose planned window covers the check-in."""
+    """Find the VN Employee Shift Instance a check-in belongs to.
+
+    PHASE-1 FRAME: ``Employee Checkin.time`` and the instance ``planned_*`` are
+    both naive PORTAL WALL — compared as-is (``tz.wall``). FIX 2026-10-04: the
+    old ``tz.to_portal`` read the punch as UTC (+7h), so a day shift's 20:xx
+    OUT / a night shift's 08:xx OUT recalculated the WRONG session. The choice
+    (closest start for IN, closest end for OUT) is
+    :func:`utils.checkin_parity.pick_shift_instance`.
+    """
     check_dt = getattr(checkin_doc, "time", None)
     if check_dt is None:
         return None
-    if hasattr(check_dt, "astimezone"):
-        check_portal = tz_utils.to_portal(check_dt)
-    else:
-        check_portal = tz_utils.to_portal(get_datetime(check_dt))
-
-    # Prefer a Shift Instance linked to this shift_type on the work_date.
+    t = tz_utils.wall(get_datetime(check_dt))
+    # The punch day + the day before (an overnight shift started yesterday).
     candidates = frappe.db.get_all(
         "VN Employee Shift Instance",
         filters={
             "employee": checkin_doc.employee,
             "docstatus": 1,
-            "work_date": check_portal.date(),
+            "work_date": ["between", [t.date() - timedelta(days=1), t.date()]],
         },
-        fields=["name", "planned_start", "planned_end"],
+        fields=["name", "planned_start", "planned_end", "checkin_window_start", "max_checkout_time"],
     )
-    # Overnight shifts: the check-in may land on work_date+1, so widen search.
-    if not candidates:
-        prev = check_portal.date() - timedelta(days=1)
-        candidates = frappe.db.get_all(
-            "VN Employee Shift Instance",
-            filters={
-                "employee": checkin_doc.employee,
-                "docstatus": 1,
-                "work_date": ["in", [check_portal.date(), prev]],
-            },
-            fields=["name", "planned_start", "planned_end"],
-        )
-
-    for c in candidates:
-        ps = tz_utils.to_portal(get_datetime(c.planned_start))
-        pe = tz_utils.to_portal(get_datetime(c.planned_end))
-        if ps - timedelta(hours=24) <= check_portal <= pe + timedelta(hours=24):
-            return c.name
-    return candidates[0].name if candidates else None
+    return _pick_shift_instance(candidates, t, getattr(checkin_doc, "log_type", None))
 
 
 @frappe.whitelist()

@@ -3603,7 +3603,7 @@ def _sync_recalc_after_checkin(docname: str, employee: str) -> None:
     from gege_hr.gege_hr.api import attendance as att_api
 
     try:
-        row = frappe.db.get_value("Employee Checkin", docname, ["employee", "time"], as_dict=True)
+        row = frappe.db.get_value("Employee Checkin", docname, ["employee", "time", "log_type"], as_dict=True)
     except Exception:
         row = None
     if not row:
@@ -3646,8 +3646,8 @@ def _checkout_miss_at(employee: str, out_time) -> str | None:
     holds an OUT at ``out_time`` (naive PORTAL WALL, like the Shift Instance
     planned_* — PHASE-1 FRAME); the closest ``planned_end`` wins.
 
-    Not via ``attendance._resolve_shift_instance_for_checkin``: it reads naive
-    times as UTC (+7h) and maps an OUT after 17:00 onto the NEXT day's shift.
+    Ticket-centric on purpose (not the generic punch → shift resolver): a fresh
+    OUT may only ever waive a ticket whose own shift window holds it.
     """
     from frappe.utils import get_datetime
 
