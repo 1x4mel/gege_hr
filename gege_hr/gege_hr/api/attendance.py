@@ -1248,7 +1248,11 @@ def _month_sheet_totals(emp: str, y: int, m: int) -> dict:
     already be resolved by the caller (``_resolve_employee``)."""
     from gege_hr.gege_hr.api import month_sheet as ms_api  # lazy: month_sheet imports this module
 
-    t = ms_api.month_totals(emp, y, m)
+    return _flat_month_totals(ms_api.month_totals(emp, y, m))
+
+
+def _flat_month_totals(t: dict) -> dict:
+    """``ms.aggregate_month`` totals → the flat keys the self tiles read."""
     return {
         "worked_days": t["worked_days"],
         "worked_minutes": round(flt(t["actual_hours"]) * 60),
@@ -1399,9 +1403,13 @@ def my_month_meta(employee: str | None = None, year: int | None = None, month: i
     sundays = sum(1 for i in range(total_days) if (start + timedelta(days=i)).weekday() == 6)
     standard_days = total_days - sundays - len(holiday_set)
 
-    # ── Summary tiles: month-sheet totals (FIX 2026-10-04 — one rule for every
-    # view, see my_monthly_summary). Only "Công" stays the engine's payable_day.
-    t = _month_sheet_totals(emp, y, m)
+    # ── Summary tiles + day calendar: the month sheet (FIX 2026-10-04 — one
+    # rule for every view, see my_monthly_summary). Only "Công" stays the
+    # engine's payable_day. ``days`` drives the calendar dots / gap days / tabs.
+    from gege_hr.gege_hr.api import month_sheet as ms_api  # lazy: month_sheet imports this module
+
+    view = ms_api.month_view(emp, y, m)
+    t = _flat_month_totals(view["totals"])
     ws_rows = frappe.db.get_all(
         "VN Attendance Work Session",
         filters={
@@ -1439,6 +1447,7 @@ def my_month_meta(employee: str | None = None, year: int | None = None, month: i
             "overtime_pending_hours": t["overtime_pending_hours"],
             "missing_checkout_count": t["checkout_miss_count"],
         },
+        "days": view["days"],
     }
 
 
@@ -3634,10 +3643,16 @@ def on_employee_checkin_create(doc, method: str | None = None) -> None:
         _raise_unmatched_checkin(doc)
         return
     try:
+        # FIX 2026-10-04: enqueue AFTER the punch commits. Enqueued mid-request
+        # the short worker started 53 ms after the insert — before mobile_checkin
+        # committed (it was still writing the explanation ticket) — so the
+        # session was computed WITHOUT the punch and nothing recalculated it
+        # (Cao Sơn 28/09: OUT 16:16 missing, then flagged "Quên chấm ra").
         frappe.enqueue(
             "gege_hr.gege_hr.utils.calc.persist_work_session",
             queue="short",
             timeout=60,
+            enqueue_after_commit=True,
             shift_instance_name=shift_instance,
             calculate_mode="realtime",
         )

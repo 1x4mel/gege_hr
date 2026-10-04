@@ -3554,37 +3554,74 @@ def _portal_local_to_utc_str(value) -> str | None:
 
 
 def _find_existing_checkin(employee: str, log_type: str, utc_time_str: str) -> str | None:
-    """Find an existing ``Employee Checkin`` of ``log_type`` on the same portal
-    day as ``utc_time_str``. Used when the caller passes no docname (the team
-    grid does not carry checkin doc names) so an edit updates the right row
-    instead of inserting a duplicate. Returns the docname or ``None``.
+    """Find the existing ``Employee Checkin`` of ``log_type`` that an edit to
+    ``utc_time_str`` must UPDATE — used when the caller passes no docname (the
+    team grid / month sheet do not carry checkin doc names). Returns the
+    docname or ``None`` (→ insert).
+
+    FIX 2026-10-04: match by SHIFT, not calendar day
+    (:func:`utils.checkin_parity.pick_existing_punch`). Two night shifts share
+    a calendar day (13/09 IN 04:45 and 14/09 IN 22:54 both fall on 14/09), so
+    the day match moved the OTHER shift's punch on every edit. A time no Shift
+    Instance covers keeps the old same-portal-day match.
     """
     from datetime import datetime
 
-    from frappe.utils import get_datetime
+    from gege_hr.gege_hr.utils import checkin_parity as cp
 
-    from gege_hr.gege_hr.utils import tz as tz_utils
+    # PHASE-1 FRAME: Employee Checkin.time + instance planned_* are naive
+    # PORTAL WALL; ``utc_time_str`` is already wall (see
+    # _portal_local_to_utc_str) — no UTC conversion anywhere.
+    check_dt = cp.parse_log_dt(utc_time_str)
+    if check_dt is None:
+        return None
+    day = check_dt.date()
+    shifts = frappe.db.get_all(
+        "VN Employee Shift Instance",
+        filters={
+            "employee": employee,
+            "docstatus": 1,
+            "work_date": ["between", [day - timedelta(days=2), day + timedelta(days=1)]],
+        },
+        fields=[
+            "name",
+            "work_date",
+            "planned_start",
+            "planned_end",
+            "checkin_window_start",
+            "max_checkout_time",
+        ],
+    )
+    if cp.shift_of_punch(shifts, check_dt, log_type):
+        span = timedelta(hours=36)
+        punches = frappe.db.get_all(
+            "Employee Checkin",
+            filters=[
+                ["employee", "=", employee],
+                ["log_type", "=", log_type],
+                ["time", ">=", (check_dt - span).strftime("%Y-%m-%d %H:%M:%S")],
+                ["time", "<=", (check_dt + span).strftime("%Y-%m-%d %H:%M:%S")],
+            ],
+            fields=["name", "time", "log_type"],
+            order_by="time asc",
+        )
+        return cp.pick_existing_punch(punches, shifts, check_dt, log_type)
 
-    check_dt = get_datetime(utc_time_str)
-    # PHASE-1 FRAME: Employee Checkin.time is naive PORTAL WALL — day window
-    # is the wall day, no UTC conversion.
-    if check_dt.tzinfo is not None:
-        check_dt = check_dt.astimezone(tz_utils.get_tzinfo()).replace(tzinfo=None)
-    portal_day = check_dt.date()
-    start_wall = datetime.combine(portal_day, datetime.min.time())
+    # No shift covers this time → legacy same-portal-day match.
+    start_wall = datetime.combine(day, datetime.min.time())
     end_wall = start_wall + timedelta(days=1)
-    start_utc = start_wall.strftime("%Y-%m-%d %H:%M:%S")
-    end_utc = end_wall.strftime("%Y-%m-%d %H:%M:%S")
-    order = "time asc" if log_type == "IN" else "time desc"
     rows = frappe.db.get_all(
         "Employee Checkin",
         filters={
             "employee": employee,
             "log_type": log_type,
-            "time": ["between", [start_utc, end_utc]],
+            "time": [
+                "between",
+                [start_wall.strftime("%Y-%m-%d %H:%M:%S"), end_wall.strftime("%Y-%m-%d %H:%M:%S")],
+            ],
         },
         pluck="name",
-        order_by=order,
+        order_by="time asc" if log_type == "IN" else "time desc",
         limit=1,
     )
     return rows[0] if rows else None

@@ -111,11 +111,18 @@ def month_totals(employee: str, year: int, month: int) -> dict:
     NO permission gate — the caller must already have resolved / gated
     ``employee`` (the self endpoints pass the session user's own employee).
     """
+    return month_view(employee, year, month)["totals"]
+
+
+def month_view(employee: str, year: int, month: int) -> dict:
+    """:func:`month_totals` + the compact day rows (``{iso: day}``) — what the
+    employee's own month calendar (/hr/attendance/monthly) colours each day
+    by, so it can never disagree with this sheet. Same NO-gate contract."""
     today = tz_utils.now_in_portal().date()
     start, end = _month_range(int(year), int(month))
     info = frappe.db.get_value("Employee", employee, EMPLOYEE_FIELDS, as_dict=True) or {"name": employee}
     days, _locked, _period = _employee_days(info, start, end, today)
-    return ms.aggregate_month(days)
+    return {"totals": ms.aggregate_month(days), "days": {d["date"]: _compact_day(d) for d in days}}
 
 
 def _employee_days(info: dict, start: date, end: date, today: date) -> tuple[list[dict], set, dict | None]:

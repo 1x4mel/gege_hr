@@ -27,7 +27,9 @@ from gege_hr.gege_hr.utils.checkin_parity import (
     has_out_only,
     is_duplicate_intent,
     parse_log_dt,
+    pick_existing_punch,
     pick_shift_instance,
+    shift_of_punch,
 )
 
 Y, T = "2026-08-31", "2026-09-01"  # yesterday / today fixtures
@@ -263,3 +265,42 @@ def test_pick_shift_instance_fallback_and_empty():
     assert pick_shift_instance([_day("D20", 20)], "2026-09-22 21:00:00", "OUT") == "D20"
     assert pick_shift_instance([], "2026-09-22 21:00:00", "OUT") is None
     assert pick_shift_instance([_day("D22", 22)], None, "OUT") is None
+
+
+# --------------------------------------------------------------------------- #
+# pick_existing_punch — admin edit updates the punch of the SAME SHIFT
+# --------------------------------------------------------------------------- #
+def _n(name, d):
+    return {**_night(name, d), "work_date": f"2026-09-{d:02d}"}
+
+
+_NIGHTS = [_n("N12", 12), _n("N13", 13), _n("N14", 14)]
+_PUNCHES = [
+    {"name": "IN12", "time": "2026-09-13 00:52:00", "log_type": "IN"},
+    {"name": "OUT13", "time": "2026-09-14 08:02:00", "log_type": "OUT"},
+    {"name": "IN14", "time": "2026-09-14 22:54:00", "log_type": "IN"},
+    {"name": "OUT14", "time": "2026-09-15 11:28:00", "log_type": "OUT"},
+]
+
+
+def test_pick_existing_punch_same_shift_not_same_day():
+    # 04:45 on 14/09 belongs to N13 which has no IN → insert (None), NOT IN14
+    assert shift_of_punch(_NIGHTS, "2026-09-14 04:45:00", "IN") == "N13"
+    assert pick_existing_punch(_PUNCHES, _NIGHTS, "2026-09-14 04:45:00", "IN") is None
+    assert pick_existing_punch(_PUNCHES, _NIGHTS, "2026-09-14 22:50:00", "IN") == "IN14"
+    assert pick_existing_punch(_PUNCHES, _NIGHTS, "2026-09-14 08:10:00", "OUT") == "OUT13"
+    assert pick_existing_punch(_PUNCHES, _NIGHTS, "2026-09-15 11:00:00", "OUT") == "OUT14"
+
+
+def test_pick_existing_punch_in_earliest_out_latest_and_no_shift():
+    day = [{**_day("D22", 22), "work_date": "2026-09-22"}]
+    punches = [
+        {"name": "IN-a", "time": "2026-09-22 08:01:00", "log_type": "IN"},
+        {"name": "IN-b", "time": "2026-09-22 08:03:00", "log_type": "IN"},
+        {"name": "OUT-a", "time": "2026-09-22 19:00:00", "log_type": "OUT"},
+        {"name": "OUT-b", "time": "2026-09-22 20:10:00", "log_type": "OUT"},
+    ]
+    assert pick_existing_punch(punches, day, "2026-09-22 08:00:00", "IN") == "IN-a"
+    assert pick_existing_punch(punches, day, "2026-09-22 20:00:00", "OUT") == "OUT-b"
+    assert shift_of_punch([], "2026-09-22 08:00:00", "IN") is None
+    assert pick_existing_punch(punches, [], "2026-09-22 08:00:00", "IN") is None

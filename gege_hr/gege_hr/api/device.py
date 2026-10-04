@@ -176,6 +176,11 @@ def _coerce_dt(value: Any) -> datetime | None:
     if value is None or value == "":
         return None
     if isinstance(value, datetime):
+        # PHASE-1 FRAME: a naive DB datetime is already PORTAL WALL — attach the
+        # portal tz (``to_portal`` read it as UTC: +7h, so a device silent for
+        # up to 31h still showed "Synced"). Aware values fold as before.
+        if value.tzinfo is None:
+            return value.replace(tzinfo=tz_utils.get_tzinfo())
         return tz_utils.to_portal(value)
     return parse_log_time(value)
 

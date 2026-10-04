@@ -17,33 +17,6 @@ app_email = "dev@gege.local"
 app_license = "MIT"
 
 # --------------------------------------------------------------------------- #
-# Scheduled jobs — the checkout-miss engine: auto-close forgotten checkouts
-# (synthetic OUT at planned end + ticket) and flip tickets past their grace
-# deadline to "Penalised". Previously NOT registered, so the engine only ran
-# opportunistically on the employee's NEXT check-in and expired tickets stayed
-# "Pending" forever (late explanations were still accepted).
-# --------------------------------------------------------------------------- #
-scheduler_events = {
-    "hourly": [
-        "gege_hr.gege_hr.utils.checkout_miss.run_hourly",
-    ],
-}
-
-# --------------------------------------------------------------------------- #
-# Doc events — realtime desk-free parity (plans/plan-blackout-desk-free.md §B8).
-# Broadcast a lightweight event on every blackout-rule mutation so the SPA list
-# can show the "N quy tắc thay đổi" refresh pill (pattern: audit_event_created,
-# plan audit-center §B4). The handler is NOT whitelisted — internal only.
-# --------------------------------------------------------------------------- #
-doc_events = {
-    "VN Leave Blackout Period": {
-        "after_insert": "gege_hr.gege_hr.api.leave_blackout.on_doc_event",
-        "on_update": "gege_hr.gege_hr.api.leave_blackout.on_doc_event",
-        "on_trash": "gege_hr.gege_hr.api.leave_blackout.on_doc_event",
-    }
-}
-
-# --------------------------------------------------------------------------- #
 # Doctype permission hooks (inbox-centric migration): the gege_hr approval
 # matrix authorises HR Manager / HR User to act on ANY pending request of these
 # doctypes (regardless of which employee filed it). Frappe's default per-employee
@@ -335,6 +308,16 @@ doc_events = {
     # Raw check-in arrival → enqueue work-session recalculation.
     "Employee Checkin": {
         "after_insert": "gege_hr.gege_hr.api.attendance.on_employee_checkin_create",
+    },
+    # Realtime desk-free parity (plans/plan-blackout-desk-free.md §B8): broadcast
+    # a light event on every blackout-rule mutation so the SPA list shows the
+    # "N quy tắc thay đổi" refresh pill. FIX 2026-10-04: this used to sit in a
+    # SECOND top-level ``doc_events`` dict that this one overwrote — the hook
+    # never ran (the matching hourly ``run_hourly`` lives in "cron" above).
+    "VN Leave Blackout Period": {
+        "after_insert": "gege_hr.gege_hr.api.leave_blackout.on_doc_event",
+        "on_update": "gege_hr.gege_hr.api.leave_blackout.on_doc_event",
+        "on_trash": "gege_hr.gege_hr.api.leave_blackout.on_doc_event",
     },
     # Leave workflow → refresh leave calendar cache + notify approver.
     "Leave Application": {

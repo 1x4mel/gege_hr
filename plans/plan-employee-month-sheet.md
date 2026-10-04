@@ -43,6 +43,9 @@ trong tháng: ngày không chấm = `off_roster` (không tính vắng) — cùng
 **Một mốc "quá hạn chấm ra"** (04/10): ca có IN, chưa OUT, quá `planned_end + vn_cm_buffer_minutes`
 (360') = "Quên chấm ra" ở cả 3 màn (`ms.is_checkout_overdue`, `attendance._checkout_cutoff`) — đúng mốc
 auto-close tạo ticket; FE lưới dùng cờ BE thay cửa sổ 5h riêng.
+**Lịch tháng của nhân viên** (`/hr/attendance/monthly`, 04/10): `my_month_meta.days` = chính các ngày của
+bảng công (`month_sheet.month_view`) → chấm màu, ngày trống (vắng / phép — 24/7, Chủ nhật cũng là ngày làm),
+tab và chip "Quên chấm ra" trong ngăn ngày đọc cùng một luật với bảng công.
 
 ## 3. Thống kê (đếm theo NGÀY, cộng PHÚT/GIỜ)
 

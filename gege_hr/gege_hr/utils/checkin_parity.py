@@ -14,6 +14,8 @@ payroll integrity is unit-testable without a bench:
                                session / orphan OUT).
   - :func:`pick_shift_instance` — which Shift Instance a punch belongs to
                                (drives the Employee Checkin after_insert recalc).
+  - :func:`pick_existing_punch` — which existing punch an admin time edit must
+                               update (same type + SAME shift, not same day).
 
 Fixes two payroll-corrupting scenarios (see tests/test_mobile_checkin_parity.py
 for the full matrix):
@@ -42,6 +44,8 @@ __all__ = [
     "has_in_only",
     "has_out_only",
     "pick_shift_instance",
+    "shift_of_punch",
+    "pick_existing_punch",
 ]
 
 _IN_TOKENS = ("IN", "CLOCK IN")
@@ -206,3 +210,58 @@ def pick_shift_instance(candidates: list[dict], punch_time, log_type: str | None
         if best is None or key < best[0]:
             best = (key, c.get("name"))
     return best[1] if best else None
+
+
+def _as_day(value):
+    """``date`` / ``datetime`` / 'YYYY-MM-DD…' → ``date`` (``None`` if unparseable)."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if hasattr(value, "year") and hasattr(value, "month"):
+        return value
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def shift_of_punch(shifts: list[dict], punch_time, log_type: str | None = None) -> str | None:
+    """:func:`pick_shift_instance` over the instances of the punch's own day and
+    the day before — exactly the candidate set the after_insert resolver uses.
+    ``shifts`` may span more days (each needs ``work_date``)."""
+    t = parse_log_dt(punch_time)
+    if t is None:
+        return None
+    day, day_before = t.date(), t.date() - timedelta(days=1)
+    cands = [
+        s for s in shifts or [] if (wd := _as_day(s.get("work_date"))) is not None and day_before <= wd <= day
+    ]
+    return pick_shift_instance(cands, t, log_type)
+
+
+def pick_existing_punch(punches: list[dict], shifts: list[dict], when, log_type: str) -> str | None:
+    """The existing punch an admin edit to ``when`` must UPDATE: same
+    ``log_type`` AND the same shift (both via :func:`shift_of_punch`). IN → the
+    earliest such IN, OUT → the latest such OUT. ``None`` → insert a new punch.
+
+    FIX 2026-10-04: matching by CALENDAR DAY made editing one night shift move
+    the OTHER shift's punch on that day — Trọng Tiền 13/09 + 14/09 night
+    shifts both have an IN on 14/09 (04:45, 22:54): the one row ping-ponged 8
+    times on 16/09 and the 13/09 shift lost its IN.
+    """
+    kind = str(log_type or "").strip().upper()
+    target = shift_of_punch(shifts, when, kind)
+    if target is None:
+        return None
+    same = []
+    for p in punches or []:
+        pt = parse_log_dt(p.get("time"))
+        if pt is None or str(p.get("log_type") or "").strip().upper() != kind:
+            continue
+        if shift_of_punch(shifts, pt, kind) == target:
+            same.append((pt, p.get("name")))
+    if not same:
+        return None
+    same.sort()
+    return (same[0] if kind in _IN_TOKENS else same[-1])[1]
