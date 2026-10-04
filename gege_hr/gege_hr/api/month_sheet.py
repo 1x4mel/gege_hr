@@ -84,9 +84,7 @@ def employee_month_sheet(
     if not info:
         frappe.throw(_("Không tìm thấy nhân viên {0}.").format(emp), frappe.DoesNotExistError)
 
-    src = _load_sources([emp], start, end)
-    locked_dates, period = att_api._locked_days_between(start, end)
-    days = _build_days(info, src, start, end, today, locked_dates)
+    days, locked_dates, period = _employee_days(info, start, end, today)
 
     roles = set(emp_utils.get_user_roles() or [])
     return {
@@ -102,6 +100,32 @@ def employee_month_sheet(
         "days": days,
         "totals": ms.aggregate_month(days),
     }
+
+
+def month_totals(employee: str, year: int, month: int) -> dict:
+    """Month-sheet totals of ONE employee (:func:`ms.aggregate_month`) — the
+    single source for every attendance summary: this sheet, the team review
+    and the employee's own tiles (``attendance.my_monthly_summary`` /
+    ``my_month_meta``), so the screens can never disagree (owner 2026-10-04).
+
+    NO permission gate — the caller must already have resolved / gated
+    ``employee`` (the self endpoints pass the session user's own employee).
+    """
+    today = tz_utils.now_in_portal().date()
+    start, end = _month_range(int(year), int(month))
+    info = frappe.db.get_value("Employee", employee, EMPLOYEE_FIELDS, as_dict=True) or {"name": employee}
+    days, _locked, _period = _employee_days(info, start, end, today)
+    return ms.aggregate_month(days)
+
+
+def _employee_days(info: dict, start: date, end: date, today: date) -> tuple[list[dict], set, dict | None]:
+    """Day rows of ONE employee + the lock context (shared by the sheet and
+    :func:`month_totals`)."""
+    emp = info["name"]
+    src = _load_sources([emp], start, end)
+    locked_dates, period = att_api._locked_days_between(start, end)
+    on_roster = emp in _on_roster([emp], start, end)
+    return _build_days(info, src, start, end, today, locked_dates, on_roster=on_roster), locked_dates, period
 
 
 @frappe.whitelist()
@@ -197,7 +221,15 @@ def _roster(manager_emp, is_hr: bool, start: date, end: date, department) -> lis
         infos.append(e)
     if not infos:
         return []
-    names = [e["name"] for e in infos]
+    on_roster = _on_roster([e["name"] for e in infos], start, end)
+    return [e for e in infos if e["name"] in on_roster]
+
+
+def _on_roster(names: list[str], start: date, end: date) -> set:
+    """Who is on the attendance roster in [start, end]: a Shift Assignment
+    overlapping the range or a Work Session in it."""
+    if not names:
+        return set()
     on_roster = {
         r.get("employee")
         for r in _get_all(
@@ -215,7 +247,7 @@ def _roster(manager_emp, is_hr: bool, start: date, end: date, department) -> lis
             ["employee"],
         )
     }
-    return [e for e in infos if e["name"] in on_roster]
+    return on_roster
 
 
 def _load_sources(emps: list[str], start: date, end: date) -> dict:
@@ -272,7 +304,9 @@ def _load_sources(emps: list[str], start: date, end: date) -> dict:
     }
 
 
-def _build_days(info: dict, src: dict, start: date, end: date, today: date, locked_dates) -> list[dict]:
+def _build_days(
+    info: dict, src: dict, start: date, end: date, today: date, locked_dates, on_roster: bool = True
+) -> list[dict]:
     emp = info["name"]
     sessions = src["sessions"].get(emp, {})
     leaves = src["leaves"].get(emp, {})
@@ -303,6 +337,7 @@ def _build_days(info: dict, src: dict, start: date, end: date, today: date, lock
                 },
                 edited=edited.get(iso, 0),
                 locked=iso in locked_dates,
+                on_roster=on_roster,
             )
         )
     return days

@@ -14,6 +14,9 @@ Business rules (owner, 2026-10-03):
 * "Quên chấm ra" = a VN Checkout Miss ticket for the day OR a session closed by
   the auto-checkout job (``vn_auto_checkout``) — never ``missing_checkout``,
   which is also set mid-shift and on absent days.
+* A **Waived** ticket does NOT count (owner, 2026-10-04): HR "Miễn" on the
+  ticket, an approved correction request, or HR Manager / Admin entering the
+  OUT by hand (``admin.admin_custom_checkin`` auto-waives the shift's ticket).
 """
 
 from __future__ import annotations
@@ -29,9 +32,12 @@ LEAVE_PAID = "leave_paid"
 LEAVE_UNPAID = "leave_unpaid"
 WORKED = "worked"
 ABSENT = "absent"
+# Unpunched past day of someone NOT on the attendance roster that month (no
+# Shift Assignment / Work Session — directors, admins): never "absent".
+OFF_ROSTER = "off_roster"
 
 # Statuses that are outside the employment window / not yet happened → not counted.
-NOT_COUNTED = {BEFORE_JOIN, AFTER_RELIEVE, FUTURE}
+NOT_COUNTED = {BEFORE_JOIN, AFTER_RELIEVE, FUTURE, OFF_ROSTER}
 
 # Late / early buckets (owner decision D3): ≤15 / 16–30 / >30 minutes.
 BUCKETS = ("le15", "16_30", "gt30")
@@ -118,6 +124,15 @@ def _session_view(ws: dict) -> dict:
     }
 
 
+def is_checkout_miss(checkout_miss: dict | None, auto_checkout: bool) -> bool:
+    """THE "Quên chấm ra" rule — one rule for the month sheet, the team grid
+    and the employee's /hr/attendance tiles (owner 2026-10-04): a ticket for
+    the day or the engine's fake OUT, unless the ticket is Waived."""
+    if (checkout_miss or {}).get("status") == "Waived":
+        return False
+    return bool(checkout_miss) or bool(auto_checkout)
+
+
 def build_day(
     day: _dt.date,
     *,
@@ -132,6 +147,7 @@ def build_day(
     reasons: dict | None = None,
     edited: int = 0,
     locked: bool = False,
+    on_roster: bool = True,
 ) -> dict:
     """Classify one calendar day + its flags (plan §2).
 
@@ -140,6 +156,8 @@ def build_day(
     ``"late"`` / ``"early"`` → explanation status for the day; ``reasons``
     maps ``"late"`` / ``"early"`` / ``"checkout_miss"`` → the employee's
     written reason (the "Nội dung" column of the monthly review).
+    ``on_roster=False`` (no Shift Assignment / Work Session in the month):
+    an unpunched past day is :data:`OFF_ROSTER`, not absent.
     """
     sv = [_session_view(ws) for ws in (sessions or [])]
     punched = [s for s in sv if s["has_punch"]]
@@ -156,6 +174,8 @@ def build_day(
     elif day >= today:
         # Today without a punch yet is still open — not absent.
         status = FUTURE
+    elif not on_roster:
+        status = OFF_ROSTER
     else:
         status = ABSENT
 
@@ -180,6 +200,7 @@ def build_day(
     ot_pending = (
         sum(max(0.0, s["ot_raw_hours"] - s["ot_approved_hours"]) for s in punched) if counted else 0.0
     )
+    auto_out = any(s["auto_checkout"] for s in punched)
     expl = explanations or {}
     why = {k: v for k, v in (reasons or {}).items() if v}
     if leave_frac and (leave or {}).get("reason"):
@@ -216,7 +237,7 @@ def build_day(
         "ot_night_hours": round(sum(s["ot_night_hours"] for s in punched), 2) if counted else 0.0,
         "regular_hours": round(sum(s["regular_hours"] for s in punched), 2),
         "actual_hours": round(sum(s["actual_hours"] for s in punched), 2),
-        "checkout_miss": counted and (bool(checkout_miss) or any(s["auto_checkout"] for s in punched)),
+        "checkout_miss": counted and is_checkout_miss(checkout_miss, auto_out),
         "checkout_miss_status": (checkout_miss or {}).get("status"),
         "checkin_miss": counted and any(s["checkin_miss"] for s in punched),
         "pending": list(pending or []),
@@ -256,7 +277,7 @@ def aggregate_month(days: list[dict]) -> dict:
         "anomalies": {"multi_session": 0, "need_review": 0, "worked_on_leave": 0},
     }
     for d in days or []:
-        if d["status"] not in (BEFORE_JOIN, AFTER_RELIEVE):
+        if d["status"] not in (BEFORE_JOIN, AFTER_RELIEVE, OFF_ROSTER):
             t["standard_days"] += 1
         if not d["counted"]:
             continue

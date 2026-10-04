@@ -433,3 +433,115 @@ def test_inserts_when_no_existing_checkin_found(admin_module):
     assert res["status"] == "ok"
     assert len(stub._created) == 1
     assert stub._created[0][0]["log_type"] == "IN"
+
+
+# --------------------------------------------------------------------------- #
+# Owner 2026-10-04: HR/Admin entering the OUT by hand waives the shift's
+# "Quên chấm ra" ticket
+# --------------------------------------------------------------------------- #
+def _wire_ticket(monkeypatch, stub, *, status, resolve_raises=None):
+    """The day's OUT is auto-close's fake log CHK-OUT-1, linked to ticket VCM-1
+    in ``status``. Waive + recalc calls are recorded in order in the result."""
+    events = []
+    stub.db.checkin_rows = ["CHK-OUT-1"]
+
+    def get_value(doctype, name, field, **_kw):
+        if (doctype, name, field) == ("Employee Checkin", "CHK-OUT-1", "vn_checkout_miss"):
+            return "VCM-1"
+        if (doctype, name, field) == ("VN Checkout Miss", "VCM-1", "status"):
+            return status
+        return None
+
+    stub.db.get_value = get_value
+
+    cm = types.ModuleType("gege_hr.gege_hr.api.checkout_miss")
+
+    def _resolve_one(name, action, note, penalty_override):
+        if resolve_raises:
+            raise resolve_raises
+        events.append(("waive", name, action, note, penalty_override))
+
+    cm._resolve_one = _resolve_one
+    monkeypatch.setitem(sys.modules, "gege_hr.gege_hr.api.checkout_miss", cm)
+    att = sys.modules["gege_hr.gege_hr.api.attendance"]
+    monkeypatch.setattr(
+        att, "on_employee_checkin_create", lambda doc: events.append(("recalc", getattr(doc, "name", None)))
+    )
+    return events
+
+
+def test_manual_out_waives_checkout_miss_before_recalc(admin_module, monkeypatch):
+    """Penalised ticket → waived, and BEFORE the recalc (which would otherwise
+    auto-close a Pending ticket to the terminal Closed state)."""
+    admin, stub = admin_module
+    events = _wire_ticket(monkeypatch, stub, status="Penalised")
+    res = admin.admin_custom_checkin("HR-EMP-1", time_out="2026-09-11 20:25")
+    assert res["status"] == "ok"
+    assert events[0][:3] == ("waive", "VCM-1", "waive")
+    assert "2026-09-11 20:25" in events[0][3]
+    assert events[0][4] is None
+    assert events[1] == ("recalc", "CHK-OUT-1")
+
+
+@pytest.mark.parametrize("status", ["Closed", "Waived"])
+def test_manual_out_leaves_final_tickets_alone(admin_module, monkeypatch, status):
+    admin, stub = admin_module
+    events = _wire_ticket(monkeypatch, stub, status=status)
+    admin.admin_custom_checkin("HR-EMP-1", time_out="2026-09-23 20:00")
+    assert [e[0] for e in events] == ["recalc"]
+
+
+def test_in_only_edit_does_not_waive(admin_module, monkeypatch):
+    admin, stub = admin_module
+    events = _wire_ticket(monkeypatch, stub, status="Pending")
+    admin.admin_custom_checkin("HR-EMP-1", time_in="2026-09-23 08:03")
+    assert "waive" not in [e[0] for e in events]
+
+
+def test_waive_failure_never_fails_the_edit(admin_module, monkeypatch):
+    """E.g. payroll period locked → _resolve_one throws; the punch edit stands."""
+    admin, stub = admin_module
+    events = _wire_ticket(monkeypatch, stub, status="Pending", resolve_raises=RuntimeError("locked"))
+    res = admin.admin_custom_checkin("HR-EMP-1", time_out="2026-09-11 20:25")
+    assert res["status"] == "ok"
+    assert [e[0] for e in events] == ["recalc"]
+
+
+def test_new_out_waives_ticket_whose_shift_window_holds_it(admin_module, monkeypatch):
+    """No OUT row that day → a fresh OUT is inserted (no ticket link on it):
+    the ticket is the one whose shift window [start, end + 6h] holds the punch.
+    An OUT at 20:25 must NOT land on the next day's shift (the +7h UTC misread
+    of ``_resolve_shift_instance_for_checkin``); closest planned_end wins."""
+    admin, stub = admin_module
+    events = _wire_ticket(monkeypatch, stub, status="Pending")
+    out_at = dt.datetime(2026, 9, 11, 20, 25)
+    windows = {
+        "SI-DAY-11": (dt.datetime(2026, 9, 11, 8, 0), dt.datetime(2026, 9, 11, 20, 0)),
+        "SI-NIGHT-11": (dt.datetime(2026, 9, 11, 20, 0), dt.datetime(2026, 9, 12, 8, 0)),
+        "SI-DAY-12": (dt.datetime(2026, 9, 12, 8, 0), dt.datetime(2026, 9, 12, 20, 0)),
+    }
+    tickets = [
+        types.SimpleNamespace(name="VCM-NEXT", shift_instance="SI-DAY-12"),
+        types.SimpleNamespace(name="VCM-NIGHT", shift_instance="SI-NIGHT-11"),
+        types.SimpleNamespace(name="VCM-1", shift_instance="SI-DAY-11"),
+    ]
+
+    def get_all(doctype, filters=None, **_kw):
+        return list(tickets) if doctype == "VN Checkout Miss" else []
+
+    def get_value(doctype, name, field=None, **_kw):
+        if doctype == "Employee Checkin" and field == "time":
+            return out_at
+        if doctype == "VN Employee Shift Instance":
+            ps, pe = windows[name]
+            return types.SimpleNamespace(planned_start=ps, planned_end=pe)
+        if (doctype, name, field) == ("VN Checkout Miss", "VCM-1", "status"):
+            return "Pending"
+        return None
+
+    stub.db.get_all = get_all
+    stub.db.get_value = get_value
+    res = admin.admin_custom_checkin("HR-EMP-1", time_out="2026-09-11 20:25")
+    assert res["status"] == "ok"
+    assert stub._created[0][0]["log_type"] == "OUT"
+    assert [e[:2] for e in events if e[0] == "waive"] == [("waive", "VCM-1")]

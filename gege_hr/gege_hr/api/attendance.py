@@ -29,6 +29,7 @@ from gege_hr.gege_hr.utils import (
     _db as _db_mod,
     employee as emp_utils,
     gamification as game,
+    month_sheet as ms_utils,
     notify as notify_util,
     pagination,
     tz as tz_utils,
@@ -1240,21 +1241,45 @@ def _monthly_overtime_hours(rows: list[dict]) -> float:
     return flt(total_minutes / 60.0, 2)
 
 
+def _month_sheet_totals(emp: str, y: int, m: int) -> dict:
+    """Flat month-sheet totals for the employee self tiles (``my_monthly_summary``
+    / ``my_month_meta``) — see :func:`month_sheet.month_totals`. ``emp`` must
+    already be resolved by the caller (``_resolve_employee``)."""
+    from gege_hr.gege_hr.api import month_sheet as ms_api  # lazy: month_sheet imports this module
+
+    t = ms_api.month_totals(emp, y, m)
+    return {
+        "worked_days": t["worked_days"],
+        "worked_minutes": round(flt(t["actual_hours"]) * 60),
+        "late_count": t["late"]["days"],
+        "late_minutes": round(flt(t["late"]["minutes"])),
+        "early_count": t["early"]["days"],
+        "early_minutes": round(flt(t["early"]["minutes"])),
+        # Only APPROVED OT is "Làm thêm" (policy require_overtime_approval) —
+        # same as the sheet + team grid; pending is exposed separately.
+        "overtime_hours": flt(t["ot"]["approved_hours"], 2),
+        "overtime_pending_hours": flt(t["ot"]["pending_hours"], 2),
+        "absent_count": t["absent_days"],
+        "leave_days": flt(t["leave_paid_days"]) + flt(t["leave_unpaid_days"]),
+        "checkout_miss_count": t["checkout_miss_count"],
+        "checkin_miss_count": t["checkin_miss_count"],
+    }
+
+
 @frappe.whitelist()
 def my_monthly_summary(
     employee: str | None = None, year: int | None = None, month: int | None = None
 ) -> dict:
     """Plan §10.2 — monthly worked/payable/late/absent/leave/OT totals.
 
-    FIX 2026-09-11 — aggregate from VN Attendance Work Sessions (engine truth)
-    instead of core ``Attendance`` rows, for two reasons found in production:
-    1. The sync projection (``build_attendance_fields``) never writes
-       late_entry / early_exit / working-hours onto Attendance, so every
-       Attendance-based counter (đi muộn, về sớm, OT) was permanently 0.
-    2. A whole-month ``backfill_attendance`` run created Present rows for
-       FUTURE dates — on 11/09 the tile showed "30 ca". The stat window is
-       now capped at today: a planned-only session (no punches yet) can
-       never count as worked.
+    FIX 2026-10-04 — the totals are the MONTH-SHEET totals
+    (``month_sheet.month_totals``): one rule for /hr/attendance, the monthly
+    sheet and the team grid. The old per-Work-Session loop disagreed with the
+    sheet for 23/23 employees: "Thiếu chấm ra" read ``missing_checkout`` (also
+    1 for today's still-open shift and absent days), "Nghỉ làm" read the WS
+    ``absent`` flag (the engine resets it to 0), "Làm thêm" added unapproved
+    raw OT, and a day with 2 sessions counted twice. Future days never count
+    (the sheet only counts days up to today).
     """
     emp = _resolve_employee(employee)
     now = tz_utils.now_in_portal()
@@ -1265,56 +1290,7 @@ def my_monthly_summary(
     # Session kế hoạch cho ngày tương lai không được tính vào thống kê.
     stat_end = min(end, now.date())
 
-    worked_days = 0
-    worked_minutes = 0.0
-    late_count = 0
-    late_minutes = 0.0
-    early_count = 0
-    early_minutes = 0.0
-    overtime_hours = 0.0
-    absent_count = 0
-    leave_days = 0
-    missing_checkout_count = 0
-    if start <= stat_end:
-        ws_rows = frappe.db.get_all(
-            "VN Attendance Work Session",
-            filters={
-                "employee": emp,
-                "work_date": ["between", [start, stat_end]],
-                "docstatus": ["!=", 2],
-            },
-            fields=[
-                "actual_checkin",
-                "actual_checkout",
-                "late_minutes",
-                "early_leave_minutes",
-                "total_actual_hours",
-                "raw_overtime_hours",
-                "approved_overtime_hours",
-                "absent",
-                "has_leave",
-                "missing_checkout",
-            ],
-        )
-        for r in ws_rows:
-            if r.get("actual_checkin") or r.get("actual_checkout"):
-                worked_days += 1
-            worked_minutes += flt(r.get("total_actual_hours") or 0) * 60
-            lm = flt(r.get("late_minutes") or 0)
-            if lm > 0:
-                late_count += 1
-            late_minutes += lm
-            em = flt(r.get("early_leave_minutes") or 0)
-            if em > 0:
-                early_count += 1
-            early_minutes += em
-            overtime_hours += flt(r.get("approved_overtime_hours") or r.get("raw_overtime_hours") or 0)
-            if r.get("absent"):
-                absent_count += 1
-            if r.get("has_leave"):
-                leave_days += 1
-            if r.get("missing_checkout"):
-                missing_checkout_count += 1
+    t = _month_sheet_totals(emp, y, m)
 
     # Legacy rows view (core Attendance) kept for compatibility consumers;
     # bounded to stat_end so seeded future rows never leak into month views.
@@ -1339,30 +1315,32 @@ def my_monthly_summary(
         "year": y,
         "month": m,
         # Top-level totals — the SPA contract (AttendanceView check-in tiles +
-        # DashboardView KPIs). All Work-Session aggregates, capped at today.
-        "worked_days": worked_days,
-        "payable_days": worked_days,
-        "late_count": late_count,
-        "absent_count": absent_count,
-        "leave_days": leave_days,
-        "overtime_hours": round(overtime_hours, 2),
+        # DashboardView KPIs). Month-sheet totals (see docstring).
+        "worked_days": t["worked_days"],
+        "payable_days": t["worked_days"],
+        "late_count": t["late_count"],
+        "absent_count": t["absent_count"],
+        "leave_days": t["leave_days"],
+        "overtime_hours": t["overtime_hours"],
+        "overtime_pending_hours": t["overtime_pending_hours"],
         # Tile extras for the check-in screen (AttendanceView summaryRows).
-        "worked_minutes": round(worked_minutes),
-        "late_minutes": round(late_minutes),
-        "early_leave_count": early_count,
-        "early_leave_minutes": round(early_minutes),
-        "missing_checkout_count": missing_checkout_count,
+        "worked_minutes": t["worked_minutes"],
+        "late_minutes": t["late_minutes"],
+        "early_leave_count": t["early_count"],
+        "early_leave_minutes": t["early_minutes"],
+        "missing_checkout_count": t["checkout_miss_count"],
+        "missing_checkin_count": t["checkin_miss_count"],
         # Nested view kept for other consumers / future use (key names unchanged).
         "summary": {
-            "present": worked_days,
-            "absent": absent_count,
-            "leave": leave_days,
+            "present": t["worked_days"],
+            "absent": t["absent_count"],
+            "leave": t["leave_days"],
             "half_day": 0,
-            "worked_days": worked_days,
-            "payable_days": worked_days,
-            "late_days": late_count,
-            "early_exit_days": early_count,
-            "overtime_hours": round(overtime_hours, 2),
+            "worked_days": t["worked_days"],
+            "payable_days": t["worked_days"],
+            "late_days": t["late_count"],
+            "early_exit_days": t["early_count"],
+            "overtime_hours": t["overtime_hours"],
         },
         "rows": rows,
     }
@@ -1374,9 +1352,9 @@ def my_month_meta(employee: str | None = None, year: int | None = None, month: i
     plans/plan-monthly-attendance-self-deskfree.md BE-1).
 
     One read powering the SPA ``/hr/attendance/monthly`` page: lock state of
-    the closing period, holiday dates (for gap-day synthesis), the
-    Work-Session-based summary (tiles stay truthful BEFORE the HR admin
-    generates core ``Attendance`` rows) and ``standard_days``.
+    the closing period, holiday dates (for gap-day synthesis), the summary
+    tiles (month-sheet totals — same numbers as /hr/attendance and the monthly
+    sheet; "Công" = the engine's payable_day) and ``standard_days``.
     """
     emp = _resolve_employee(employee)
     now = tz_utils.now_in_portal()
@@ -1420,7 +1398,9 @@ def my_month_meta(employee: str | None = None, year: int | None = None, month: i
     sundays = sum(1 for i in range(total_days) if (start + timedelta(days=i)).weekday() == 6)
     standard_days = total_days - sundays - len(holiday_set)
 
-    # ── Work-Session summary (engine truth — same framing as my_logs tiles). ──
+    # ── Summary tiles: month-sheet totals (FIX 2026-10-04 — one rule for every
+    # view, see my_monthly_summary). Only "Công" stays the engine's payable_day.
+    t = _month_sheet_totals(emp, y, m)
     ws_rows = frappe.db.get_all(
         "VN Attendance Work Session",
         filters={
@@ -1428,34 +1408,9 @@ def my_month_meta(employee: str | None = None, year: int | None = None, month: i
             "work_date": ["between", [start, end]],
             "docstatus": ["!=", 2],
         },
-        fields=[
-            "actual_checkin",
-            "actual_checkout",
-            "late_minutes",
-            "payable_day",
-            "absent",
-            "has_leave",
-            "raw_overtime_hours",
-            "approved_overtime_hours",
-        ],
+        fields=["payable_day"],
     )
-    worked_days = 0
-    late_count = 0
-    payable_days = 0.0
-    absent_count = 0
-    leave_days = 0
-    overtime_hours = 0.0
-    for r in ws_rows:
-        if r.get("actual_checkin") or r.get("actual_checkout"):
-            worked_days += 1
-        if flt(r.get("late_minutes") or 0) > 0:
-            late_count += 1
-        payable_days += flt(r.get("payable_day") or 0)
-        if r.get("absent"):
-            absent_count += 1
-        if r.get("has_leave"):
-            leave_days += 1
-        overtime_hours += flt(r.get("approved_overtime_hours") or r.get("raw_overtime_hours") or 0)
+    payable_days = sum(flt(r.get("payable_day") or 0) for r in ws_rows)
 
     has_attendance = bool(
         frappe.db.exists(
@@ -1474,12 +1429,14 @@ def my_month_meta(employee: str | None = None, year: int | None = None, month: i
         "standard_days": standard_days,
         "has_attendance": has_attendance,
         "ws_summary": {
-            "worked_days": worked_days,
+            "worked_days": t["worked_days"],
             "payable_days": flt(payable_days, 2),
-            "late_count": late_count,
-            "absent_count": absent_count,
-            "leave_days": leave_days,
-            "overtime_hours": flt(overtime_hours, 2),
+            "late_count": t["late_count"],
+            "absent_count": t["absent_count"],
+            "leave_days": t["leave_days"],
+            "overtime_hours": t["overtime_hours"],
+            "overtime_pending_hours": t["overtime_pending_hours"],
+            "missing_checkout_count": t["checkout_miss_count"],
         },
     }
 
@@ -1962,6 +1919,26 @@ def _team_checkout_miss_by(emps: list[str]) -> dict:
     for r in rows:
         by.setdefault(r.get("employee"), r)
     return by
+
+
+def _checkout_miss_by_day(emps: list[str], start, end) -> dict:
+    """``{(employee, "YYYY-MM-DD"): VN Checkout Miss row}`` in [start, end] —
+    every status, so the grid applies the month-sheet rule (Waived = miễn)."""
+    if not emps:
+        return {}
+    try:
+        rows = frappe.db.get_all(
+            "VN Checkout Miss",
+            filters={
+                "employee": ["in", emps],
+                "work_date": ["between", [start, end]],
+                "docstatus": ["!=", 2],
+            },
+            fields=["name", "employee", "work_date", "status"],
+        )
+    except Exception:
+        return {}
+    return {(r.get("employee"), str(r.get("work_date"))[:10]): r for r in rows}
 
 
 def _team_leave_by(emps: list[str], day) -> dict:
@@ -2657,6 +2634,9 @@ def team_attendance(
     emp_names = [m["name"] for m in members]
     pending_counts = _team_pending_counts(emp_names) if emp_names else {}
     checkout_miss_by = _team_checkout_miss_by(emp_names) if emp_names else {}
+    # One "Quên chấm ra" rule for every view (owner 2026-10-04): per-cell flag
+    # by the month-sheet rule (ticket not Waived, or the engine's fake OUT).
+    miss_by_day = _checkout_miss_by_day(emp_names, start, end)
     locked_dates, period_info = _locked_days_between(start, end)
 
     # Approved Leave Applications per member/day — so leave days show correctly
@@ -2942,6 +2922,11 @@ def team_attendance(
                     # masks that OUT time as '--:--' and renders orange.
                     "missing_checkout": bool(ws and ws.missing_checkout),
                     "vn_auto_checkout": bool(ws and ws.vn_auto_checkout),
+                    # Unified flag (utils.month_sheet.is_checkout_miss) — the grid
+                    # renders "Thiếu chấm ra" from this, exactly like the sheet.
+                    "checkout_miss": ms_utils.is_checkout_miss(
+                        miss_by_day.get((m["name"], str(cur))), bool(ws and ws.vn_auto_checkout)
+                    ),
                     **cell_extras,
                 }
             )

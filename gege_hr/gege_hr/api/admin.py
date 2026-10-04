@@ -3632,6 +3632,110 @@ def _sync_recalc_after_checkin(docname: str, employee: str) -> None:
         )
 
 
+# Ticket states a manual OUT still waives — mirrors the approved-CR sync in
+# approval.py. Waived is already done; Closed is terminal (state machine).
+_MANUAL_OUT_WAIVABLE = ("Pending", "Explained", "Penalised")
+
+
+# Same late-checkout allowance auto-close uses (utils.checkout_miss FINDING-P6).
+_OUT_AFTER_PLANNED_END = timedelta(hours=6)
+
+
+def _checkout_miss_at(employee: str, out_time) -> str | None:
+    """The ticket whose shift window ``[planned_start, planned_end + 6h]``
+    holds an OUT at ``out_time`` (naive PORTAL WALL, like the Shift Instance
+    planned_* — PHASE-1 FRAME); the closest ``planned_end`` wins.
+
+    Not via ``attendance._resolve_shift_instance_for_checkin``: it reads naive
+    times as UTC (+7h) and maps an OUT after 17:00 onto the NEXT day's shift.
+    """
+    from frappe.utils import get_datetime
+
+    t = get_datetime(out_time)
+    best = None
+    for tk in frappe.db.get_all(
+        "VN Checkout Miss",
+        filters={"employee": employee, "work_date": ["between", [t.date() - timedelta(days=1), t.date()]]},
+        fields=["name", "shift_instance"],
+    ):
+        win = (
+            frappe.db.get_value(
+                "VN Employee Shift Instance",
+                tk.shift_instance,
+                ["planned_start", "planned_end"],
+                as_dict=True,
+            )
+            if tk.shift_instance
+            else None
+        )
+        if not win or not win.planned_start or not win.planned_end:
+            continue
+        ps, pe = get_datetime(win.planned_start), get_datetime(win.planned_end)
+        if ps <= t <= pe + _OUT_AFTER_PLANNED_END:
+            gap = abs((pe - t).total_seconds())
+            if best is None or gap < best[0]:
+                best = (gap, tk.name)
+    return best[1] if best else None
+
+
+def _checkout_miss_for_out_log(employee: str, out_log: str) -> str | None:
+    """The ``VN Checkout Miss`` ticket of the shift ``out_log`` closes.
+
+    The fake OUT of auto-close carries the ticket (``vn_checkout_miss`` on the
+    log, ``auto_checkout`` on the ticket); a freshly inserted OUT does not, so
+    fall back to the ticket whose shift window holds the punch.
+    """
+    name = frappe.db.get_value("Employee Checkin", out_log, "vn_checkout_miss")
+    if not name:
+        name = frappe.db.get_value(
+            "VN Checkout Miss", {"employee": employee, "auto_checkout": out_log}, "name"
+        )
+    if name:
+        return name
+    out_time = frappe.db.get_value("Employee Checkin", out_log, "time")
+    return _checkout_miss_at(employee, out_time) if out_time else None
+
+
+def _waive_checkout_miss_for_manual_out(employee: str, out_log: str, time_out) -> str | None:
+    """Owner 2026-10-04: HR Manager / Admin chấm hoặc sửa giờ RA thủ công cho
+    nhân viên → miễn ticket "Quên chấm ra" của ca đó (Waived + miễn phạt,
+    bảng công tháng không đếm nữa) — cùng cách duyệt CR ở approval.py.
+
+    Gọi SAU khi punch đã commit và TRƯỚC recalc: recalc tự đóng ticket
+    Pending/Explained thành Closed (trạng thái cuối, không miễn được nữa).
+    Best-effort — lỗi (kể cả kỳ lương đã khoá) không làm hỏng lần sửa giờ.
+    Returns the waived ticket name, or ``None``.
+    """
+    try:
+        from gege_hr.gege_hr.api import checkout_miss as cm_api
+
+        name = _checkout_miss_for_out_log(employee, out_log)
+        if not name:
+            return None
+        status = (frappe.db.get_value("VN Checkout Miss", name, "status") or "").strip()
+        if status not in _MANUAL_OUT_WAIVABLE:
+            return None
+        cm_api._resolve_one(
+            name,
+            "waive",
+            _("Tự động miễn: HR/Admin sửa giờ ra thủ công ({0}).").format(time_out),
+            None,
+        )
+        frappe.db.commit()
+        return name
+    except Exception:
+        # Punch already committed — only a half-done ticket write is undone.
+        try:
+            frappe.db.rollback()
+        except Exception:
+            pass
+        frappe.log_error(
+            title="admin_custom_checkin: waive checkout miss failed",
+            message=f"checkin={out_log} employee={employee}",
+        )
+        return None
+
+
 def _upsert_employee_checkin(employee: str, docname: str | None, log_type: str, utc_time_str: str) -> str:
     """Insert or update an ``Employee Checkin`` row and recalc its Work Session.
 
@@ -3742,6 +3846,11 @@ def admin_custom_checkin(
         touched.append(_upsert_employee_checkin(employee, out_id, "OUT", utc_out))
 
     frappe.db.commit()
+
+    # Owner 2026-10-04: HR/Admin nhập giờ RA bằng tay → miễn ticket quên chấm ra
+    # của ca đó. Phải chạy trước recalc bên dưới (xem docstring helper).
+    if utc_out:
+        _waive_checkout_miss_for_manual_out(employee, touched[-1], time_out)
 
     # Realtime (FIX 2026-09-12): tính lại phiên ĐỒNG BỘ sau khi punch đã commit —
     # response xong dữ liệu đã sạch, FE reload là thấy ngay (không cần F5).
