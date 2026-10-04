@@ -95,6 +95,39 @@ def test_missing_checkout_flag_is_not_checkout_miss():
     assert ticket["checkout_miss_status"] == "Pending"
 
 
+def test_waived_ticket_is_not_checkout_miss():
+    """Owner 2026-10-04: a Waived ticket (HR "Miễn", approved CR, or HR/Admin
+    entering the OUT by hand) clears "Quên chấm ra"; other states still count."""
+    waived = ms.build_day(D(2026, 10, 1), today=TODAY, sessions=[_ws()], checkout_miss={"status": "Waived"})
+    assert waived["checkout_miss"] is False
+    assert waived["checkout_miss_status"] == "Waived"
+    # HR waived without fixing the time — the fake-OUT marker is still on.
+    fake_out = ms.build_day(
+        D(2026, 10, 1), today=TODAY, sessions=[_ws(vn_auto_checkout=1)], checkout_miss={"status": "Waived"}
+    )
+    assert fake_out["checkout_miss"] is False
+    for status in ("Pending", "Explained", "Penalised", "Closed"):
+        day = ms.build_day(D(2026, 10, 1), today=TODAY, sessions=[_ws()], checkout_miss={"status": status})
+        assert day["checkout_miss"] is True, status
+
+
+def test_is_checkout_miss_is_the_one_rule():
+    assert ms.is_checkout_miss(None, False) is False
+    assert ms.is_checkout_miss(None, True) is True  # fake OUT, ticket not raised yet
+    assert ms.is_checkout_miss({"status": "Penalised"}, False) is True
+    assert ms.is_checkout_miss({"status": "Closed"}, False) is True
+    assert ms.is_checkout_miss({"status": "Waived"}, True) is False
+
+
+def test_off_roster_unpunched_day_is_not_absent():
+    off = ms.build_day(D(2026, 10, 1), today=TODAY, on_roster=False)
+    assert (off["status"], off["counted"], off["absent"]) == (ms.OFF_ROSTER, False, 0.0)
+    punched = ms.build_day(D(2026, 10, 2), today=TODAY, sessions=[_ws()], on_roster=False)
+    assert punched["status"] == ms.WORKED  # a punch still counts
+    t = ms.aggregate_month([off, punched])
+    assert (t["absent_days"], t["worked_days"], t["standard_days"]) == (0, 1, 1)
+
+
 def test_checkin_miss_only_when_out_without_in():
     day = ms.build_day(D(2026, 10, 1), today=TODAY, sessions=[_ws(actual_checkin=None, late_minutes=40)])
     assert day["checkin_miss"] is True

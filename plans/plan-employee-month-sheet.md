@@ -29,6 +29,18 @@ Cờ phụ: `late_minutes`, `early_minutes`, `ot_approved_hours`, `ot_pending_ho
 (ticket VN Checkout Miss hoặc `vn_auto_checkout`), `checkin_miss` (`missing_checkin` khi có OUT),
 `pending` (đơn chờ), `edited` (VN Audit Event), `locked`, `need_review`.
 
+Ticket **Waived** không tính `checkout_miss` (owner 2026-10-04). Ticket thành Waived khi HR bấm
+"Miễn", khi CR được duyệt, hoặc khi **HR Manager / Admin chấm/sửa giờ RA thủ công**
+(`admin.admin_custom_checkin` tự miễn ticket Pending/Explained/Penalised của ca đó, trước recalc).
+Closed/Penalised/Pending/Explained vẫn tính.
+
+**Một bộ số cho mọi màn (owner 2026-10-04).** `month_sheet.month_totals(emp, y, m)` là nguồn DUY NHẤT
+cho tổng tháng: bảng công tháng, ô thống kê `/hr/attendance` (`attendance.my_monthly_summary`) và
+`/hr/attendance/monthly` (`my_month_meta.ws_summary`; riêng "Công" vẫn là `payable_day` của engine).
+Lưới team nhận cờ ô `checkout_miss` = `ms.is_checkout_miss` (cùng luật). "Làm thêm" = OT **đã duyệt**;
+OT chưa duyệt trả riêng `overtime_pending_hours`. Người **không** có Shift Assignment / Work Session
+trong tháng: ngày không chấm = `off_roster` (không tính vắng) — cùng luật roster của review team.
+
 ## 3. Thống kê (đếm theo NGÀY, cộng PHÚT/GIỜ)
 
 - **Công**: ngày công chuẩn (= số ngày làm việc trong khoảng tính − 0), ngày đi làm, ngày nghỉ có lương,

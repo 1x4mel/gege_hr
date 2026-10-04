@@ -253,7 +253,36 @@ def env(monkeypatch):
     monkeypatch.setattr(
         att, "tz_utils", types.SimpleNamespace(now_in_portal=lambda: datetime(2026, 9, 15, 10, 0, 0))
     )
+    _fake_month_totals(monkeypatch, _SHEET_ZERO)
     return att, fr
+
+
+# Month-sheet totals (``month_sheet.month_totals`` → ``ms.aggregate_month``
+# shape). The tiles are those totals since 2026-10-04; the real engine is
+# covered in test_month_sheet.py / test_team_attendance_deskfree.py (MS5).
+_SHEET_ZERO = {
+    "worked_days": 0,
+    "actual_hours": 0.0,
+    "late": {"days": 0, "minutes": 0},
+    "early": {"days": 0, "minutes": 0},
+    "ot": {"approved_hours": 0.0, "pending_hours": 0.0},
+    "absent_days": 0,
+    "leave_paid_days": 0,
+    "leave_unpaid_days": 0,
+    "checkout_miss_count": 0,
+    "checkin_miss_count": 0,
+}
+
+
+def _fake_month_totals(monkeypatch, totals):
+    """Install a fake ``api.month_sheet`` (lazy-imported by attendance) whose
+    ``month_totals`` records its (employee, year, month) calls."""
+    calls = []
+    mod = types.ModuleType("gege_hr.gege_hr.api.month_sheet")
+    mod.month_totals = lambda emp, y, m: calls.append((emp, y, m)) or totals
+    monkeypatch.setitem(sys.modules, "gege_hr.gege_hr.api.month_sheet", mod)
+    monkeypatch.setattr(importlib.import_module("gege_hr.gege_hr.api"), "month_sheet", mod, raising=False)
+    return calls
 
 
 def _seed_period(fr, status, from_date="2026-09-01", to_date="2026-09-30", name="MAP-2609-01"):
@@ -389,46 +418,65 @@ class TestMyMonthMeta:
         days = calendar.monthrange(2026, 9)[1]
         assert meta["standard_days"] == days - _sundays(2026, 9) - 2
 
-    def test_tcb05_ws_summary(self, env):
+    def test_tcb05_ws_summary(self, env, monkeypatch):
+        """FIX 2026-10-04: the tiles are the month-sheet totals of the RESOLVED
+        employee (one rule for /hr/attendance, the sheet and the team grid);
+        only "Công" stays the engine's payable_day sum."""
         att, fr = env
-        _seed_ws(fr, name="WS-1")  # present + late 10' + OT raw 2 (approved 0)
-        _seed_ws(
-            fr,
-            name="WS-2",
-            work_date="2026-09-11",
-            actual_checkin=None,
-            actual_checkout=None,
-            late_minutes=0,
-            payable_day=0,
-            absent=0,
-            has_leave=1,
-            raw_overtime_hours=0,
-        )
-        _seed_ws(
-            fr,
-            name="WS-3",
-            work_date="2026-09-12",
-            payable_day=0.5,
-            late_minutes=0,
-            raw_overtime_hours=0,
-            approved_overtime_hours=1.5,
-        )
-        # September has 30 days — WS-2 (leave, no punches) + WS-3 (half day).
+        _seed_ws(fr, name="WS-1", payable_day=1.0, absent=1, missing_checkout=1)  # legacy flags ignored
+        _seed_ws(fr, name="WS-3", work_date="2026-09-12", payable_day=0.5)
         fr.stores.setdefault("Attendance", {})["ATT-1"] = {
             "name": "ATT-1",
             "employee": "E1",
             "attendance_date": "2026-09-10",
             "status": "Present",
         }
+        sheet = {
+            **_SHEET_ZERO,
+            "worked_days": 2,
+            "late": {"days": 1, "minutes": 10},
+            "ot": {"approved_hours": 1.5, "pending_hours": 2.0},
+            "absent_days": 3,
+            "leave_paid_days": 1,
+            "checkout_miss_count": 1,
+        }
+        calls = _fake_month_totals(monkeypatch, sheet)
         meta = att.my_month_meta(year=2026, month=9)
-        s = meta["ws_summary"]
-        assert s["worked_days"] == 2  # WS-1 + WS-3 have actual punches
-        assert s["late_count"] == 1
-        assert s["payable_days"] == 1.5
-        assert s["leave_days"] == 1
-        assert s["absent_count"] == 0
-        assert s["overtime_hours"] == 3.5  # WS-1 raw 2.0 (approved 0) + WS-3 approved 1.5
+        assert calls == [("E1", 2026, 9)]
+        assert meta["ws_summary"] == {
+            "worked_days": 2,
+            "payable_days": 1.5,
+            "late_count": 1,
+            "absent_count": 3,
+            "leave_days": 1,
+            "overtime_hours": 1.5,  # approved only — raw OT is "pending"
+            "overtime_pending_hours": 2.0,
+            "missing_checkout_count": 1,
+        }
         assert meta["has_attendance"] is True
+
+    def test_my_monthly_summary_tiles_are_month_sheet_totals(self, env, monkeypatch):
+        att, fr = env
+        _seed_ws(fr, name="WS-1", absent=1, missing_checkout=1)  # legacy flags ignored
+        sheet = {
+            **_SHEET_ZERO,
+            "worked_days": 2,
+            "actual_hours": 17.5,
+            "late": {"days": 1, "minutes": 10},
+            "early": {"days": 1, "minutes": 5},
+            "ot": {"approved_hours": 1.5, "pending_hours": 2.0},
+            "absent_days": 3,
+            "checkout_miss_count": 1,
+        }
+        calls = _fake_month_totals(monkeypatch, sheet)
+        s = att.my_monthly_summary(year=2026, month=9)
+        assert calls == [("E1", 2026, 9)]
+        assert (s["worked_days"], s["worked_minutes"]) == (2, 1050)
+        assert (s["late_count"], s["late_minutes"]) == (1, 10)
+        assert (s["early_leave_count"], s["early_leave_minutes"]) == (1, 5)
+        assert (s["overtime_hours"], s["overtime_pending_hours"]) == (1.5, 2.0)
+        assert (s["absent_count"], s["missing_checkout_count"]) == (3, 1)
+        assert s["summary"]["late_days"] == 1
 
     def test_tcb11_month_string_parse(self, env):
         att, fr = env

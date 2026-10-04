@@ -1191,3 +1191,80 @@ def test_ms4_team_month_review_scope_and_rows(env):
     lm = ms_api.team_month_review(year=2026, month=9)
     assert lm["scope"] == "team"
     assert sorted(r["name"] for r in lm["employees"]) == ["E1", "E2"]
+
+
+# --------------------------------------------------------------------------- #
+# Owner 2026-10-04: ONE rule/number set for the monthly sheet, the team grid
+# and the employee's own /hr/attendance tiles
+# --------------------------------------------------------------------------- #
+def test_ta29_cell_checkout_miss_follows_month_sheet_rule(env):
+    """Grid cell ``checkout_miss`` = month-sheet rule: a ticket that is not
+    Waived, or the engine's fake OUT — Waived clears both."""
+    _seed_team(env.fr)
+    _seed_month(env.fr)
+    env.fr.stores[WS_DT]["WS-E1-15"]["vn_auto_checkout"] = 1
+    res = env.att.team_attendance(manager="M1", from_date="2026-09-01", to_date="2026-09-30")
+    e1 = _member(res, "E1")
+    assert _day(e1, "2026-09-14")["checkout_miss"] is True  # Pending ticket, real OUT shown
+    assert _day(e1, "2026-09-15")["checkout_miss"] is True  # fake OUT, no ticket yet
+
+    env.fr.stores[MISS_DT]["CM-E1"]["status"] = "Waived"
+    env.fr.stores[MISS_DT]["CM-E1-15"] = {
+        "name": "CM-E1-15",
+        "employee": "E1",
+        "work_date": "2026-09-15",
+        "status": "Waived",
+        "docstatus": 0,
+    }
+    res = env.att.team_attendance(manager="M1", from_date="2026-09-01", to_date="2026-09-30")
+    e1 = _member(res, "E1")
+    assert _day(e1, "2026-09-14")["checkout_miss"] is False
+    assert _day(e1, "2026-09-15")["checkout_miss"] is False
+
+
+def test_ms5_self_tiles_equal_month_sheet_totals(env):
+    """/hr/attendance tiles (my_monthly_summary) and /hr/attendance/monthly
+    (my_month_meta) show the month-sheet totals. Legacy WS flags that used to
+    drive the tiles — ``missing_checkout`` on today's still-open shift, raw
+    unapproved OT — must not leak in."""
+    _seed_team(env.fr)
+    _seed_month(env.fr)
+    ws15 = env.fr.stores[WS_DT]["WS-E1-15"]  # today: checked in, still working
+    ws15.update(actual_checkout=None, missing_checkout=1)
+    ms_api = _month_sheet(env)
+    sheet = ms_api.employee_month_sheet(employee="E1", year=2026, month=9)["totals"]
+
+    env.state.update(emp="E1", roles=["Employee"])
+    tiles = env.att.my_monthly_summary(year=2026, month=9)
+    assert tiles["worked_days"] == sheet["worked_days"] == 2
+    assert tiles["late_count"] == sheet["late"]["days"] == 1
+    assert tiles["absent_count"] == sheet["absent_days"]
+    assert tiles["early_leave_count"] == sheet["early"]["days"]
+    assert tiles["missing_checkout_count"] == sheet["checkout_miss_count"] == 1  # CM-E1 only
+    assert tiles["overtime_hours"] == sheet["ot"]["approved_hours"] == 0.5  # raw 1.0 not counted
+    meta = env.att.my_month_meta(year=2026, month=9)["ws_summary"]
+    for key in ("worked_days", "late_count", "absent_count", "missing_checkout_count"):
+        assert meta[key] == tiles[key], key
+
+
+def test_ms6_off_roster_staff_have_no_absent_days(env):
+    """Someone with no Shift Assignment / Work Session in the month (directors,
+    HR admins) is not "absent" on every unpunched day — same roster rule the
+    team review already uses."""
+    _seed_team(env.fr)
+    _seed_month(env.fr)
+    ms_api = _month_sheet(env)
+    off = ms_api.employee_month_sheet(employee="E3", year=2026, month=9)
+    assert off["totals"]["absent_days"] == 0
+    assert {d["status"] for d in off["days"]} <= {"off_roster", "future", "before_join"}
+    env.fr.stores["Shift Assignment"]["SA-E3"] = {
+        "name": "SA-E3",
+        "employee": "E3",
+        "shift_type": "Ca Sáng",
+        "status": "Active",
+        "start_date": "2026-09-01",
+        "end_date": None,
+        "docstatus": 1,
+    }
+    on = ms_api.employee_month_sheet(employee="E3", year=2026, month=9)
+    assert on["totals"]["absent_days"] > 0
