@@ -3781,8 +3781,8 @@ def _upsert_employee_checkin(employee: str, docname: str | None, log_type: str, 
     update it — preventing duplicate punches on repeated edits. The update path
     does NOT fire the ``after_insert`` recalc hook, so we re-run the Work-Session
     recalculation explicitly via the same public entry point the hook uses
-    (:func:`attendance.on_employee_checkin_create`). On the insert path that
-    hook fires automatically.
+    (:func:`attendance.on_employee_checkin_create`). Both paths are recalculated
+    synchronously by :func:`admin_custom_checkin` after its commit.
     """
     if not docname:
         docname = _find_existing_checkin(employee, log_type, utc_time_str)
@@ -3813,8 +3813,10 @@ def _upsert_employee_checkin(employee: str, docname: str | None, log_type: str, 
             "time": utc_time_str,
         }
     )
+    # admin_custom_checkin recalculates synchronously after its commit
+    # (_sync_recalc_after_checkin) — skip the hook's racing background job.
+    doc.flags.vn_recalc_inline = True
     doc.insert(ignore_permissions=True)
-    # ``after_insert`` hook fires recalc automatically on insert.
     return doc.name
 
 

@@ -798,7 +798,7 @@ def mobile_checkin(
     # ``gege_hr`` relies on). We stamp it from ``tz_utils.utc_now_str()``
     # rather than ``server_now.astimezone(UTC)`` so the value is anchored to
     # the OS clock and is immune to a misconfigured Frappe system timezone.
-    frappe.get_doc(
+    checkin = frappe.get_doc(
         {
             "doctype": "Employee Checkin",
             "employee": emp,
@@ -810,7 +810,11 @@ def mobile_checkin(
             "latitude": flt(latitude) if latitude is not None else None,
             "longitude": flt(longitude) if longitude is not None else None,
         }
-    ).insert()
+    )
+    # Recalculated INLINE right after the commit below (_recalc_session_now) —
+    # the after_insert hook must not race it with a background job.
+    checkin.flags.vn_recalc_inline = True
+    checkin.insert()
 
     # Lượt chấm ngoài cửa sổ đã có lý do → tạo phiếu giải trình cho HR duyệt.
     if violation:
@@ -820,6 +824,7 @@ def mobile_checkin(
             frappe.log_error(title="mobile_checkin: explanation ticket failed")
 
     frappe.db.commit()
+    _recalc_session_now(checkin)
 
     # Gamification: finalise XP/streak/badges once the session closes (check-out).
     game_result = None
@@ -3638,6 +3643,10 @@ def on_employee_checkin_create(doc, method: str | None = None) -> None:
     """
     if not getattr(doc, "employee", None):
         return
+    # The inserting request recalculates this punch itself, synchronously after
+    # its commit (mobile_checkin / admin_custom_checkin) — see _recalc_session_now.
+    if getattr(getattr(doc, "flags", None), "vn_recalc_inline", False):
+        return
     shift_instance = _resolve_shift_instance_for_checkin(doc)
     if not shift_instance:
         _raise_unmatched_checkin(doc)
@@ -3660,6 +3669,38 @@ def on_employee_checkin_create(doc, method: str | None = None) -> None:
         from gege_hr.gege_hr.utils import calc
 
         calc.persist_work_session(shift_instance, calculate_mode="realtime")
+
+
+def _recalc_session_now(checkin_doc) -> None:
+    """Recalculate the punch's Work Session NOW — call AFTER the punch commits,
+    before the response.
+
+    FIX 2026-10-04 ("phải F5 mới thấy giờ"): the punch used to be recalculated
+    by a background job (~0.4 s). The SPA reads today_status right after the
+    tap; its DB snapshot predated that job, so the heal-on-read saved over the
+    job's row (TimestampMismatch, swallowed) and returned the OLD session —
+    no time until F5. Recalculated inline here, the session is fresh before
+    the response. Any failure falls back to the after-commit background job,
+    so a punch is never left uncounted.
+    """
+    try:
+        shift_instance = _resolve_shift_instance_for_checkin(checkin_doc)
+        if not shift_instance:
+            _raise_unmatched_checkin(checkin_doc)
+            frappe.db.commit()
+            return
+        from gege_hr.gege_hr.utils import calc
+
+        calc.persist_work_session(shift_instance, calculate_mode="realtime")
+        frappe.db.commit()
+    except Exception:
+        frappe.db.rollback()
+        frappe.log_error(title="checkin: inline session recalc failed")
+        try:
+            checkin_doc.flags.vn_recalc_inline = False
+            on_employee_checkin_create(checkin_doc)
+        except Exception:
+            pass
 
 
 def _raise_unmatched_checkin(checkin_doc) -> None:

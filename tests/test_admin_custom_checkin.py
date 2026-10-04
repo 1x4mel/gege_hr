@@ -124,6 +124,7 @@ class _FakeCheckinDoc:
         for k, v in payload.items():
             setattr(self, k, v)
         self.name = name
+        self.flags = types.SimpleNamespace()
 
     def insert(self, **_kw):
         return self
@@ -604,3 +605,22 @@ def test_edit_same_night_shift_updates_its_own_punch(admin_module):
     admin.admin_custom_checkin("HR-EMP-1", time_in="2026-09-14 22:50")
     assert stub._created == []
     assert stub._set_values[0][:4] == ("Employee Checkin", "CK-IN-14", "time", "2026-09-14 22:50:00")
+
+
+def test_insert_path_skips_hook_background_job(admin_module):
+    """FIX 2026-10-04: admin_custom_checkin recalculates synchronously after its
+    commit — the inserted punch is flagged so the after_insert hook does not
+    race it with a background job (TimestampMismatch → stale session)."""
+    admin, stub = admin_module
+    captured = {}
+    orig_get_doc = stub.get_doc
+
+    def get_doc(*args):
+        doc = orig_get_doc(*args)
+        if len(args) == 1:
+            captured["doc"] = doc
+        return doc
+
+    stub.get_doc = get_doc
+    admin.admin_custom_checkin("HR-EMP-1", time_out="2026-08-12 17:30")
+    assert captured["doc"].flags.vn_recalc_inline is True
