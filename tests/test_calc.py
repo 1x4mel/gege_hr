@@ -622,3 +622,40 @@ class TestDbDt:
         out = calc._db_dt("2026-06-24T01:00:00Z")
         assert "T" not in out and "Z" not in out
         assert out.count("-") == 2 and out.count(":") == 2
+
+
+# ── FIX 2026-10-05: đổi ca tối → sáng, lượt chấm của phiên ca liền kề ────────
+
+
+def _log(day, hm, kind):
+    return {"time": f"2026-10-{day:02d} {hm}:00", "log_type": kind}
+
+
+def test_filter_window_drops_previous_night_out_for_morning_shift():
+    # Ca sáng 05/10 8h-20h; OUT 08:00 đóng ca tối 04/10 không thuộc phiên này.
+    si = {"checkin_window_start": "2026-10-05 07:00:00", "max_checkout_time": "2026-10-06 02:00:00"}
+    logs = [_log(4, "19:55", "IN"), _log(5, "08:00", "OUT")]
+    assert calc._filter_logs_to_window(logs, "2026-10-05 08:00:00", "2026-10-05 20:00:00", si) == []
+
+
+def test_filter_window_keeps_morning_session_after_previous_night_out():
+    si = {"checkin_window_start": "2026-10-05 07:00:00", "max_checkout_time": "2026-10-06 02:00:00"}
+    logs = [_log(5, "08:00", "OUT"), _log(5, "08:05", "IN"), _log(5, "20:01", "OUT")]
+    kept = calc._filter_logs_to_window(logs, "2026-10-05 08:00:00", "2026-10-05 20:00:00", si)
+    assert [(lg["time"][11:16], lg["log_type"]) for lg in kept] == [("08:05", "IN"), ("20:01", "OUT")]
+
+
+def test_filter_window_drops_next_session_in_for_night_shift():
+    # Ca tối 04/10 20h-8h; IN 08:05 sáng 05/10 mở ca sáng mới, không thuộc ca tối.
+    si = {"checkin_window_start": "2026-10-04 19:00:00", "max_checkout_time": "2026-10-05 14:00:00"}
+    logs = [_log(4, "19:55", "IN"), _log(5, "08:00", "OUT"), _log(5, "08:05", "IN")]
+    kept = calc._filter_logs_to_window(logs, "2026-10-04 20:00:00", "2026-10-05 08:00:00", si)
+    assert [(lg["time"][11:16], lg["log_type"]) for lg in kept] == [("19:55", "IN"), ("08:00", "OUT")]
+
+
+def test_filter_window_keeps_late_out_and_early_in_of_own_session():
+    # OUT muộn (sau pe) và IN sớm (trước ps) của chính phiên vẫn được giữ.
+    si = {"checkin_window_start": "2026-10-05 07:00:00", "max_checkout_time": "2026-10-06 02:00:00"}
+    logs = [_log(5, "07:10", "IN"), _log(5, "21:30", "OUT")]
+    kept = calc._filter_logs_to_window(logs, "2026-10-05 08:00:00", "2026-10-05 20:00:00", si)
+    assert len(kept) == 2

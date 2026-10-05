@@ -1212,7 +1212,37 @@ def _filter_logs_to_window(
         lo = cap_lo
     if hi is None or cap_hi > hi:
         hi = cap_hi
-    return [lg for lg in logs if lo <= _as_dt(lg.get("time")) <= hi]
+    kept = [lg for lg in logs if lo <= _as_dt(lg.get("time")) <= hi]
+    return _drop_adjacent_session_punches(kept, ps, pe)
+
+
+def _drop_adjacent_session_punches(logs: list[dict], ps: datetime, pe: datetime) -> list[dict]:
+    """Bỏ lượt chấm thuộc PHIÊN CA LIỀN KỀ lọt vào cửa sổ nới rộng.
+
+    FIX 2026-10-05: cửa sổ ``[pe - cap, ps + cap]`` (cap 20h) của ca sáng 8h-20h
+    bắt đầu từ 00:00 → nuốt lượt RA 08:00 đóng ca tối 20h-8h đêm trước (NV đổi
+    ca tối → sáng: ô 05/10 hiện "Thiếu check-in" + giờ ra 08:00). Đối xứng, ca
+    tối hôm trước nuốt lượt VÀO của ca sáng hôm sau (trước ps + cap).
+
+    - OUT nằm TRƯỚC (hoặc đúng) ``ps`` và trước mọi lượt IN → đóng phiên trước.
+    - IN nằm SAU (hoặc đúng) ``pe`` và sau mọi lượt OUT → mở phiên sau.
+    """
+    rows = sorted(logs, key=lambda lg: _as_dt(lg.get("time")))
+    start = 0
+    while (
+        start < len(rows)
+        and str(rows[start].get("log_type") or "").upper() == "OUT"
+        and _as_dt(rows[start].get("time")) <= ps
+    ):
+        start += 1
+    end = len(rows)
+    while (
+        end > start
+        and str(rows[end - 1].get("log_type") or "").upper() == "IN"
+        and _as_dt(rows[end - 1].get("time")) >= pe
+    ):
+        end -= 1
+    return rows[start:end]
 
 
 def _review_reasons(calc: dict) -> list[str]:
