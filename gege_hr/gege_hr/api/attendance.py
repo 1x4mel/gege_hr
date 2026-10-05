@@ -177,6 +177,31 @@ def _derive_button_state(shift: dict | None, checkins: list[dict], now_local: da
     return STATE["CAN_CHECK_IN"]
 
 
+def _punches_in_shift_window(shift: dict | None, checkins: list[dict]) -> list[dict]:
+    """Punches of the day that belong to ``shift`` (from its earliest check-in on).
+
+    FIX 2026-10-05: an early-morning OUT closing YESTERDAY's night shift (vd
+    08:00 sau ca 20h-8h) is not "an OUT without IN" for today's shift — the
+    orphan-OUT self-heal warning must only look at today's shift window (same
+    rule as :func:`_derive_button_state`).
+    """
+    if not shift or not shift.get("planned_start"):
+        return checkins
+    planned_start = tz_utils.wall(datetime.fromisoformat(shift["planned_start"].replace("Z", "+00:00")))
+    earliest_in = planned_start - timedelta(minutes=_shift_minutes("vn_earliest_checkin_minutes", 60))
+    out = []
+    for c in checkins:
+        t = c.get("time")
+        try:
+            t = tz_utils.wall(t if isinstance(t, datetime) else datetime.fromisoformat(str(t)[:19]))
+        except Exception:
+            out.append(c)
+            continue
+        if t >= earliest_in:
+            out.append(c)
+    return out
+
+
 def _shift_minutes(field: str, default: int) -> int:
     """Read a Shift Type VN custom-field minute setting with a sane default."""
     try:
@@ -754,7 +779,7 @@ def mobile_checkin(
     # time, not the real arrival, so the day still cannot be paid correctly.
     # Flag the session for review + tell the employee to file a correction.
     selfheal_warning = None
-    if log_type == "IN" and _has_out_only(checkins):
+    if log_type == "IN" and _has_out_only(_punches_in_shift_window(shift, checkins)):
         selfheal_warning = (
             "Hôm nay có lượt RA nhưng thiếu lượt VÀO — lượt chấm này được ghi "
             "theo giờ bấm. Vui lòng nộp yêu cầu điều chỉnh (Thiếu giờ vào) với "
