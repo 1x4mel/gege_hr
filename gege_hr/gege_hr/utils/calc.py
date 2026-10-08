@@ -549,8 +549,21 @@ def calculate_work_session(
     result["_actual_ot_windows"] = actual_ot_windows
     result["_require_overtime_approval"] = require_approval
 
-    # --- 12. Payable day ---------------------------------------------------
-    result["payable_regular_hours"] = round(regular_hours, 4)
+    # --- 12. Payable hours + payable day ----------------------------------
+    # Ân hạn đi trễ KHÔNG bị trừ (owner 2026-10-08): phút trễ nằm trong ân hạn
+    # được cộng lại vào giờ tính lương — trễ 3' (ân hạn 5') trả đủ, trễ 12'
+    # chỉ trừ phần vượt 7'. Chỉ áp dụng khi có đủ cặp IN/OUT hợp lệ (thiếu OUT
+    # → giờ trong ca = 0, không "tặng" phút ân hạn). Về sớm không có ân hạn.
+    grace_credit_minutes = 0.0
+    if actual_checkin and actual_checkout and not inverted_pair and actual_within_shift_hours > 0:
+        raw_late = max(0.0, tz_utils.minutes_between(planned_start, actual_checkin))
+        grace_credit_minutes = min(raw_late, float(grace_late))
+    payable_regular_hours = min(
+        scheduled_regular_hours,
+        regular_hours + grace_credit_minutes / 60.0,
+    )
+    result["grace_credit_minutes"] = int(round(grace_credit_minutes))
+    result["payable_regular_hours"] = round(payable_regular_hours, 4)
     result["payable_day"] = calculate_payable_day(result, policy, leave_info)
 
     return result
@@ -691,14 +704,53 @@ def calculate_payable_day(work_session: dict, policy: dict, leave_info: dict | N
             return round(equiv * 0.5, 2)
         return 0.0  # Unpaid
 
-    actual_hours = _num(work_session.get("actual_within_shift_hours"))
-    min_full = _num(policy.get("min_working_hours_full_day"), 4.0)
-    min_half = _num(policy.get("min_working_hours_half_day"), 2.0)
-    if actual_hours >= min_full > 0:
+    # Giờ tính lương (đã cộng ân hạn trễ); thiếu khóa → giờ trong ca (cũ).
+    hours = work_session.get("payable_regular_hours")
+    if hours is None:
+        hours = work_session.get("actual_within_shift_hours")
+    hours = _num(hours)
+    shift_hours = _num(work_session.get("scheduled_regular_hours"))
+    si = work_session.get("_shift_instance") or {}
+    method = (si.get("vn_payable_day_method") or "").strip() or PAYABLE_METHOD_THRESHOLD
+
+    # "Theo phút": công = giờ tính lương / độ dài ca, tối đa 1 (2 số lẻ).
+    if method == PAYABLE_METHOD_PER_MINUTE and shift_hours > 0:
+        return round(min(1.0, max(0.0, hours / shift_hours)), 2)
+
+    full_req, half_req = payable_thresholds(policy, shift_hours)
+    if hours >= full_req > 0:
         return 1.0
-    if actual_hours >= min_half > 0:
+    if hours >= half_req > 0:
         return 0.5
     return 0.0
+
+
+PAYABLE_METHOD_THRESHOLD = "Theo ngưỡng giờ"
+PAYABLE_METHOD_PER_MINUTE = "Theo phút"
+
+
+def payable_thresholds(policy: dict, shift_hours: float | None) -> tuple[float, float]:
+    """Ngưỡng (đủ công, nửa công) tính bằng giờ cho một ca dài ``shift_hours``.
+
+    Công thức chung cho mọi độ dài ca (plans/plan-cach-tinh-cong-theo-ca.md):
+
+    - đủ công  = min(min_working_hours_full_day, độ dài ca − dung sai)
+    - nửa công = min(min_working_hours_half_day, độ dài ca / 2)
+
+    với dung sai = ``full_day_shortage_tolerance_minutes`` (mặc định 30').
+    Ca 12h + chính sách 8h/4h → 8h/4h (giữ nguyên); ca 8h → 7h30/4h; ca 6h →
+    5h30/3h. Không biết độ dài ca (``shift_hours`` ≤ 0) → ngưỡng chính sách.
+    """
+    min_full = _num(policy.get("min_working_hours_full_day"), 4.0)
+    min_half = _num(policy.get("min_working_hours_half_day"), 2.0)
+    shift_hours = _num(shift_hours)
+    if shift_hours <= 0:
+        return min_full, min_half
+    tolerance_h = max(0.0, _num(policy.get("full_day_shortage_tolerance_minutes"), 30)) / 60.0
+    cap = shift_hours - tolerance_h if shift_hours > tolerance_h else shift_hours
+    full_req = min(min_full, cap) if min_full > 0 else min_full
+    half_req = min(min_half, shift_hours / 2.0) if min_half > 0 else min_half
+    return full_req, half_req
 
 
 # ---------------------------------------------------------------------------
@@ -733,6 +785,9 @@ def load_policy(policy_name: str | None, employee: str | None = None) -> dict:
         "grace_early_leave_minutes": doc.grace_early_leave_minutes,
         "min_working_hours_full_day": doc.min_working_hours_full_day,
         "min_working_hours_half_day": doc.min_working_hours_half_day,
+        "full_day_shortage_tolerance_minutes": _num(
+            getattr(doc, "full_day_shortage_tolerance_minutes", None), 30
+        ),
         "allow_ot_compensate_late": bool(doc.allow_ot_compensate_late),
         "allow_ot_compensate_early_leave": bool(doc.allow_ot_compensate_early_leave),
         "night_start_time": str(doc.night_start_time or "22:00:00"),
@@ -802,6 +857,7 @@ def _default_policy() -> dict:
         "grace_early_leave_minutes": 0,
         "min_working_hours_full_day": 4.0,
         "min_working_hours_half_day": 2.0,
+        "full_day_shortage_tolerance_minutes": 30,
         "allow_ot_compensate_late": False,
         "allow_ot_compensate_early_leave": False,
         "night_start_time": "22:00:00",
@@ -842,6 +898,7 @@ def load_shift_instance(shift_instance_name: str) -> dict:
         "vn_max_overtime_hours": st_attr("vn_max_overtime_hours", 4.0),
         "vn_max_total_work_hours": st_attr("vn_max_total_work_hours", 20.0),
         "vn_max_checkout_after_end_minutes": st_attr("vn_max_checkout_after_end_minutes", 360),
+        "vn_payable_day_method": st_attr("vn_payable_day_method") or PAYABLE_METHOD_THRESHOLD,
         # SI check-in/out windows (set by _ensure_shift_instance in shift.py;
         # used by _filter_logs_to_window to avoid pulling adjacent-day checkins).
         "checkin_window_start": getattr(si, "checkin_window_start", None),

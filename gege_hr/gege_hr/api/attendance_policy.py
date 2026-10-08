@@ -56,6 +56,7 @@ EDITABLE_FIELDS = frozenset(
         "grace_early_leave_minutes",
         "min_working_hours_full_day",
         "min_working_hours_half_day",
+        "full_day_shortage_tolerance_minutes",
         "multiple_logs_strategy",
         "min_overtime_minutes",
         "max_overtime_hours_per_shift",
@@ -175,6 +176,9 @@ def _validate_policy(doc) -> None:
     full = _num(doc.get("min_working_hours_full_day"))
     if half is not None and full is not None and half > full:
         frappe.throw(_("Số giờ tối thiểu cho nửa ngày không được lớn hơn cho nguyên ngày."))
+    tolerance = _num(doc.get("full_day_shortage_tolerance_minutes"), int)
+    if tolerance is not None and tolerance < 0:
+        frappe.throw(_("Số phút được thiếu vẫn đủ công không được âm."))
 
     apply_to = (doc.get("apply_to") or "All").strip()
     if apply_to == "Branch" and not doc.get("branch"):

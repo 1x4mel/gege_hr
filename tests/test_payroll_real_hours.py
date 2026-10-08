@@ -145,3 +145,20 @@ def test_blank_input():
         "worked_days": 0,
         "session_count": 0,
     }
+
+
+# Cách tính công theo ca: dòng có payable_day (engine) → dùng thẳng, không chia giờ/8
+def test_engine_payable_day_used_for_monthly():
+    rows = [
+        _ws(work_date="2026-10-01", regular_hours=12.0, payable_day=1.0),  # ca 12h → 1 công, không 1.5
+        _ws(work_date="2026-10-02", regular_hours=7.05, payable_day=0.88),  # ca 8h theo phút
+        _ws(work_date="2026-10-03", regular_hours=7.05, payable_day=0.5),  # ca 8h theo ngưỡng
+    ]
+    s = summarize_work_sessions(rows)
+    assert s["payable_days"] == 2.38
+    assert s["regular_hours"] == 26.1
+
+
+def test_rows_without_payable_day_keep_legacy_hours_rule():
+    s = summarize_work_sessions([_ws(regular_hours=4.0)])
+    assert s["payable_days"] == 0.5

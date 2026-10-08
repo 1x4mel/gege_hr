@@ -659,3 +659,107 @@ def test_filter_window_keeps_late_out_and_early_in_of_own_session():
     logs = [_log(5, "07:10", "IN"), _log(5, "21:30", "OUT")]
     kept = calc._filter_logs_to_window(logs, "2026-10-05 08:00:00", "2026-10-05 20:00:00", si)
     assert len(kept) == 2
+
+
+# ── Cách tính công theo ca (plans/plan-cach-tinh-cong-theo-ca.md) ─────────────
+
+
+def _policy_8_4(**over):
+    return base_policy(min_working_hours_full_day=8.0, min_working_hours_half_day=4.0, **over)
+
+
+class TestPayableThresholds:
+    def test_12h_shift_keeps_policy_thresholds(self):
+        assert calc.payable_thresholds(_policy_8_4(), 12.0) == (8.0, 4.0)
+
+    def test_8h_shift_full_day_shrinks_by_tolerance(self):
+        assert calc.payable_thresholds(_policy_8_4(), 8.0) == (7.5, 4.0)
+
+    def test_6h_shift(self):
+        assert calc.payable_thresholds(_policy_8_4(), 6.0) == (5.5, 3.0)
+
+    def test_zero_tolerance(self):
+        assert calc.payable_thresholds(_policy_8_4(full_day_shortage_tolerance_minutes=0), 8.0) == (8.0, 4.0)
+
+    def test_unknown_shift_length_uses_policy(self):
+        assert calc.payable_thresholds(_policy_8_4(), 0) == (8.0, 4.0)
+
+
+class TestPayableEightHourShift:
+    PS = _vn(2026, 9, 29, 9, 0)
+    PE = _vn(2026, 9, 29, 17, 0)
+
+    def _run(self, t_in, t_out, method=None, **pol):
+        si = base_shift(self.PS, self.PE)
+        if method:
+            si["vn_payable_day_method"] = method
+        logs = []
+        if t_in:
+            logs.append(log(t_in, "IN"))
+        if t_out:
+            logs.append(log(t_out, "OUT"))
+        return calc.calculate_work_session(si, logs, _policy_8_4(**pol))
+
+    def test_late_35_seconds_is_full_day(self):
+        # Kiệt 29/09: 09:00:35 → 17:00:54 từng bị 0.5 công vì thiếu 35 giây.
+        t_in = datetime(2026, 9, 29, 9, 0, 35, tzinfo=VN)
+        r = self._run(t_in, _vn(2026, 9, 29, 17, 0))
+        assert r["late_minutes"] == 0
+        assert r["payable_regular_hours"] == 8.0
+        assert r["payable_day"] == 1.0
+
+    def test_late_within_grace_fully_credited(self):
+        r = self._run(_vn(2026, 9, 29, 9, 3), _vn(2026, 9, 29, 17, 0))
+        assert r["late_minutes"] == 0
+        assert r["regular_hours"] == round(8 - 3 / 60, 4)
+        assert r["payable_regular_hours"] == 8.0
+
+    def test_late_beyond_grace_deducts_only_excess(self):
+        # Trễ 12', ân hạn 5' → chỉ trừ 7'.
+        r = self._run(_vn(2026, 9, 29, 9, 12), _vn(2026, 9, 29, 17, 0))
+        assert r["late_minutes"] == 7
+        assert r["grace_credit_minutes"] == 5
+        assert r["payable_regular_hours"] == round(8 - 7 / 60, 4)
+        assert r["payable_day"] == 1.0  # ≥ 7h30
+
+    def test_threshold_half_day_below_7h30(self):
+        # 09:00 → 16:03 = 7.05h < 7.5h → nửa công (theo ngưỡng).
+        r = self._run(_vn(2026, 9, 29, 9, 0), _vn(2026, 9, 29, 16, 3))
+        assert r["payable_day"] == 0.5
+
+    def test_per_minute_method(self):
+        r = self._run(_vn(2026, 9, 29, 9, 0), _vn(2026, 9, 29, 16, 3), method=calc.PAYABLE_METHOD_PER_MINUTE)
+        assert r["payable_day"] == round(7.05 / 8, 2)
+
+    def test_per_minute_late_beyond_grace(self):
+        r = self._run(_vn(2026, 9, 29, 9, 12), _vn(2026, 9, 29, 17, 0), method=calc.PAYABLE_METHOD_PER_MINUTE)
+        assert r["payable_day"] == round((8 - 7 / 60) / 8, 2)
+
+    def test_per_minute_capped_at_one(self):
+        r = self._run(_vn(2026, 9, 29, 8, 0), _vn(2026, 9, 29, 18, 0), method=calc.PAYABLE_METHOD_PER_MINUTE)
+        assert r["payable_day"] == 1.0
+
+    def test_missing_checkout_gets_no_grace_credit(self):
+        r = self._run(_vn(2026, 9, 29, 9, 3), None)
+        assert r["grace_credit_minutes"] == 0
+        assert r["payable_regular_hours"] == 0.0
+        assert r["payable_day"] == 0.0
+
+    def test_early_leave_has_no_grace(self):
+        r = self._run(_vn(2026, 9, 29, 9, 0), _vn(2026, 9, 29, 16, 57), method=calc.PAYABLE_METHOD_PER_MINUTE)
+        assert r["payable_regular_hours"] == round(8 - 3 / 60, 4)
+
+
+class TestPayableTwelveHourShiftUnchanged:
+    PS = _vn(2026, 9, 29, 8, 0)
+    PE = _vn(2026, 9, 29, 20, 0)
+
+    def test_eight_hours_is_full_day(self):
+        si = base_shift(self.PS, self.PE)
+        logs = [log(_vn(2026, 9, 29, 8, 0), "IN"), log(_vn(2026, 9, 29, 16, 0), "OUT")]
+        assert calc.calculate_work_session(si, logs, _policy_8_4())["payable_day"] == 1.0
+
+    def test_under_eight_hours_is_half_day(self):
+        si = base_shift(self.PS, self.PE)
+        logs = [log(_vn(2026, 9, 29, 8, 0), "IN"), log(_vn(2026, 9, 29, 15, 50), "OUT")]
+        assert calc.calculate_work_session(si, logs, _policy_8_4())["payable_day"] == 0.5
