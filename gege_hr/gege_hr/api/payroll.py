@@ -982,167 +982,37 @@ def cancel_payroll_review(name: str | None = None, reason: str = "") -> dict:
 
 
 def _employee_bracket_hours(employee: str, from_date, to_date, brackets: list[dict]) -> dict:
-    """Split the employee's IN/OUT checkin pairs into ``{coeff: hours}``.
+    """``{coeff: hours}`` for the Hourly line — read from the period's Work Sessions.
 
-    OT-approval model: regular hours (IN → planned_end) are always counted.
-    Hours beyond planned_end are only counted when an approved VN Overtime
-    Request exists for that work_date — otherwise the OUT is capped at
-    planned_end so unpaid OT is excluded from gross.
+    PR2 (plans/plan-cach-tinh-cong-theo-ca.md): the old IN/OUT re-pairing of raw
+    Employee Checkin rows widened the query one day each side without filtering
+    back to the period (boundary days paid twice across periods), never capped
+    at planned_end (unapproved OT paid) and paid pre-shift arrivals. The engine
+    already resolves all of that per work date — see
+    :func:`utils.payroll.bracket_hours_from_sessions`.
     """
-    from datetime import datetime as _dt, timedelta as _td
-    from zoneinfo import ZoneInfo
-
-    VN = ZoneInfo("Asia/Ho_Chi_Minh")
-    # H4: logs are stored UTC while the period bounds are portal (VN) dates.
-    # A VN shift touching either boundary (e.g. 06:00 VN on from_date =
-    # 23:00 UTC the day before) fell outside the old [00:00, 23:59] window
-    # and its whole pair was dropped from payroll. Widen one day each side;
-    # each pair is later stamped with its VN work_date so nothing leaks in.
-    win_start = (_dt.strptime(str(from_date), "%Y-%m-%d") - _td(days=1)).strftime("%Y-%m-%d 00:00:00")
-    win_end = (_dt.strptime(str(to_date), "%Y-%m-%d") + _td(days=1)).strftime("%Y-%m-%d 23:59:59")
     try:
         rows = frappe.db.get_all(
-            "Employee Checkin",
-            filters={"employee": employee, "time": ["between", [win_start, win_end]]},
-            fields=["time", "log_type"],
-            order_by="time asc",
+            "VN Attendance Work Session",
+            filters={
+                "employee": employee,
+                "docstatus": ["<", 2],
+                "work_date": ["between", [from_date, to_date]],
+            },
+            fields=[
+                "work_date",
+                "planned_end",
+                "actual_checkin",
+                "actual_checkout",
+                "payable_regular_hours",
+                "approved_overtime_hours",
+                "need_review",
+                "absent",
+            ],
         )
     except Exception:
         return {}
-
-    # Parse + sort logs chronologically (UTC).
-    logs: list[tuple] = []
-    for r in rows:
-        try:
-            t = _dt.strptime(str(r["time"])[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
-        except Exception:
-            continue
-        logs.append((t, (r.get("log_type") or "").strip().upper()))
-    logs.sort(key=lambda x: x[0])
-
-    # --- Shift windows per date (H1) ---------------------------------------
-    # The old lookup took ONE currently-Active assignment and applied its
-    # window to every log of the period — anyone who changed shifts mid-period
-    # had the wrong planned_end (wrong OT cap) on the other half of the month.
-    # Resolve the assignment effective on each VN date instead.
-    from frappe.utils import get_time
-
-    _shift_cache: dict = {}
-
-    def _shift_for(vn_date):
-        if vn_date in _shift_cache:
-            return _shift_cache[vn_date]
-        st_name = None
-        try:
-            # Effective assignment: started on/before the date, not yet ended.
-            st_name = frappe.db.get_value(
-                "Shift Assignment",
-                {
-                    "employee": employee,
-                    "docstatus": 1,
-                    "status": "Active",
-                    "start_date": ["<=", vn_date],
-                    "or": [["end_date", "is", "not set"], ["end_date", ">=", vn_date]],
-                },
-                "shift_type",
-            )
-        except Exception:
-            st_name = None
-        window = (None, None)
-        if st_name:
-            try:
-                s = get_time(frappe.db.get_value("Shift Type", st_name, "start_time"))
-                e = get_time(frappe.db.get_value("Shift Type", st_name, "end_time"))
-                window = (s, e)
-            except Exception:
-                window = (None, None)
-        _shift_cache[vn_date] = window
-        return window
-
-    # --- Approved OT dates (VN Overtime Request submitted/docstatus=1) -----
-    approved_ot: set[str] = set()
-    try:
-        for r in frappe.db.get_all(
-            "VN Overtime Request",
-            filters={
-                "employee": employee,
-                "docstatus": 1,
-                # C4: submitted-but-Rejected requests were still paying OT —
-                # match the WS engine's approved-set exactly.
-                "workflow_state": ["in", ["Approved", "Confirmed"]],
-            },
-            fields=["work_date"],
-        ):
-            if r.get("work_date"):
-                approved_ot.add(str(r["work_date"]))
-    except Exception:
-        pass
-
-    def _planned_end_wall(vn_date):
-        """PHASE-1 FRAME: naive PORTAL WALL datetime of the shift's planned_end
-        effective on that VN date (logs are wall — compare naive↔naive)."""
-        s_time, e_time = _shift_for(vn_date)
-        if not e_time:
-            return None
-        end_vn = _dt.combine(vn_date, e_time)
-        if s_time and e_time <= s_time:
-            end_vn += _td(days=1)  # overnight shift (end < start)
-        return end_vn
-
-    # --- Pair IN→OUT, cap at planned_end, add OT only if approved ---------
-    def _flush(cur_in, out_t):
-        """Count one IN→OUT pair (regular capped at planned_end; OT only if
-        approved). An absurd span (>16h — forgotten checkout over multiple
-        days) is capped at planned_end instead of dropping the whole shift
-        (M6), mirroring the checkout-miss policy of the WS engine."""
-        span_h = (out_t - cur_in).total_seconds() / 3600.0
-        if span_h <= 0:
-            return
-        try:
-            vn_date = (cur_in.astimezone(VN) if cur_in.tzinfo else cur_in).date()
-            pe = _planned_end_wall(vn_date)
-        except Exception:
-            pe = None
-        if span_h > 16.0 and pe:
-            out_t = pe  # cap runaway pair at the shift's planned end
-        # Regular hours: IN → min(OUT, planned_end). Always counted.
-        regular_out = min(out_t, pe) if pe else out_t
-        split = calc.split_hours_by_bracket(cur_in, regular_out, brackets)
-        for coeff, hours in split.items():
-            bracket_hours[coeff] = bracket_hours.get(coeff, 0.0) + hours
-        # OT hours: planned_end → actual OUT. Only if approved.
-        if pe and out_t > pe and str(vn_date) in approved_ot:
-            ot_split = calc.split_hours_by_bracket(pe, out_t, brackets)
-            for coeff, hours in ot_split.items():
-                bracket_hours[coeff] = bracket_hours.get(coeff, 0.0) + hours
-
-    bracket_hours: dict[float, float] = {}
-    cur_in = None
-    for t, lt in logs:
-        if lt == "IN":
-            if cur_in is not None:
-                # C3: previous shift never checked out — a second IN used to
-                # silently DISCARD it (a full lost day). Close it at the
-                # shift's planned end (checkout-miss policy A), no OT.
-                try:
-                    vn_date = (cur_in.astimezone(VN) if cur_in.tzinfo else cur_in).date()
-                    pe = _planned_end_wall(vn_date)
-                except Exception:
-                    pe = None
-                _flush(cur_in, pe or t)
-            cur_in = t
-        elif lt == "OUT" and cur_in is not None and t > cur_in:
-            _flush(cur_in, t)
-            cur_in = None
-    # Trailing IN with no OUT at all: close at planned_end too.
-    if cur_in is not None:
-        try:
-            vn_date2 = (cur_in.astimezone(VN) if cur_in.tzinfo else cur_in).date()
-            pe2 = _planned_end_wall(vn_date2)
-        except Exception:
-            pe2 = None
-        _flush(cur_in, pe2 or (cur_in + _td(hours=8)))
-    return bracket_hours
+    return calc.bracket_hours_from_sessions(rows or [], brackets)
 
 
 def _employee_late_minutes(employee: str, from_date, to_date) -> list[float]:
