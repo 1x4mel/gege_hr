@@ -167,8 +167,11 @@ def summarize_work_sessions(
 
     * ``regular_hours``  = Σ ``regular_hours`` of non-review rows
     * ``overtime_hours`` = Σ ``approved_overtime_hours`` (OT must be approved)
-    * ``payable_days``   = Σ ``round(regular_hours / hours_per_day, 2)`` per
-      row; a full paid-leave row (``has_leave`` with no worked hours) counts
+    * ``payable_days``   = Σ ngày công per worked row: the engine's own
+      ``payable_day`` (cách tính công của ca — ngưỡng giờ co theo độ dài ca,
+      hoặc theo phút; plans/plan-cach-tinh-cong-theo-ca.md) when the row
+      carries it, else the legacy ``round(regular_hours / hours_per_day, 2)``;
+      a full paid-leave row (``has_leave`` with no worked hours) counts
       1 payable day; ``extra_leave_days`` adds approved leave days that have
       NO Work Session at all (PR2)
     * ``need_review`` rows contribute NOTHING (PR5) and are counted so the
@@ -201,7 +204,8 @@ def summarize_work_sessions(
             absent_days += 1  # PR8: absent, unpayable
             continue
         if rh > 0:
-            payable_days += round(rh / hpd, 2)
+            pd = row.get("payable_day")
+            payable_days += _num(pd) if pd is not None else round(rh / hpd, 2)
             worked_days += 1
         elif _ws_get(row, "has_leave") >= 1:
             # Pure paid-leave day (approved leave, no punches) → 1 payable day.
@@ -1012,6 +1016,7 @@ def load_employee_period_summary(employee: str, from_date, to_date) -> dict:
                 fields=[
                     "work_date",
                     "regular_hours",
+                    "payable_day",
                     "approved_overtime_hours",
                     "need_review",
                     "absent",

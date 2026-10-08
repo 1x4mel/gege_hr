@@ -1678,6 +1678,7 @@ SHIFT_TYPE_VN_FIELDS = [
     "vn_allow_overtime_before_shift",
     "vn_max_overtime_hours",
     "vn_max_total_work_hours",
+    "vn_payable_day_method",
 ]
 
 

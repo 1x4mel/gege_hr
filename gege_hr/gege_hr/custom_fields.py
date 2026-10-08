@@ -73,6 +73,16 @@ shift_type_fields = [
         "label": "Max Total Work Hours",
         "default": "20.0",
     },
+    # Cách tính NGÀY CÔNG của ca (plans/plan-cach-tinh-cong-theo-ca.md):
+    # "Theo ngưỡng giờ" = 0 / 0.5 / 1 theo ngưỡng của chính sách (co theo độ
+    # dài ca); "Theo phút" = giờ tính lương / độ dài ca (tối đa 1).
+    {
+        "fieldname": "vn_payable_day_method",
+        "fieldtype": "Select",
+        "label": "Cách tính công",
+        "options": "Theo ngưỡng giờ\nTheo phút",
+        "default": "Theo ngưỡng giờ",
+    },
 ]
 
 # --------------------------------------------------------------------------- #
