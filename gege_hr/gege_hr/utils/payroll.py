@@ -846,6 +846,58 @@ def split_hours_by_bracket(start_dt, end_dt, brackets: list[dict]) -> dict[float
     return result
 
 
+def _wall_dt(value):
+    """Naive PORTAL-WALL datetime from a Work Session datetime/string (or None)."""
+    from datetime import datetime
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("T", " ")[:19])
+    except ValueError:
+        return None
+
+
+def bracket_hours_from_sessions(sessions: list[dict], brackets: list[dict]) -> dict[float, float]:
+    """Hourly payroll ``{coeff: hours}`` from the period's Work Sessions — pure.
+
+    The Work-Session engine is the single source of truth
+    (plans/plan-cach-tinh-cong-theo-ca.md, PR2) — no more re-pairing raw
+    Employee Checkin rows (that path paid unapproved OT, pre-shift arrivals and
+    the neighbouring days of the widened query window):
+
+    * regular: ``payable_regular_hours`` (in-shift hours + late minutes forgiven
+      by the grace window), laid out as the window ending at
+      ``min(actual_checkout, planned_end)``;
+    * OT: ``approved_overtime_hours`` only, laid out from ``planned_end``;
+    * ``need_review`` / ``absent`` rows pay nothing (same rule as
+      :func:`summarize_work_sessions` PR5/PR8) until HR resolves them.
+    """
+    from datetime import timedelta
+
+    out: dict[float, float] = {}
+
+    def _add(split: dict) -> None:
+        for coeff, hours in split.items():
+            out[coeff] = out.get(coeff, 0.0) + hours
+
+    for ws in sessions or []:
+        if _ws_get(ws, "need_review") >= 1 or _ws_get(ws, "absent") >= 1:
+            continue
+        pe = _wall_dt(ws.get("planned_end"))
+        cout = _wall_dt(ws.get("actual_checkout"))
+        payable = _ws_get(ws, "payable_regular_hours")
+        if payable > 0 and pe is not None and cout is not None and ws.get("actual_checkin"):
+            reg_end = min(cout, pe)
+            _add(split_hours_by_bracket(reg_end - timedelta(hours=payable), reg_end, brackets))
+        ot = _ws_get(ws, "approved_overtime_hours")
+        if ot > 0 and pe is not None:
+            _add(split_hours_by_bracket(pe, pe + timedelta(hours=ot), brackets))
+    return out
+
+
 def compute_hourly_line(
     bracket_hours: dict[float, float],
     hourly_rate: float,
