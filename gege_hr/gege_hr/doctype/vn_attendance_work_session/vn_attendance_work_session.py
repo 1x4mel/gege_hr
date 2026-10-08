@@ -61,11 +61,12 @@ class VNAttendanceWorkSession(Document):
             pass
 
     def _enforce_payable_day_values(self):
-        """payable_day is restricted to {0, 0.5, 1.0} (plan §9.3)."""
-        allowed = {0.0, 0.5, 1.0}
-        value = _as_float(self.payable_day)
-        if round(value, 2) not in allowed:
-            frappe.throw(_("Payable Day chỉ nhận 0, 0.5 hoặc 1.0."))
+        """payable_day ∈ [0, 1] — công lẻ khi ca tính "Theo phút"
+        (plans/plan-cach-tinh-cong-theo-ca.md); ca "Theo ngưỡng giờ" vẫn chỉ ra 0/0.5/1."""
+        from gege_hr.gege_hr.utils.calc import is_valid_payable_day
+
+        if not is_valid_payable_day(_as_float(self.payable_day)):
+            frappe.throw(_("Payable Day phải nằm trong khoảng 0 – 1."))
 
     # ------------------------------------------------------------------ #
     # Concurrency guard (plan §19.3) — CAS claim against a status value.

@@ -729,6 +729,15 @@ PAYABLE_METHOD_THRESHOLD = "Theo ngưỡng giờ"
 PAYABLE_METHOD_PER_MINUTE = "Theo phút"
 
 
+def is_valid_payable_day(value) -> bool:
+    """Ngày công hợp lệ: 0 ≤ công ≤ 1 (công lẻ của ca "Theo phút" được phép)."""
+    try:
+        v = round(float(value), 2)
+    except (TypeError, ValueError):
+        return False
+    return 0.0 <= v <= 1.0
+
+
 def payable_thresholds(policy: dict, shift_hours: float | None) -> tuple[float, float]:
     """Ngưỡng (đủ công, nửa công) tính bằng giờ cho một ca dài ``shift_hours``.
 

@@ -763,3 +763,17 @@ class TestPayableTwelveHourShiftUnchanged:
         si = base_shift(self.PS, self.PE)
         logs = [log(_vn(2026, 9, 29, 8, 0), "IN"), log(_vn(2026, 9, 29, 15, 50), "OUT")]
         assert calc.calculate_work_session(si, logs, _policy_8_4())["payable_day"] == 0.5
+
+
+class TestIsValidPayableDay:
+    def test_threshold_values(self):
+        assert all(calc.is_valid_payable_day(v) for v in (0, 0.5, 1.0))
+
+    def test_per_minute_fractions(self):
+        assert calc.is_valid_payable_day(0.88)
+        assert calc.is_valid_payable_day(0.12)
+
+    def test_out_of_range_or_garbage(self):
+        assert not calc.is_valid_payable_day(1.5)
+        assert not calc.is_valid_payable_day(-0.1)
+        assert not calc.is_valid_payable_day("x")
