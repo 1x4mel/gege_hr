@@ -74,6 +74,20 @@
    "label": "gege-seat Console Key"
   },
   {
+   "default": "0",
+   "description": "Cho ph\u00e9p \u0111\u0103ng nh\u1eadp Gege Forum b\u1eb1ng c\u00e1ch qu\u00e9t m\u00e3 QR tr\u00ean trang \u0111\u0103ng nh\u1eadp forum b\u1eb1ng app HR (tr\u00ecnh duy\u1ec7t \u0111\u01b0\u1ee3c \u0111\u0103ng nh\u1eadp HR nh\u01b0 khi nh\u1eadp m\u1eadt kh\u1ea9u).",
+   "fieldname": "enable_forum_qr_login",
+   "fieldtype": "Check",
+   "label": "Enable Forum QR Login"
+  },
+  {
+   "default": "https://forum.gegeteam.xyz",
+   "description": "\u0110\u1ecba ch\u1ec9 Gege Forum \u2014 HR ch\u1ec9 c\u1ea5p m\u00e3 QR cho trang n\u00e0y v\u00e0 ch\u1ec9 chuy\u1ec3n h\u01b0\u1edbng v\u1ec1 \u0111\u00fang \u0111\u1ecba ch\u1ec9 n\u00e0y. \u0110\u1ec3 tr\u1ed1ng = https://forum.gegeteam.xyz.",
+   "fieldname": "forum_url",
+   "fieldtype": "Data",
+   "label": "Gege Forum URL"
+  },
+  {
    "fieldname": "timezone_break",
    "fieldtype": "Section Break",
    "label": "Time Zone"

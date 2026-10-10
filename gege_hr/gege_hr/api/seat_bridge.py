@@ -7,7 +7,8 @@ Hai chiều, cùng một khoá bí mật ``VN HR Portal Setting.seat_console_key
   bộ (HR là nguồn quyết định AI có tài khoản; vai trò / quyền máy chia ở console).
 * **app HR → console** (nhân viên đã đăng nhập HR): :func:`seat_qr_info` /
   :func:`seat_qr_approve` — quét mã QR trên màn hình vào ca để bắt đầu / tiếp
-  tục ca. Console tự kiểm quyền máy; HR chỉ khẳng định danh tính.
+  tục ca. Console tự kiểm quyền máy; HR chỉ khẳng định danh tính. Cùng hai hàm
+  này nhận cả mã đăng nhập trang web do HR tự cấp (Gege Forum — ``api/web_qr.py``).
 * **đăng nhập console bằng mật khẩu HR** — mật khẩu KHÔNG đi qua console:
   trình duyệt (:func:`console_login`, form POST → chuyển hướng) hoặc dịch vụ
   gege-seat của máy (:func:`login_assertion`) gửi thẳng tới HR qua HTTPS, HR
@@ -22,6 +23,7 @@ from __future__ import annotations
 import frappe
 from frappe import _
 
+from gege_hr.gege_hr.api import web_qr
 from gege_hr.gege_hr.utils import seat_checkin
 from gege_hr.gege_hr.utils.seat_checkin import build_accounts, caller_allowed, parse_qr_code
 
@@ -66,17 +68,22 @@ def list_accounts() -> dict:
 # --------------------------------------------------------------------------- #
 # app HR → console (quét QR vào ca)
 # --------------------------------------------------------------------------- #
-def _qr_guard() -> str:
-    """Tính năng phải bật + người gọi là nhân viên đang làm → trả email đăng nhập."""
-    setting = frappe.get_cached_doc("VN HR Portal Setting", "VN HR Portal Setting")
-    if not setting.get("enable_seat_qr_login"):
-        frappe.throw(_("Vào ca bằng QR chưa được bật."), frappe.ValidationError)
+def _employee_user() -> str:
+    """Người gọi là nhân viên đang làm → trả email đăng nhập."""
     user = frappe.session.user
     if not user or user in ("Guest", "Administrator"):
         frappe.throw(_("Vui lòng đăng nhập bằng tài khoản nhân viên."), frappe.PermissionError)
     if not frappe.db.exists("Employee", {"user_id": user, "status": "Active"}):
         frappe.throw(_("Tài khoản chưa được liên kết nhân viên đang làm việc."), frappe.ValidationError)
     return user
+
+
+def _qr_guard() -> str:
+    """Mã của console (vào ca / đăng nhập console): tính năng phải bật + người gọi là nhân viên đang làm."""
+    setting = frappe.get_cached_doc("VN HR Portal Setting", "VN HR Portal Setting")
+    if not setting.get("enable_seat_qr_login"):
+        frappe.throw(_("Vào ca bằng QR chưa được bật."), frappe.ValidationError)
+    return _employee_user()
 
 
 def _code_or_throw(code: str | None) -> str:
@@ -89,8 +96,14 @@ def _code_or_throw(code: str | None) -> str:
 @frappe.whitelist()
 def seat_qr_info(code: str | None = None) -> dict:
     """Mã QR này của máy nào, máy đang trống hay có ca của ai (chưa tiêu mã)."""
+    c = _code_or_throw(code)
+    _employee_user()
+    # Mã đăng nhập trang web do chính HR cấp (Gege Forum) — không hỏi console.
+    local = web_qr.peek(c)
+    if local is not None:
+        return local
     _qr_guard()
-    res = seat_checkin.console_post(QR_INFO_PATH, {"code": _code_or_throw(code)})
+    res = seat_checkin.console_post(QR_INFO_PATH, {"code": c})
     if not res.get("ok"):
         frappe.throw(_(res.get("msg") or "Mã QR không hợp lệ hoặc đã hết hạn."), frappe.ValidationError)
     # kind="web": mã của trang đăng nhập console (ip = trình duyệt đang xin đăng nhập); còn lại là màn hình vào ca.
@@ -102,9 +115,14 @@ def seat_qr_approve(code: str | None = None) -> dict:
     """Xác nhận vào ca / tiếp tục ca trên máy đã quét. Console kiểm quyền máy và mở ca."""
     from gege_hr.gege_hr.utils.ratelimit import rate_limit
 
-    user = _qr_guard()
+    c = _code_or_throw(code)
+    user = _employee_user()
     rate_limit(f"seatqr:{user}", max_requests=6, window_seconds=60)
-    res = seat_checkin.console_post(QR_APPROVE_PATH, {"code": _code_or_throw(code), "username": user})
+    local = web_qr.approve(c, user)
+    if local is not None:
+        return local
+    _qr_guard()
+    res = seat_checkin.console_post(QR_APPROVE_PATH, {"code": c, "username": user})
     if not res.get("ok"):
         frappe.throw(_(res.get("msg") or "Không vào ca được."), frappe.ValidationError)
     return {k: res.get(k) for k in ("host", "action", "msg")}
