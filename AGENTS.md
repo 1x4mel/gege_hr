@@ -48,10 +48,17 @@ ruff format --check <file1> <file2> ...
   `plans/plan-cham-cong-pc-gege-seat.md`; phía console: repo `Gege-Cyber-System-Localdisk` `docs/tai-khoan-hr.md`.
   Khoá ghép nối (`seat_console_key`) KHÔNG ghi vào repo/log. Endpoint `allow_guest` của `seat_bridge` phải giữ
   `_require_console` (đúng IP console + khoá) hoặc khoá tạm theo email.
-- **Gege Forum đăng nhập bằng QR (10/10/2026)**: `api/web_qr.py` + `utils/web_qr.py` — trang đăng nhập forum (khác origin)
-  xin mã, app HR quét và xác nhận, HR tạo phiên cho trình duyệt rồi forum đi tiếp OIDC. `start` / `status` tự gắn CORS cho
-  đúng origin forum — KHÔNG bật `allow_cors` toàn site. Mặc định tắt (`enable_forum_qr_login`).
-  Tài liệu: `plans/plan-forum-qr-login.md`.
+- **Gege Forum đăng nhập bằng tài khoản HR ngay trên trang forum (10/10/2026)**: `api/web_qr.py` + `utils/web_qr.py`. Hai
+  cách, mỗi cách một công tắc ở `VN HR Portal Setting` (owner đã bật cả hai): QR (`start` / `status`, app HR quét rồi
+  `seat_qr_approve`) và email + mật khẩu HR gõ ở form của forum (`password_start`). Cả hai kết thúc ở `finish`: HR tạo phiên
+  cho trình duyệt (`login_as`), forum đi tiếp OIDC. Quy tắc phải giữ:
+  - Trang khác gọi sang HR **chỉ bằng `fetch` không cookie**; từng hàm tự gắn `Access-Control-Allow-Origin` cho đúng origin
+    — KHÔNG bật `allow_cors` toàn site, KHÔNG dùng form POST cả trang (Frappe chặn mọi POST có phiên mà thiếu CSRF token
+    → "Invalid Request" với người đang đăng nhập HR ở cùng trình duyệt; `seat_bridge.console_assertion` ra đời vì lỗi này).
+  - Chỉ `finish?fmt=json` trả `Access-Control-Allow-Credentials` (phải nhận cookie phiên); nó chỉ trả `{"ok": bool}`.
+  - Đích chuyển hướng luôn lấy từ cấu hình (`forum_url`, `seat_console_web_url`), không nhận từ người gọi.
+  - Kiểm mật khẩu đi qua một hàm duy nhất `web_qr.check_hr_password` (khoá tạm 5 lần / 10 phút theo email).
+  Tài liệu: `plans/plan-forum-qr-login.md`; phía forum: repo `Gege-discourse` `docs/08-dang-nhap-qr.md`.
 - Cách tính công theo ca (ngưỡng co theo độ dài ca / theo phút, ân hạn trễ, Hourly đọc phiên chấm công):
   `plans/plan-cach-tinh-cong-theo-ca.md`.
 

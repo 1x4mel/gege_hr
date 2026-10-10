@@ -99,4 +99,10 @@ Thay vì console nhận mật khẩu rồi hỏi HR, người dùng gửi mật 
   frappe` lỗi) → helper thuần đặt ở `utils/seat_checkin.py`; (3) các endpoint `allow_guest` của `seat_bridge` là mặt tiếp xúc
   internet (qua Cloudflare Tunnel) — `list_accounts` / `verify_assertion` bắt buộc `_require_console` (IP + khoá),
   `login_assertion` / `console_login` có khoá tạm theo email; đừng bỏ các lớp này.
-- **Còn lại:** rollout gege-seat cả dàn rồi bật `hr_auth` cho mọi máy; giao diện console cho đổi chế độ / đồng bộ tay.
+- **Sửa 10/10 chiều — `console_assertion`:** form đăng nhập của trang web console POST cả trang tới `console_login` bị
+  Frappe từ chối ("Invalid Request") khi trình duyệt đang có phiên HR: console và HR cùng site nên cookie phiên đi kèm, mà
+  `HTTPRequest.validate_csrf_token` chặn mọi POST có phiên thiếu CSRF token. Nay console gọi `seat_bridge.console_assertion`
+  bằng `fetch` **không cookie** (CORS cho đúng origin `seat_console_web_url`), nhận `go` rồi tự chuyển; `console_login` giữ
+  làm đường lùi (gege_hr #58; console `loginHr()`).
+- **Còn lại:** rollout gege-seat cả dàn (nút Gege Seat ở trang Công cụ của console; `hr_auth` nay tự mặc định theo chế độ
+  HR chính thức); giao diện console cho đổi chế độ / đồng bộ tay.

@@ -1,8 +1,10 @@
 # Đăng nhập Gege Forum bằng tài khoản HR ngay trên trang forum (QR + email / mật khẩu)
 
 Ngày: 2026-10-10 · Yêu cầu của owner: "forum (.111) cũng có đăng nhập bằng quét mã QR từ Gege HR" (như console).
-**Trạng thái:** QR đã deploy 10/10 (HR + theme), owner tự bật. Cùng ngày thêm **email + mật khẩu HR ở form bên trái của
-forum** (mục riêng bên dưới). Mỗi cách một công tắc, mặc định **TẮT**.
+**Trạng thái (cuối ngày 10/10):** đã triển khai đủ — gege_hr #57 (QR), #58 (email + mật khẩu ở form của forum,
+`console_assertion`), #59 (`finish` dạng JSON); trader-ui #40, #41; theme forum 0.5.0. Mỗi cách một công tắc, mặc định tắt;
+**owner đã bật cả hai** và đã đăng nhập forum được bằng email + mật khẩu HR. Chưa có xác nhận bằng tài khoản thật cho quét
+QR trọn vòng và cho bước `finish` dạng JSON.
 
 ## Bối cảnh
 
@@ -99,13 +101,15 @@ mở** → chuỗi 302 của OIDC → vào forum. Không còn lần nạp trang 
 | trader-ui | `SeatLoginView` / `seatQr.js`: mã `kind = "web"` có `title` → hiện tên trang, IP · trình duyệt, cảnh báo; công tắc ở Dữ liệu nền |
 | Gege-discourse | theme: `javascripts/discourse/lib/gege-qr-login.js` (JS thuần), `api-initializers/gege-qr-login.gjs`, CSS, setting `qr_login_enabled`; tài liệu `docs/08-dang-nhap-qr.md` |
 
-## Bật (owner)
+## Bật / tắt
 
-1. Deploy gege_hr (có `bench migrate` — 2 trường mới) + trader-ui như thường lệ.
-2. Deploy theme forum: `scripts/deploy-theme.sh` trong repo Gege-discourse (cần mật khẩu root .111). Chưa bật ở HR thì
-   trang đăng nhập forum **không đổi gì** (thẻ QR chỉ hiện khi HR cấp được mã).
-3. HR Admin → Dữ liệu nền → Cấu hình chung → Check-in & Xác thực → **"Cho phép đăng nhập Gege Forum bằng QR"**.
-4. Thử: mở forum ở cửa sổ ẩn danh trên máy tính → quét mã bằng app HR (menu tài khoản → Quét QR) → xác nhận.
+Đã làm 10/10: deploy gege_hr (có `bench migrate` — 3 trường mới) + trader-ui; đẩy theme forum (`scripts/deploy-theme.sh`
+trong repo Gege-discourse); owner bật hai công tắc.
+
+- Công tắc: HR Admin → Dữ liệu nền → Cấu hình chung → Check-in & Xác thực → **"Cho phép đăng nhập Gege Forum bằng QR"** và
+  **"Cho phép nhập email + mật khẩu HR ngay ở form đăng nhập Gege Forum"**. Tắt cái nào thì trang đăng nhập forum tự bỏ
+  cách đó ở lần tải sau (tắt mật khẩu → nút "Đăng nhập bằng ERP Gege" hiện lại làm lối vào).
+- Thử: mở forum ở cửa sổ ẩn danh → gõ email + mật khẩu HR, hoặc quét mã bằng app HR (menu tài khoản → Quét QR).
 
 ## Đã thử / chưa thử
 
@@ -113,5 +117,10 @@ mở** → chuỗi 302 của OIDC → vào forum. Không còn lần nạp trang 
   lần, vé một lần, người đã nghỉ việc, Frappe từ chối tạo phiên, tắt tính năng.
 - Theme: chạy `gege-qr-login.js` trên **trang đăng nhập thật** của forum bằng Chrome headless với HR giả (hiện mã, hỏi kết
   quả không kèm cookie, chuyển sang `finish`, mất liên lạc → nút "Lấy mã mới"); file `.gjs` qua `content-tag` + `@glimmer/syntax`.
-- **Chưa thử trên hệ thống thật**: cần owner bật công tắc và quét bằng tài khoản nhân viên (không có tài khoản thử trên HR
-  production).
+- Trên .116 (không đổi cài đặt, không đăng nhập ai): gọi thẳng ứng dụng WSGI trong một tiến trình thử với công tắc bật
+  riêng cho tiến trình đó — `start`, `status`, `peek`, `finish` vé sai, `features`, `password_start` với email không tồn tại.
+- Trên forum thật sau khi đẩy theme: khách vào `/` tới thẳng `/login`; gõ email công ty không tồn tại → HR trả "Sai email
+  hoặc mật khẩu." hiện ngay trên trang, không có `POST /session` tới forum; `fetch` kèm cookie tới `finish?fmt=json` (vé sai)
+  đọc được `{"ok": false}` và trình duyệt nhận cookie `sid` của HR.
+- Bằng tài khoản thật: owner đăng nhập forum được bằng email + mật khẩu HR (bản mở-cả-trang). **Chưa có xác nhận** cho quét
+  QR trọn vòng và cho `finish` dạng JSON — agent không có tài khoản nhân viên trên HR production.

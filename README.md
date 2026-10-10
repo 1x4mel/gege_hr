@@ -63,8 +63,9 @@ Frontend calls these via `gege_hr.gege_hr.api.<domain>.<fn>`
   gege-seat (không cần GPS; Moonlight từ ngoài mạng công ty bị từ chối). Đã triển khai 10/10, thử trên b6.
 - [`plans/plan-tai-khoan-hr-cho-console.md`](plans/plan-tai-khoan-hr-cho-console.md) — tài khoản HR cho console gege: đồng
   bộ tài khoản, QR vào ca / đăng nhập console, mật khẩu HR qua giấy xác nhận dùng một lần. Đã chuyển chính thức 10/10.
-- [`plans/plan-forum-qr-login.md`](plans/plan-forum-qr-login.md) — đăng nhập Gege Forum bằng mã QR quét từ app HR (HR cấp
-  phiên cho trình duyệt, forum đi tiếp OIDC). Code xong 10/10, mặc định tắt.
+- [`plans/plan-forum-qr-login.md`](plans/plan-forum-qr-login.md) — đăng nhập Gege Forum bằng tài khoản HR ngay trên trang
+  forum: mã QR quét từ app HR, hoặc email + mật khẩu HR ở form của forum (HR cấp phiên cho trình duyệt, forum đi tiếp
+  OIDC). Đã triển khai 10/10, owner đã bật cả hai công tắc.
 
 ## Desk-free `/hr/team/attendance` (plan-team-attendance-desk-free)
 
