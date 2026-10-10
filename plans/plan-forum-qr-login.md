@@ -77,6 +77,20 @@ form forum ── POST web_qr.password_start (usr, pwd, app=forum; khác origin,
   `web_qr.features` để biết HR có bật không; chưa bật thì form chạy y như cũ.
 - Nhật ký: "Đăng nhập Gege Forum bằng mật khẩu HR nhập trên trang đó (trình duyệt <ip>)".
 
+## Rút gọn bước cuối — không nạp lại trang đăng nhập (10/10, owner báo "trang tự chuyển về /login một lần nữa")
+
+Bản đầu: có vé → trình duyệt **mở** `finish` → 302 về `forum/login?gege_qr=1` → Discourse nạp lại cả trang đăng nhập rồi theme
+mới bấm tiếp OIDC. Người dùng thấy trang đăng nhập hiện lại 1–3 giây.
+
+Nay: có vé → trang forum gọi `finish?…&fmt=json` bằng **`fetch` kèm cookie** (`credentials: include`). Forum và HR cùng site
+nên trình duyệt nhận cookie phiên HR từ phản hồi đó; HR trả `{"ok": true}` → theme bấm tiếp nút ERP **ngay trên trang đang
+mở** → chuỗi 302 của OIDC → vào forum. Không còn lần nạp trang đăng nhập thứ hai.
+
+- `finish` dạng JSON là hàm DUY NHẤT trả `Access-Control-Allow-Credentials: true` (cho đúng origin forum). Nó chỉ trả
+  `{"ok": bool}` và cần vé một lần → không lộ gì, không thành cửa đọc API HR bằng cookie.
+- Origin lạ gọi dạng JSON → từ chối mà **không tiêu vé**.
+- `fetch` không chạy được (trình duyệt chặn, mất mạng) → theme lùi về cách cũ (mở `finish` cả trang).
+
 ## Code
 
 | Repo | Nội dung |
