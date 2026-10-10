@@ -23,6 +23,7 @@
   {"fieldname": "grace_early_leave_minutes", "default": "0", "fieldtype": "Int", "label": "Grace Early Leave (minutes)"},
   {"fieldname": "min_working_hours_full_day", "default": "4.0", "fieldtype": "Float", "label": "Min Working Hours (Full Day)"},
   {"fieldname": "min_working_hours_half_day", "default": "2.0", "fieldtype": "Float", "label": "Min Working Hours (Half Day)"},
+  {"fieldname": "full_day_shortage_tolerance_minutes", "default": "30", "fieldtype": "Int", "label": "Full Day Shortage Tolerance (min)", "description": "Ca ngắn hơn ngưỡng đủ công: chỉ cần làm (độ dài ca − số phút này) là đủ công. Ngưỡng đủ công thực tế = min(Min Working Hours (Full Day), độ dài ca − số phút này); nửa công = min(Min Working Hours (Half Day), nửa độ dài ca)."},
   {"fieldname": "col2", "fieldtype": "Column Break"},
   {"fieldname": "multiple_logs_strategy", "default": "First IN Last OUT", "fieldtype": "Select", "label": "Multiple Logs Strategy", "options": "First IN Last OUT\nAll Pairs\nBest Pair"},
   {"fieldname": "min_overtime_minutes", "default": "30", "fieldtype": "Int", "label": "Min OT Minutes"},

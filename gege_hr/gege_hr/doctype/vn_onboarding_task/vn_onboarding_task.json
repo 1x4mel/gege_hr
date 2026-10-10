@@ -1,0 +1,35 @@
+{
+ "actions": [],
+ "creation": "2026-08-08 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "task_name", "fieldtype": "Data", "in_list_view": 1, "label": "Task", "reqd": 1},
+  {"fieldname": "assignee", "fieldtype": "Link", "in_list_view": 1, "label": "Assignee", "options": "User"},
+  {"fieldname": "due_in_days", "fieldtype": "Int", "in_list_view": 1, "label": "Due in (days)"},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "due_date", "fieldtype": "Date", "in_list_view": 1, "label": "Due Date"},
+  {
+   "default": "Open",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Open\nDone\nSkipped"
+  },
+  {"fieldname": "completed_at", "fieldtype": "Datetime", "label": "Completed At", "read_only": 1},
+  {"fieldname": "completed_by", "fieldtype": "Link", "label": "Completed By", "options": "User", "read_only": 1},
+  {"fieldname": "note", "fieldtype": "Small Text", "label": "Note"}
+ ],
+ "istable": 1,
+ "module": "gege_hr",
+ "name": "VN Onboarding Task",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"read": 1, "role": "HR User"}
+ ],
+ "sort_field": "idx",
+ "sort_order": "ASC",
+ "track_changes": 0
+}

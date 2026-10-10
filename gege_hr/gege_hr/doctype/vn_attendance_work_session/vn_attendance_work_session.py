@@ -23,8 +23,11 @@ class VNAttendanceWorkSession(Document):
     # ------------------------------------------------------------------ #
     # Lifecycle hooks
     # ------------------------------------------------------------------ #
-    def before_insert(self):
-        set_yymmdd_name(self, "before_insert")
+    def autoname(self):
+        # Frappe calls this from set_new_name (naming.py step 4) — the
+        # before_insert variant never ran because ``doc.name = None`` +
+        # the JSON ``format:`` option always overwrote it first.
+        set_yymmdd_name(self, "autoname")
 
     def validate(self):
         self._normalize_employee_name()
@@ -58,11 +61,12 @@ class VNAttendanceWorkSession(Document):
             pass
 
     def _enforce_payable_day_values(self):
-        """payable_day is restricted to {0, 0.5, 1.0} (plan §9.3)."""
-        allowed = {0.0, 0.5, 1.0}
-        value = _as_float(self.payable_day)
-        if round(value, 2) not in allowed:
-            frappe.throw(_("Payable Day chỉ nhận 0, 0.5 hoặc 1.0."))
+        """payable_day ∈ [0, 1] — công lẻ khi ca tính "Theo phút"
+        (plans/plan-cach-tinh-cong-theo-ca.md); ca "Theo ngưỡng giờ" vẫn chỉ ra 0/0.5/1."""
+        from gege_hr.gege_hr.utils.calc import is_valid_payable_day
+
+        if not is_valid_payable_day(_as_float(self.payable_day)):
+            frappe.throw(_("Payable Day phải nằm trong khoảng 0 – 1."))
 
     # ------------------------------------------------------------------ #
     # Concurrency guard (plan §19.3) — CAS claim against a status value.
@@ -75,9 +79,11 @@ class VNAttendanceWorkSession(Document):
         have opened a ``SELECT ... FOR UPDATE`` beforehand, or use this as the
         single guard in low-concurrency deployments.
         """
+        from gege_hr.gege_hr.utils._db import guarded_update_tuple
+
         allowed_from = allowed_from or ["Calculated", "Error", "Pending"]
         placeholders = ", ".join(["%s"] * len(allowed_from))
-        claimed = frappe.db.sql(
+        won = guarded_update_tuple(
             f"""
             UPDATE `tabVN Attendance Work Session`
             SET calculation_status = %s
@@ -85,7 +91,6 @@ class VNAttendanceWorkSession(Document):
             """,
             (claim_status, self.name, *allowed_from),
         )
-        won = bool(claimed)
         if won:
             self.calculation_status = claim_status
             self.db_set("calculation_status", claim_status, notify=False)

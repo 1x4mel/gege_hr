@@ -27,8 +27,13 @@ class VNPayrollReviewPeriod(Document):
     STATUS_PUBLISHED = "Published"
     STATUS_CANCELLED = "Cancelled"
 
+    STATUS_CALCULATING = "Calculating"
+
     ALLOWED_TRANSITIONS = {
-        STATUS_DRAFT: {STATUS_CALCULATED, STATUS_CANCELLED},
+        STATUS_DRAFT: {STATUS_CALCULATING, STATUS_CALCULATED, STATUS_CANCELLED},
+        # F10: a crash mid-calculation left the period stuck in Calculating
+        # forever — allow it to recover back to a working state.
+        STATUS_CALCULATING: {STATUS_CALCULATED, STATUS_DRAFT, STATUS_CANCELLED},
         STATUS_CALCULATED: {STATUS_APPROVED, STATUS_DRAFT, STATUS_CANCELLED},
         STATUS_APPROVED: {STATUS_SLIPS, STATUS_CANCELLED},
         STATUS_SLIPS: {STATUS_PUBLISHED, STATUS_CANCELLED},
@@ -36,8 +41,11 @@ class VNPayrollReviewPeriod(Document):
         STATUS_CANCELLED: set(),
     }
 
-    def before_insert(self):
-        set_yymmdd_name(self, "before_insert")
+    def autoname(self):
+        # Frappe calls this from set_new_name (naming.py step 4) — the
+        # before_insert variant never ran because ``doc.name = None`` +
+        # the JSON ``format:`` option always overwrote it first.
+        set_yymmdd_name(self, "autoname")
 
     def validate(self):
         self._normalize_dates()
@@ -60,14 +68,19 @@ class VNPayrollReviewPeriod(Document):
         if not self.attendance_period:
             return
         try:
-            locked = frappe.db.get_value(
-                "VN Monthly Attendance Period",
-                self.attendance_period,
-                "is_locked",
+            # Lock state lives in ``status == "Locked"`` (there is no
+            # ``is_locked`` column — that historic lookup always failed).
+            locked = (
+                frappe.db.get_value(
+                    "VN Monthly Attendance Period",
+                    self.attendance_period,
+                    "status",
+                )
+                == "Locked"
             )
         except Exception:
-            locked = None
-        if locked in (0, None) and self.status != self.STATUS_DRAFT:
+            locked = False
+        if not locked and self.status != self.STATUS_DRAFT:
             # Only enforce at calculation time — a Draft period may be created
             # in anticipation of the lock.
             frappe.throw(

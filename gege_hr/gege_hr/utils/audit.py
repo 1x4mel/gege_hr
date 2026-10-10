@@ -24,7 +24,7 @@ except Exception:  # pragma: no cover - outside bench
 
 
 # --------------------------------------------------------------------------- #
-# Vocabulary (matches VN Audit Event.audit_type options — 19 values)
+# Vocabulary (matches VN Audit Event.audit_type options — 22 values)
 # --------------------------------------------------------------------------- #
 AUDIT_TYPES = (
     "Check-in",
@@ -35,8 +35,10 @@ AUDIT_TYPES = (
     "Leave Reject",
     "OT Submit",
     "OT Approve",
+    "OT Update Draft",
     "Correction Submit",
     "Correction Approve",
+    "Correction Update Draft",
     "Advance Submit",
     "Advance Approve",
     "Work Session Recalculate",
@@ -46,14 +48,22 @@ AUDIT_TYPES = (
     "Payroll Approve",
     "Payroll Publish",
     "Manual Override",
+    "Checkout Miss Explain",
+    "Checkout Miss Resolve",
+    "Checkout Miss Appeal",
 )
 
 # Coarse category groupings, useful for the audit-list filter UI.
 AUDIT_CATEGORIES = {
     "attendance": ("Check-in", "Check-out", "Work Session Recalculate"),
+    "checkout_miss": (
+        "Checkout Miss Explain",
+        "Checkout Miss Resolve",
+        "Checkout Miss Appeal",
+    ),
     "leave": ("Leave Submit", "Leave Cancel", "Leave Approve", "Leave Reject"),
-    "overtime": ("OT Submit", "OT Approve"),
-    "correction": ("Correction Submit", "Correction Approve"),
+    "overtime": ("OT Submit", "OT Approve", "OT Update Draft"),
+    "correction": ("Correction Submit", "Correction Approve", "Correction Update Draft"),
     "advance": ("Advance Submit", "Advance Approve"),
     "monthly": ("Monthly Lock", "Monthly Unlock"),
     "payroll": ("Payroll Calculate", "Payroll Approve", "Payroll Publish"),
@@ -127,6 +137,18 @@ def audit_payload(
     if not company:
         raise ValueError("company is required")
     if not is_valid_audit_type(audit_type):
+        # F19: a typo'd audit_type used to be silently rewritten to
+        # "Manual Override", misclassifying the event in the legal trail.
+        # Keep the fallback but log loudly so bad callers surface.
+        try:
+            import frappe
+
+            frappe.log_error(
+                title="audit: unknown audit_type coerced",
+                message=str(audit_type)[:200],
+            )
+        except Exception:
+            pass
         audit_type = "Manual Override"
     doc: dict[str, Any] = {
         "doctype": "VN Audit Event",
@@ -184,3 +206,31 @@ def audit_row(row: Any) -> dict:
     if isinstance(value, datetime):
         out["created_at"] = value.isoformat(sep=" ")
     return out
+
+
+# --------------------------------------------------------------------------- #
+# WP11 — CSV export builder (pure; Excel-safe UTF-8 BOM)
+# --------------------------------------------------------------------------- #
+def build_audit_csv(rows: list[dict]) -> str:
+    """Serialise audit rows to CSV with a UTF-8 BOM.
+
+    * BOM ``\\ufeff`` — Excel mở tiếng Việt đúng không cần import wizard.
+    * Header = :data:`AUDIT_ROW_FIELDS` (stable order).
+    * Every cell passes through the ``=``/``+``/``-``/``@`` formula-injection
+      neutraliser (same policy as utils/bank_export).
+    """
+    import csv
+    import io
+
+    def _safe(value) -> str:
+        s = "" if value is None else str(value)
+        if s[:1] in ("=", "+", "-", "@"):
+            return f"'{s}"
+        return s
+
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\r\n")
+    writer.writerow(list(AUDIT_ROW_FIELDS))
+    for row in rows or []:
+        writer.writerow([_safe(row.get(f)) for f in AUDIT_ROW_FIELDS])
+    return "\ufeff" + buf.getvalue()

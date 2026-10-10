@@ -74,8 +74,9 @@ def test_parse_log_time_custom_tz():
 # to_utc_storage_str
 # --------------------------------------------------------------------------- #
 def test_to_utc_storage_str():
-    dt = datetime(2026, 6, 21, 8, 0, tzinfo=VN)  # 08:00 VN == 01:00 UTC
-    assert device.to_utc_storage_str(dt) == "2026-06-21 01:00:00"
+    # PHASE-1 FRAME: storage is naive PORTAL WALL — 08:00 VN stays 08:00.
+    dt = datetime(2026, 6, 21, 8, 0, tzinfo=VN)
+    assert device.to_utc_storage_str(dt) == "2026-06-21 08:00:00"
 
 
 # --------------------------------------------------------------------------- #
@@ -98,6 +99,14 @@ def test_status_offline_stale():
 
 def test_status_idle_no_sync():
     assert device.derive_device_status(is_active=1, last_sync_at=None) == "Idle"
+
+
+def test_status_naive_db_datetime_is_portal_wall():
+    """FIX 2026-10-04: a naive DB datetime is PORTAL WALL (PHASE-1) — read as
+    UTC it was +7h, so a device silent 30h still looked "Synced"."""
+    wall_now = tz_utils.now_in_portal().replace(tzinfo=None)
+    assert device.derive_device_status(is_active=1, last_sync_at=wall_now - timedelta(hours=30)) == "Offline"
+    assert device.derive_device_status(is_active=1, last_sync_at=wall_now - timedelta(hours=1)) == "Synced"
 
 
 # --------------------------------------------------------------------------- #

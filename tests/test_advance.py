@@ -137,6 +137,28 @@ def test_cutoff_accepts_date_object():
 
 
 # --------------------------------------------------------------------------- #
+# normalize_repayment_plan — single supported repayment method (2026-08 rule:
+# advance requested in period P is deducted from period P's salary, paid the
+# next month; Installment/Custom are retired).
+# --------------------------------------------------------------------------- #
+def test_repayment_plan_next_month_passes_through():
+    assert adv.normalize_repayment_plan("Next Month") == adv.REPAYMENT_PLAN_NEXT_MONTH
+
+
+def test_repayment_plan_legacy_installment_coerced():
+    assert adv.normalize_repayment_plan("Installment") == adv.REPAYMENT_PLAN_NEXT_MONTH
+
+
+def test_repayment_plan_legacy_custom_coerced():
+    assert adv.normalize_repayment_plan("Custom") == adv.REPAYMENT_PLAN_NEXT_MONTH
+
+
+def test_repayment_plan_blank_none_arbitrary_coerced():
+    for bad in ("", "   ", None, "Trả góp 3 kỳ", "next month", 123):
+        assert adv.normalize_repayment_plan(bad) == adv.REPAYMENT_PLAN_NEXT_MONTH
+
+
+# --------------------------------------------------------------------------- #
 # advance_deduction_amount / build_additional_salary_payload
 # --------------------------------------------------------------------------- #
 def _sar(**over):

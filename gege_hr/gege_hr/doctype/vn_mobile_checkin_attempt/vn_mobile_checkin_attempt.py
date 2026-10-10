@@ -13,6 +13,7 @@ class VNMobileCheckinAttempt(Document):
     is enabled and writes bypass the UI workflow.
     """
 
-    def before_insert(self):
-        # Apply the MC-YYMMDD-XXXXXX naming convention (plan §5.2).
-        set_yymmdd_name(self, "before_insert")
+    def autoname(self):
+        # Frappe naming hook (set_new_name step 4) — before_insert never won
+        # against the JSON ``format:`` autoname (doc.name is reset first).
+        set_yymmdd_name(self, "autoname")

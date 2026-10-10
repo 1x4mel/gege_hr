@@ -1,0 +1,306 @@
+"""Bench-free tests for ``utils/checkin_parity.py`` — the parity + duplicate
+guards that protect payroll integrity in ``api/attendance.mobile_checkin``.
+
+Full matrix (21 cases) for the two production risks:
+
+  R1 OVERNIGHT PARITY — the old day-only parity (``"OUT" if has_in_only(today)
+     else "IN"``) mis-fired when a session spanned midnight. The fix decides by
+     the NEWEST log across YESTERDAY+TODAY: newest IN → OUT (close it), newest
+     OUT → IN (new session).
+
+  R2 DUPLICATE INTENT — a re-tap seconds after a persisted-but-unacknowledged
+     log used to create OUT-right-after-IN (0-hour day → wrong pay). The guard
+     skips intents within the gap window; offline replay (old intent stamps)
+     still passes.
+
+Plus the orphan-OUT self-heal detectors (``has_out_only``) powering the
+warning mobile_checkin returns with ``need_review``.
+"""
+
+from datetime import datetime, timedelta
+
+import pytest
+
+from gege_hr.gege_hr.utils.checkin_parity import (
+    decide_log_type,
+    has_in_only,
+    has_out_only,
+    is_duplicate_intent,
+    parse_log_dt,
+    pick_existing_punch,
+    pick_shift_instance,
+    shift_of_punch,
+)
+
+Y, T = "2026-08-31", "2026-09-01"  # yesterday / today fixtures
+
+
+def log(day: str, hhmm: str, lt: str) -> dict:
+    """A raw Employee Checkin row as DB-shaped dict (SQL string time)."""
+    return {"time": f"{day} {hhmm}:00", "log_type": lt}
+
+
+# ── parse_log_dt ────────────────────────────────────────────────────────────
+
+
+def test_parse_naive_sql_string():
+    assert parse_log_dt("2026-09-01 00:30:00") == datetime(2026, 9, 1, 0, 30)
+
+
+def test_parse_aware_iso_converted_to_naive_utc():
+    # +05:30 offset → UTC 00:30
+    assert parse_log_dt("2026-09-01T06:00:00+05:30") == datetime(2026, 9, 1, 0, 30)
+
+
+def test_parse_none_and_garbage():
+    assert parse_log_dt(None) is None
+    assert parse_log_dt("") is None
+    assert parse_log_dt("not-a-date") is None
+    assert parse_log_dt(42) is None
+
+
+# ── R1: overnight-aware parity (decide_log_type) ────────────────────────────
+
+
+def test_p01_empty_today_and_yesterday_in():
+    assert decide_log_type([]) == "IN"
+
+
+def test_p02_today_single_in_tap_becomes_out():
+    assert decide_log_type([log(T, "08:00", "IN")]) == "OUT"
+
+
+def test_p03_today_completed_day_tap_becomes_in():
+    logs = [log(T, "08:00", "IN"), log(T, "17:00", "OUT")]
+    assert decide_log_type(logs) == "IN"
+
+
+def test_p04_today_orphan_out_selfheals_as_in():
+    assert decide_log_type([log(T, "20:00", "OUT")]) == "IN"
+
+
+def test_p05_overnight_open_session_tap_becomes_out():
+    """R1 chính: IN 23:30 hôm qua chưa có OUT → cú 00:30 hôm nay = OUT."""
+    logs = [log(Y, "23:30", "IN")]
+    assert decide_log_type(logs) == "OUT"
+
+
+def test_p06_yesterday_session_fully_closed_tap_becomes_in():
+    logs = [log(Y, "23:30", "IN"), log(Y, "23:50", "OUT")]
+    assert decide_log_type(logs) == "IN"
+
+
+def test_p07_yesterday_auto_closed_overnight_tap_becomes_in():
+    """OUT giả của auto-close là log mới nhất → phiên mới = IN."""
+    logs = [log(Y, "23:30", "IN"), log(T, "06:30", "OUT")]
+    assert decide_log_type(logs) == "IN"
+
+
+def test_p08_yesterday_orphan_out_selfheals_as_in():
+    assert decide_log_type([log(Y, "23:00", "OUT")]) == "IN"
+
+
+def test_p09_yesterday_dayshift_completed_tap_becomes_in():
+    logs = [log(Y, "08:00", "IN"), log(Y, "17:00", "OUT")]
+    assert decide_log_type(logs) == "IN"
+
+
+def test_p10_today_second_session_tap_becomes_out():
+    logs = [log(T, "08:00", "IN"), log(T, "12:00", "OUT"), log(T, "13:00", "IN")]
+    assert decide_log_type(logs) == "OUT"
+
+
+def test_p11_mixed_string_and_datetime_sources():
+    logs = [
+        {"time": datetime(2026, 8, 31, 23, 30), "log_type": "IN"},
+        log(T, "00:10", "OUT"),
+        {"time": "2026-09-01T05:00:00+00:00", "log_type": "IN"},
+    ]
+    assert decide_log_type(logs) == "OUT"
+
+
+def test_p12_unparseable_times_fall_back_to_in():
+    assert decide_log_type([{"time": "??", "log_type": "IN"}]) == "IN"
+
+
+def test_p13_localized_clock_in_token():
+    assert decide_log_type([{"time": "2026-09-01 08:00:00", "log_type": "Clock In"}]) == "OUT"
+
+
+# ── R2: duplicate-intent guard (is_duplicate_intent) ─────────────────────────
+
+
+def test_d01_retab_seconds_after_persisted_log_is_duplicate():
+    last = "2026-09-01 08:00:00"
+    assert is_duplicate_intent(last, datetime(2026, 9, 1, 8, 0, 10)) is True
+
+
+def test_d02_tap_ten_minutes_later_is_not_duplicate():
+    last = "2026-09-01 08:00:00"
+    assert is_duplicate_intent(last, datetime(2026, 9, 1, 8, 10)) is False
+
+
+def test_d03_offline_replay_old_intent_is_not_duplicate():
+    """IN(08:00) + OUT(08:05) replayed to server at 09:00: OUT's intent is
+    BEFORE the last persisted log → negative delta → replay passes."""
+    last_persisted = datetime(2026, 9, 1, 9, 0)  # IN written at replay time
+    replayed_intent = datetime(2026, 9, 1, 8, 5)  # OUT's original stamp
+    assert is_duplicate_intent(last_persisted, replayed_intent) is False
+
+
+def test_d04_aware_intent_normalised_before_compare():
+    last = "2026-09-01 08:00:00"
+    assert is_duplicate_intent(last, "2026-09-01T08:00:30Z") is True
+
+
+def test_d05_missing_values_never_duplicate():
+    assert is_duplicate_intent(None, datetime(2026, 9, 1, 8, 0)) is False
+    assert is_duplicate_intent("2026-09-01 08:00:00", None) is False
+
+
+# ── orphan-OUT detectors (self-heal warning path) ────────────────────────────
+
+
+def test_s01_has_out_only_flags_orphan_out_day():
+    assert has_out_only([log(T, "20:00", "OUT")]) is True
+    assert has_out_only([log(T, "20:00", "OUT"), log(T, "21:00", "OUT")]) is True
+
+
+def test_s02_has_out_only_false_for_normal_shapes():
+    assert has_out_only([]) is False
+    assert has_out_only([log(T, "08:00", "IN")]) is False
+    assert has_out_only([log(T, "08:00", "IN"), log(T, "17:00", "OUT")]) is False
+
+
+def test_s03_has_in_only_kept_for_backcompat():
+    assert has_in_only([log(T, "08:00", "IN")]) is True
+    assert has_in_only([log(T, "08:00", "IN"), log(T, "17:00", "OUT")]) is False
+    assert has_in_only([]) is False
+
+
+# --------------------------------------------------------------------------- #
+# pick_shift_instance — which Shift Instance a punch belongs to (FIX 2026-10-04:
+# the old resolver read wall times as UTC +7h → 164/234 punches mis-routed)
+# --------------------------------------------------------------------------- #
+def _day(name, d):
+    return {
+        "name": name,
+        "planned_start": f"2026-09-{d:02d} 08:00:00",
+        "planned_end": f"2026-09-{d:02d} 20:00:00",
+    }
+
+
+def _night(name, d):
+    return {
+        "name": name,
+        "planned_start": f"2026-09-{d:02d} 20:00:00",
+        "planned_end": f"2026-09-{d + 1:02d} 08:00:00",
+    }
+
+
+@pytest.mark.parametrize(
+    "candidates, punch, kind, expected",
+    [
+        # day shift 08-20: the evening OUT stays on ITS day (was: next day)
+        ([_day("D21", 21), _day("D22", 22)], "2026-09-22 20:13:26", "OUT", "D22"),
+        ([_day("D21", 21), _day("D22", 22)], "2026-09-22 08:03:00", "IN", "D22"),
+        ([_day("D21", 21), _day("D22", 22)], "2026-09-22 15:00:00", "OUT", "D22"),  # early leave
+        ([_day("D21", 21), _day("D22", 22)], "2026-09-23 01:00:00", "OUT", "D22"),  # very late OUT
+        # night shift 20-08: the morning OUT closes YESTERDAY's shift (was: tonight's)
+        ([_night("N27", 27), _night("N28", 28)], "2026-09-28 08:00:00", "OUT", "N27"),
+        ([_night("N27", 27), _night("N28", 28)], "2026-09-28 20:05:00", "IN", "N28"),
+        # two shifts the same day
+        (
+            [
+                _day("D22", 22),
+                {
+                    "name": "LATE",
+                    "planned_start": "2026-09-22 20:00:00",
+                    "planned_end": "2026-09-23 02:00:00",
+                },
+            ],
+            "2026-09-22 20:05:00",
+            "OUT",
+            "D22",
+        ),
+        (
+            [
+                _day("D22", 22),
+                {
+                    "name": "LATE",
+                    "planned_start": "2026-09-22 20:00:00",
+                    "planned_end": "2026-09-23 02:00:00",
+                },
+            ],
+            "2026-09-22 19:55:00",
+            "IN",
+            "LATE",
+        ),
+    ],
+)
+def test_pick_shift_instance_matrix(candidates, punch, kind, expected):
+    assert pick_shift_instance(candidates, punch, kind) == expected
+
+
+def test_pick_shift_instance_follows_engine_window():
+    """Night shift 21h-9h: a stray 20:22 OUT is outside yesterday's engine
+    window (ps + 20h = 17:00) → today's shift, the session the engine credits."""
+    n03 = {"name": "N03", "planned_start": "2026-09-03 21:00:00", "planned_end": "2026-09-04 09:00:00"}
+    n04 = {"name": "N04", "planned_start": "2026-09-04 21:00:00", "planned_end": "2026-09-05 09:00:00"}
+    assert pick_shift_instance([n03, n04], "2026-09-04 20:22:00", "OUT") == "N04"
+    assert pick_shift_instance([n03, n04], "2026-09-04 09:05:00", "OUT") == "N03"
+    # an explicit SI check-out window widens the engine window
+    n03_wide = {**n03, "max_checkout_time": "2026-09-04 21:00:00"}
+    assert pick_shift_instance([n03_wide, n04], "2026-09-04 20:22:00", "OUT") == "N03"
+
+
+def test_pick_shift_instance_without_log_type_uses_window():
+    cands = [_night("N27", 27), _night("N28", 28)]
+    assert pick_shift_instance(cands, "2026-09-28 07:58:00") == "N27"  # inside N27
+    assert pick_shift_instance(cands, datetime(2026, 9, 28, 21, 0)) == "N28"
+
+
+def test_pick_shift_instance_fallback_and_empty():
+    # nothing within ±24h → still the closest instance (never drop the punch)
+    assert pick_shift_instance([_day("D20", 20)], "2026-09-22 21:00:00", "OUT") == "D20"
+    assert pick_shift_instance([], "2026-09-22 21:00:00", "OUT") is None
+    assert pick_shift_instance([_day("D22", 22)], None, "OUT") is None
+
+
+# --------------------------------------------------------------------------- #
+# pick_existing_punch — admin edit updates the punch of the SAME SHIFT
+# --------------------------------------------------------------------------- #
+def _n(name, d):
+    return {**_night(name, d), "work_date": f"2026-09-{d:02d}"}
+
+
+_NIGHTS = [_n("N12", 12), _n("N13", 13), _n("N14", 14)]
+_PUNCHES = [
+    {"name": "IN12", "time": "2026-09-13 00:52:00", "log_type": "IN"},
+    {"name": "OUT13", "time": "2026-09-14 08:02:00", "log_type": "OUT"},
+    {"name": "IN14", "time": "2026-09-14 22:54:00", "log_type": "IN"},
+    {"name": "OUT14", "time": "2026-09-15 11:28:00", "log_type": "OUT"},
+]
+
+
+def test_pick_existing_punch_same_shift_not_same_day():
+    # 04:45 on 14/09 belongs to N13 which has no IN → insert (None), NOT IN14
+    assert shift_of_punch(_NIGHTS, "2026-09-14 04:45:00", "IN") == "N13"
+    assert pick_existing_punch(_PUNCHES, _NIGHTS, "2026-09-14 04:45:00", "IN") is None
+    assert pick_existing_punch(_PUNCHES, _NIGHTS, "2026-09-14 22:50:00", "IN") == "IN14"
+    assert pick_existing_punch(_PUNCHES, _NIGHTS, "2026-09-14 08:10:00", "OUT") == "OUT13"
+    assert pick_existing_punch(_PUNCHES, _NIGHTS, "2026-09-15 11:00:00", "OUT") == "OUT14"
+
+
+def test_pick_existing_punch_in_earliest_out_latest_and_no_shift():
+    day = [{**_day("D22", 22), "work_date": "2026-09-22"}]
+    punches = [
+        {"name": "IN-a", "time": "2026-09-22 08:01:00", "log_type": "IN"},
+        {"name": "IN-b", "time": "2026-09-22 08:03:00", "log_type": "IN"},
+        {"name": "OUT-a", "time": "2026-09-22 19:00:00", "log_type": "OUT"},
+        {"name": "OUT-b", "time": "2026-09-22 20:10:00", "log_type": "OUT"},
+    ]
+    assert pick_existing_punch(punches, day, "2026-09-22 08:00:00", "IN") == "IN-a"
+    assert pick_existing_punch(punches, day, "2026-09-22 20:00:00", "OUT") == "OUT-b"
+    assert shift_of_punch([], "2026-09-22 08:00:00", "IN") is None
+    assert pick_existing_punch(punches, [], "2026-09-22 08:00:00", "IN") is None

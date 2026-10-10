@@ -38,12 +38,21 @@ def test_normalize_year():
 # --------------------------------------------------------------------------- #
 def test_cache_key_full_scope():
     key = cal.build_cache_key(company="Gege", branch="HN", department="Sales", year=2026, month=6)
-    assert key == "Gege-HN-Sales-2026-06"
+    assert key == "Gege-HN-Sales-2026-06-v2"
 
 
 def test_cache_key_all_scope():
     key = cal.build_cache_key(company="Gege", year=2026, month=6)
-    assert key == "Gege-ALL-ALL-2026-06"
+    assert key == "Gege-ALL-ALL-2026-06-v2"
+
+
+def test_cache_key_v2_suffix_marks_payload_shape():
+    """LC5 (plan leave-calendar-desk-free): the -v2 suffix isolates the
+    desk-free {leaves, holidays} payload from legacy flat-array rows."""
+    for branch, dept in [(None, None), ("HN", None), (None, "Sales"), ("HN", "Sales")]:
+        key = cal.build_cache_key(company="Gege", branch=branch, department=dept, year=2026, month=6)
+        assert key and key.endswith("-v2")
+        assert "-v2-v2" not in key
 
 
 def test_cache_key_invalid_returns_none():
@@ -103,6 +112,28 @@ def test_compute_expiry_adds_ttl():
 # --------------------------------------------------------------------------- #
 # calendar_cache_payload / row
 # --------------------------------------------------------------------------- #
+def test_months_between_spanning_three_months():
+    """LC14 — every month touched by the window (cache invalidation input)."""
+    assert cal.months_between("2026-08-15", "2026-10-05") == [
+        ("2026", "08"),
+        ("2026", "09"),
+        ("2026", "10"),
+    ]
+
+
+def test_months_between_single_month_and_edges():
+    assert cal.months_between("2026-09-01", "2026-09-30") == [("2026", "09")]
+    assert cal.months_between("2026-12-20", "2027-01-03") == [("2026", "12"), ("2027", "01")]
+    assert cal.months_between("2026-09-10", "2026-09-10") == [("2026", "09")]
+
+
+def test_months_between_reversed_and_invalid():
+    # Reversed window normalises (swapped), garbage → [].
+    assert cal.months_between("2026-10-05", "2026-08-15")[0] == ("2026", "08")
+    assert cal.months_between(None, "2026-10-05") == []
+    assert cal.months_between("not-a-date", "2026-10-05") == []
+
+
 def test_payload_shape():
     payload = cal.calendar_cache_payload(
         company="Gege",
@@ -111,7 +142,7 @@ def test_payload_shape():
         data={"days": [1, 2, 3]},
         generated_at="2026-06-22 10:00:00",
     )
-    assert payload["cache_key"] == "Gege-ALL-ALL-2026-06"
+    assert payload["cache_key"] == "Gege-ALL-ALL-2026-06-v2"
     assert payload["year"] == 2026
     assert payload["month"] == "06"
     assert '"days"' in payload["data_json"]

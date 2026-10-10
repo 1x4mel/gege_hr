@@ -150,6 +150,82 @@ def aggregate_work_sessions(work_sessions: list[dict]) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# WP2 (F-LC13) — REAL-hours period summary from Work Session rows
+# --------------------------------------------------------------------------- #
+def summarize_work_sessions(
+    work_sessions: list[dict],
+    *,
+    hours_per_day: float = 8.0,
+    extra_leave_days: float = 0.0,
+) -> dict:
+    """Summarise a period's Work Session rows into REAL payable numbers.
+
+    Prod-readiness WP2 (F-LC13): review lines used to show ``regular_hours=0``
+    and a flat ``payable_days`` even when the employee had worked days — the
+    hours never came from the actual Work Sessions. This pure fold is the new
+    source of truth:
+
+    * ``regular_hours``  = Σ ``regular_hours`` of non-review rows
+    * ``overtime_hours`` = Σ ``approved_overtime_hours`` (OT must be approved)
+    * ``payable_days``   = Σ ngày công per worked row: the engine's own
+      ``payable_day`` (cách tính công của ca — ngưỡng giờ co theo độ dài ca,
+      hoặc theo phút; plans/plan-cach-tinh-cong-theo-ca.md) when the row
+      carries it, else the legacy ``round(regular_hours / hours_per_day, 2)``;
+      a full paid-leave row (``has_leave`` with no worked hours) counts
+      1 payable day; ``extra_leave_days`` adds approved leave days that have
+      NO Work Session at all (PR2)
+    * ``need_review`` rows contribute NOTHING (PR5) and are counted so the
+      line can raise a warning flag
+    * ``absent`` rows count into ``absent_days`` and pay nothing (PR8)
+
+    ``hours_per_day`` defaults to 8 (Shift Type norm); non-positive values
+    fall back to 8. Pure — no frappe.
+    """
+    hpd = _num(hours_per_day, 8.0)
+    if hpd <= 0:
+        hpd = 8.0
+
+    regular_hours = 0.0
+    overtime_hours = 0.0
+    payable_days = 0.0
+    leave_days = _num(extra_leave_days, 0.0)
+    absent_days = 0
+    need_review_days = 0
+    worked_days = 0
+
+    for row in work_sessions or []:
+        if _ws_get(row, "need_review") >= 1:
+            need_review_days += 1
+            continue  # PR5: unresolved review days pay nothing
+        rh = _ws_get(row, "regular_hours")
+        regular_hours += rh
+        overtime_hours += _ws_get(row, "approved_overtime_hours")
+        if _ws_get(row, "absent") >= 1:
+            absent_days += 1  # PR8: absent, unpayable
+            continue
+        if rh > 0:
+            pd = row.get("payable_day")
+            payable_days += _num(pd) if pd is not None else round(rh / hpd, 2)
+            worked_days += 1
+        elif _ws_get(row, "has_leave") >= 1:
+            # Pure paid-leave day (approved leave, no punches) → 1 payable day.
+            payable_days += 1
+            leave_days += 1
+    payable_days += _num(extra_leave_days, 0.0)
+
+    return {
+        "regular_hours": round2(regular_hours),
+        "overtime_hours": round2(overtime_hours),
+        "payable_days": round2(payable_days),
+        "leave_days": round2(leave_days),
+        "absent_days": absent_days,
+        "need_review_days": need_review_days,
+        "worked_days": worked_days,
+        "session_count": len(work_sessions or []),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Pure line computation — summary → review line amounts
 # --------------------------------------------------------------------------- #
 
@@ -181,18 +257,39 @@ def hourly_rate(base_salary: float, standard_hours: float | None) -> float:
     return _num(base_salary) / sh
 
 
-def compute_line(agg: dict, base_salary: float, config: dict | None = None) -> dict:
+def compute_line(
+    agg: dict,
+    base_salary: float,
+    config: dict | None = None,
+    *,
+    late_penalty: float | None = None,
+    deduction_rates: dict[str, float] | None = None,
+    allowances: list[float] | None = None,
+    extra_deductions: list[float] | None = None,
+) -> dict:
     """Compute a full review-line breakdown from an aggregate summary.
 
     Parameters
     ----------
     agg : dict
-        Output of :func:`aggregate_work_sessions`.
+        Output of :func:`aggregate_work_sessions` (Monthly mode feeds it via
+        :func:`build_monthly_agg`).
     base_salary : float
         Monthly base salary (from Salary Structure Assignment).
     config : dict, optional
         Rate overrides — see :func:`default_config`. Missing keys fall back
         to the defaults.
+    late_penalty : float, optional (keyword-only)
+        Per-employee salary plan (Monthly mode): FINAL tiered penalty from
+        :func:`compute_late_penalty` — overrides the minutes×rate default.
+    deduction_rates : dict, optional (keyword-only)
+        ``{"BHXH": 8.0, ...}`` percent-of-gross deductions — same semantics
+        as :func:`compute_hourly_line`.
+    allowances / extra_deductions : list[float], optional (keyword-only)
+        Fixed amounts from the Salary Structure earnings/deductions.
+
+    All keyword-only params default to ``None`` ⇒ the legacy formula keeps
+    running unchanged (regression-locked by PS11).
 
     Returns
     -------
@@ -242,16 +339,34 @@ def compute_line(agg: dict, base_salary: float, config: dict | None = None) -> d
 
     # --- Late penalty ----------------------------------------------------- #
     late_penalty_amount = _num(agg.get("late_minutes")) * _num(cfg.get("late_penalty_rate"))
+    # Per-employee salary plan: the API layer computes the tiered penalty via
+    # compute_late_penalty (daily-rate aware) and passes the FINAL amount in.
+    if late_penalty is not None:
+        late_penalty_amount = _num(late_penalty)
+
+    # --- Allowances (fixed amounts from Salary Structure earnings) -------- #
+    total_allowances = sum(_num(a) for a in (allowances or []))
 
     # --- Deductions ------------------------------------------------------- #
     unpaid_days = max(0.0, standard_days - _num(agg.get("payable_days")))
     unpaid_leave_deduction = unpaid_days * daily_rate
     salary_advance_deduction = _num(cfg.get("salary_advance_deduction"))
-    other_deduction = _num(cfg.get("other_deduction"))
+    other_deduction = _num(cfg.get("other_deduction")) + sum(_num(d) for d in (extra_deductions or []))
+    # Checkout-miss penalty (layered on by the API layer, like advance/other).
+    checkout_miss_penalty = _num(cfg.get("checkout_miss_penalty"))
 
-    gross_pay = proportional_base + overtime_amount + night_allowance_amount
+    gross_pay = proportional_base + overtime_amount + night_allowance_amount + total_allowances
+    # Standard percentage deductions (BHXH/BHYT/BHTN/TNCN — percent of gross),
+    # same semantics as compute_hourly_line.
+    total_pct = sum(_num(v) for v in (deduction_rates or {}).values()) / 100.0
+    standard_deductions = gross_pay * total_pct
     total_deduction = (
-        late_penalty_amount + unpaid_leave_deduction + salary_advance_deduction + other_deduction
+        late_penalty_amount
+        + unpaid_leave_deduction
+        + salary_advance_deduction
+        + other_deduction
+        + checkout_miss_penalty
+        + standard_deductions
     )
     net_pay = gross_pay - total_deduction
 
@@ -262,11 +377,12 @@ def compute_line(agg: dict, base_salary: float, config: dict | None = None) -> d
         "overtime_hours": round2(agg.get("overtime_hours")),
         "overtime_amount": round2(overtime_amount),
         "night_allowance_amount": round2(night_allowance_amount),
-        "allowance_amount": 0.0,
+        "allowance_amount": round2(total_allowances),
         "late_penalty_amount": round2(late_penalty_amount),
         "unpaid_leave_deduction": round2(unpaid_leave_deduction),
         "salary_advance_deduction": round2(salary_advance_deduction),
         "other_deduction": round2(other_deduction),
+        "checkout_miss_penalty": round2(checkout_miss_penalty),
         "gross_pay": round2(gross_pay),
         "total_deduction": round2(total_deduction),
         "net_pay": round2(net_pay),
@@ -286,6 +402,34 @@ def rollup_lines(line_amounts: list[dict]) -> dict:
     out["total_deductions"] = round2(out["total_deductions"])
     out["total_net_pay"] = round2(out["total_net_pay"])
     return out
+
+
+def build_monthly_agg(agg: dict, summary: dict | None = None) -> dict:
+    """Merge the F-LC13 REAL summary with the Work-Session OT-split aggregate.
+
+    Monthly mode (plan per-employee-salary §4.3): ``payable_days`` /
+    ``regular_hours`` come from :func:`summarize_work_sessions` output (the
+    same REAL numbers the hourly path stamps on the line — includes PR2
+    leave-only days), while the OT buckets / night hours / late minutes come
+    from :func:`aggregate_work_sessions` (the only source with the OT split).
+    The result feeds :func:`compute_line` directly.
+    """
+    summ = summary or {}
+
+    def _pick(summary_key: str, agg_key: str) -> float:
+        # Prefer the REAL summary value; fall back to the WS aggregate.
+        v = _num(summ.get(summary_key))
+        return v if v else _num(agg.get(agg_key))
+
+    return {
+        "payable_days": _pick("payable_days", "payable_days"),
+        "regular_hours": _pick("regular_hours", "regular_hours"),
+        "regular_night_hours": _num(agg.get("regular_night_hours")),
+        "overtime_normal_hours": _num(agg.get("overtime_normal_hours")),
+        "overtime_night_hours": _num(agg.get("overtime_night_hours")),
+        "overtime_holiday_hours": _num(agg.get("overtime_holiday_hours")),
+        "late_minutes": _num(agg.get("late_minutes")),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -381,6 +525,35 @@ def resolve_base_salary(employee: str, date=None) -> float:
         return 0.0
 
 
+def load_employee_period_agg(employee: str, from_date, to_date) -> dict:
+    """OT-split + late-minutes aggregate for the window (Monthly mode).
+
+    :func:`load_employee_period_summary` (F-LC13) has the REAL payable days
+    but NO OT split; this loader folds the same Work Session rows through
+    :func:`aggregate_work_sessions`, which keeps the normal/night/holiday OT
+    buckets, night hours and late minutes. Guarded — returns a neutral
+    aggregate outside a bench.
+    """
+    if frappe is None:
+        return aggregate_work_sessions([])
+    try:
+        rows = (
+            frappe.db.get_all(
+                "VN Attendance Work Session",
+                filters={
+                    "employee": employee,
+                    "docstatus": ["<", 2],
+                    "work_date": ["between", [from_date, to_date]],
+                },
+                fields=list(_WS_FIELDS),
+            )
+            or []
+        )
+        return aggregate_work_sessions(rows)
+    except Exception:
+        return aggregate_work_sessions([])
+
+
 def employee_advance_deductions(company: str, employees: list[str], from_date, to_date) -> dict:
     """Sum approved/paid advance amounts per employee for the window.
 
@@ -410,3 +583,666 @@ def employee_advance_deductions(company: str, employees: list[str], from_date, t
         return out
     except Exception:
         return {}
+
+
+# --------------------------------------------------------------------------- #
+# Hourly-rate × time-bracket payroll model (plan §payroll-hourly-rate-design)
+# --------------------------------------------------------------------------- #
+def resolve_hourly_rate(employee: str, date=None) -> float:
+    """Hourly rate for ``employee`` (float only — see the ``_detail`` variant)."""
+    rate, _source = resolve_hourly_rate_detail(employee, date)
+    return rate
+
+
+def resolve_hourly_rate_detail(employee: str, date=None) -> tuple[float, str]:
+    """Hourly rate + source tier for ``employee``.
+
+    Chain (plan per-employee-salary §4.2): ``Employee.vn_hourly_rate`` →
+    Department ``vn_hourly_rate`` → ``VN HR Portal Setting.vn_default_hourly_rate``
+    (default 20 000 VND). Returns ``(rate, source)`` with ``source`` ∈
+    ``employee`` / ``department`` / ``default``.
+
+    Falls back to ``VN HR Portal Setting.vn_default_hourly_rate`` (default 20 000 VND)
+    when the employee has no department or the department has no rate set.
+
+    M8: ``date`` is honoured — the Department is read as of that date (latest
+    Version snapshot of the Department doc at/before ``date``, when any
+    exists) so a mid-period transfer prices the earlier days at the OLD
+    department's rate instead of silently re-rating the whole period. Without
+    a date (or without Frappe versioning for Department) the CURRENT rate is
+    used, same as before.
+    """
+    if frappe is None or not employee:
+        return 20000.0, "default"
+    try:
+        # Per-employee rate wins when set (> 0) — plan per-employee-salary.
+        try:
+            own = frappe.db.get_value("Employee", employee, "vn_hourly_rate")
+            if own and float(own) > 0:
+                return float(own), "employee"
+        except Exception:
+            pass
+        dept = None
+        if date:
+            # Employee department as of ``date``: scan the Version trail
+            # (track_changes) for the latest "department" change at/before it.
+            # Frappe v15 has no helper API for this — read the versions table
+            # directly; any failure falls back to the current department.
+            try:
+                from frappe.utils import getdate
+
+                as_of = getdate(date)
+                vers = frappe.db.get_all(
+                    "Version",
+                    filters={
+                        "ref_doctype": "Employee",
+                        "docname": employee,
+                        "creation": ["<=", f"{as_of} 23:59:59"],
+                    },
+                    fields=["data"],
+                    order_by="creation desc",
+                    limit_page_length=200,
+                )
+                import json as _json
+
+                for v in vers:
+                    try:
+                        data = _json.loads(v.data or "{}")
+                    except Exception:
+                        continue
+                    for ch in data.get("changed", []):
+                        # ch = [fieldname, old, new]
+                        if ch and ch[0] == "department":
+                            dept = ch[2] or ch[1] or None
+                            break
+                    if dept:
+                        break
+            except Exception:
+                dept = None
+        if not dept:
+            dept = frappe.db.get_value("Employee", employee, "department")
+        if dept:
+            rate = frappe.db.get_value("Department", dept, "vn_hourly_rate")
+            if rate and float(rate) > 0:
+                return float(rate), "department"
+        # Fallback to portal default.
+        default = frappe.db.get_single_value("VN HR Portal Setting", "vn_default_hourly_rate")
+        return float(default or 20000), "default"
+    except Exception:
+        return 20000.0, "default"
+
+
+def resolve_payroll_setting(employee: str, date=None) -> dict:
+    """Per-employee payroll setting (plan per-employee-salary §4.2).
+
+    ``{mode, hourly_rate, rate_source, monthly_base}`` — ``mode`` from
+    ``Employee.vn_payroll_mode`` (blank/invalid → ``Hourly``),
+    ``monthly_base`` from the active Salary Structure Assignment via
+    :func:`resolve_base_salary` (``0.0`` when none — callers treat ≤0 as
+    "missing base" for the Monthly pre-flight).
+    """
+    mode = "Hourly"
+    if frappe is not None and employee:
+        try:
+            m = (frappe.db.get_value("Employee", employee, "vn_payroll_mode") or "").strip()
+            if m in ("Hourly", "Monthly"):
+                mode = m
+        except Exception:
+            pass
+    rate, source = resolve_hourly_rate_detail(employee, date)
+    return {
+        "mode": mode,
+        "hourly_rate": rate,
+        "rate_source": source,
+        "monthly_base": resolve_base_salary(employee, date),
+    }
+
+
+def load_time_brackets() -> list[dict]:
+    """Parse time-bracket config from ``VN HR Portal Setting.vn_time_brackets``.
+
+    Returns ``[{from, to, coeff}, ...]`` (from/to = hour-of-day 0–24).
+    """
+    if frappe is None:
+        return [
+            {"from": 8, "to": 16, "coeff": 1.0},
+            {"from": 16, "to": 24, "coeff": 1.2},
+            {"from": 0, "to": 8, "coeff": 1.5},
+        ]
+    try:
+        import json
+
+        raw = frappe.db.get_single_value("VN HR Portal Setting", "vn_time_brackets")
+        if raw:
+            return json.loads(raw)
+    except Exception:
+        pass
+    return [
+        {"from": 8, "to": 16, "coeff": 1.0},
+        {"from": 16, "to": 24, "coeff": 1.2},
+        {"from": 0, "to": 8, "coeff": 1.5},
+    ]
+
+
+def load_deduction_rates() -> dict[str, float]:
+    """BHXH/BHYT/BHTN/TNCN rates (percent) from VN HR Portal Setting."""
+    if frappe is None:
+        return {"BHXH": 8.0, "BHYT": 1.5, "BHTN": 1.0, "TNCN": 10.0}
+    defaults = {"BHXH": 8.0, "BHYT": 1.5, "BHTN": 1.0, "TNCN": 10.0}
+    if frappe is None:
+        return dict(defaults)
+
+    def _rate(field: str) -> float:
+        # M7: ``or`` swallowed a legitimate 0 (e.g. TNCN=0 for an employee
+        # under the tax threshold) and re-applied the default rate.
+        val = frappe.db.get_single_value("VN HR Portal Setting", field)
+        return float(val) if val is not None and val != "" else defaults[field.split("_")[-1]]
+
+    try:
+        return {k: _rate(f"vn_ded_{k.lower()}") for k in defaults}
+    except Exception:
+        return dict(defaults)
+
+
+def load_penalty_rules(company: str | None = None) -> list[dict]:
+    """Penalty rules of the company's active ``VN Attendance Policy``.
+
+    C2 fix: ``VN Attendance Penalty Rule`` is a CHILD table — it has no
+    ``company``/``is_active`` columns, so the old direct filter crashed with
+    "unknown column" (silently caught → []). Late penalties were ALWAYS zero.
+    Query through the parent policy instead (active + matching company).
+    """
+    if frappe is None:
+        return []
+    try:
+        pf = {"is_active": 1}
+        if company:
+            pf["company"] = company
+        policy = frappe.db.get_value("VN Attendance Policy", pf, "name")
+        if not policy:
+            return []
+        rows = frappe.db.get_all(
+            "VN Attendance Penalty Rule",
+            filters={"parent": policy, "parenttype": "VN Attendance Policy"},
+            fields=["from_minutes", "to_minutes", "penalty_type", "penalty_value"],
+            order_by="from_minutes asc",
+        )
+        return rows or []
+    except Exception:
+        return []
+
+
+def load_checkout_miss_penalty(employee: str, start_date, end_date) -> float:
+    """Sum ``penalty_amount`` of Penalised, non-waived VN Checkout Miss tickets
+    for ``employee`` within ``[start_date, end_date]``.
+
+    Only ``Penalised`` tickets with ``penalty_waived=0`` count — waived ones and
+    pending/explained ones are excluded. Returns ``0.0`` outside a bench / error.
+    """
+    if frappe is None:
+        return 0.0
+    try:
+        rows = frappe.db.get_all(
+            "VN Checkout Miss",
+            filters={
+                "employee": employee,
+                "status": "Penalised",
+                "penalty_waived": 0,
+                "docstatus": ["<", 2],
+                "work_date": ["between", [start_date, end_date]],
+            },
+            fields=["penalty_amount"],
+        )
+        return float(sum(float((r or {}).get("penalty_amount") or 0) for r in (rows or [])))
+    except Exception:
+        return 0.0
+
+
+def split_hours_by_bracket(start_dt, end_dt, brackets: list[dict]) -> dict[float, float]:
+    """Split a datetime range into ``{coefficient: hours}`` per time bracket.
+
+    ``brackets`` = ``[{"from": 8, "to": 16, "coeff": 1.0}, ...]`` where from/to
+    are hours-of-day (0–24). Iterates hour-by-hour; the last partial hour is
+    counted fractionally. Overnight sessions (crossing midnight) are handled by
+    matching the hour-of-day to the correct bracket.
+
+    Returns ``{1.0: 120.0, 1.2: 30.5, 1.5: 8.0}`` (coeff → hours).
+    """
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    VN = ZoneInfo("Asia/Ho_Chi_Minh")
+    # Brackets are defined in PORTAL hours (VN). Callers historically passed
+    # UTC datetimes, so every hour-of-day was shifted -7h: a day shift scored
+    # the night coefficient (+37.5% gross) and a night shift lost ~30%.
+    # Normalise to portal time before splitting.
+    if getattr(start_dt, "tzinfo", None) is not None:
+        start_dt = start_dt.astimezone(VN)
+    if getattr(end_dt, "tzinfo", None) is not None:
+        end_dt = end_dt.astimezone(VN)
+
+    if start_dt >= end_dt:
+        return {}
+
+    result: dict[float, float] = {}
+    cur = start_dt
+    while cur < end_dt:
+        hod = cur.hour + cur.minute / 60.0 + cur.second / 3600.0  # hour-of-day
+        coeff = 1.0  # fallback
+        for b in brackets:
+            bf, bt = float(b["from"]), float(b["to"])
+            if bf < bt:  # same-day bracket (08–16)
+                if bf <= hod < bt:
+                    coeff = float(b["coeff"])
+                    break
+            else:  # overnight bracket (22–06) — wraps midnight
+                if hod >= bf or hod < bt:
+                    coeff = float(b["coeff"])
+                    break
+        nxt = min(cur + timedelta(hours=1), end_dt)
+        actual = (nxt - cur).total_seconds() / 3600.0
+        result[coeff] = result.get(coeff, 0.0) + actual
+        cur = nxt
+    return result
+
+
+def _wall_dt(value):
+    """Naive PORTAL-WALL datetime from a Work Session datetime/string (or None)."""
+    from datetime import datetime
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("T", " ")[:19])
+    except ValueError:
+        return None
+
+
+def bracket_hours_from_sessions(sessions: list[dict], brackets: list[dict]) -> dict[float, float]:
+    """Hourly payroll ``{coeff: hours}`` from the period's Work Sessions — pure.
+
+    The Work-Session engine is the single source of truth
+    (plans/plan-cach-tinh-cong-theo-ca.md, PR2) — no more re-pairing raw
+    Employee Checkin rows (that path paid unapproved OT, pre-shift arrivals and
+    the neighbouring days of the widened query window):
+
+    * regular: ``payable_regular_hours`` (in-shift hours + late minutes forgiven
+      by the grace window), laid out as the window ending at
+      ``min(actual_checkout, planned_end)``;
+    * OT: ``approved_overtime_hours`` only, laid out from ``planned_end``;
+    * ``need_review`` / ``absent`` rows pay nothing (same rule as
+      :func:`summarize_work_sessions` PR5/PR8) until HR resolves them.
+    """
+    from datetime import timedelta
+
+    out: dict[float, float] = {}
+
+    def _add(split: dict) -> None:
+        for coeff, hours in split.items():
+            out[coeff] = out.get(coeff, 0.0) + hours
+
+    for ws in sessions or []:
+        if _ws_get(ws, "need_review") >= 1 or _ws_get(ws, "absent") >= 1:
+            continue
+        pe = _wall_dt(ws.get("planned_end"))
+        cout = _wall_dt(ws.get("actual_checkout"))
+        payable = _ws_get(ws, "payable_regular_hours")
+        if payable > 0 and pe is not None and cout is not None and ws.get("actual_checkin"):
+            reg_end = min(cout, pe)
+            _add(split_hours_by_bracket(reg_end - timedelta(hours=payable), reg_end, brackets))
+        ot = _ws_get(ws, "approved_overtime_hours")
+        if ot > 0 and pe is not None:
+            _add(split_hours_by_bracket(pe, pe + timedelta(hours=ot), brackets))
+    return out
+
+
+def compute_hourly_line(
+    bracket_hours: dict[float, float],
+    hourly_rate: float,
+    deduction_rates: dict[str, float],
+    late_penalty: float = 0.0,
+    checkout_miss_penalty: float = 0.0,
+    salary_advance_deduction: float = 0.0,
+    allowances: list[float] | None = None,
+    extra_deductions: list[float] | None = None,
+) -> dict:
+    """Full payroll breakdown from the hourly-rate × time-bracket model.
+
+    ``bracket_hours`` = ``{coeff: hours}`` (from :func:`split_hours_by_bracket`).
+    ``deduction_rates`` = ``{"BHXH": 8.0, ...}`` (percent of gross).
+    ``allowances`` = ``[500000, 200000]`` (fixed amounts from Salary Structure
+    earnings — e.g. lunch, transport — added to the hourly gross).
+    ``extra_deductions`` = ``[100000]`` (fixed amounts from Salary Structure
+    deductions — e.g. union fee — subtracted after the % deductions).
+
+    Returns a dict compatible with the existing VN Payroll Review Line shape.
+    """
+    # 1. Base gross from hourly × hours × coefficient
+    base_gross = sum(hours * hourly_rate * coeff for coeff, hours in bracket_hours.items())
+
+    # 2. Allowances (fixed amounts from Salary Structure earnings)
+    total_allowances = sum(allowances or [])
+
+    # 3. Total gross = hourly gross + allowances
+    gross = base_gross + total_allowances
+
+    # 4. Standard deductions (% of gross)
+    total_pct = sum(deduction_rates.values()) / 100.0
+    standard_deductions = gross * total_pct
+
+    # 5. Extra deductions (fixed amounts from Salary Structure deductions)
+    total_extra_ded = sum(extra_deductions or [])
+
+    # 6. Net = gross - standard_deductions - extra_ded - penalties - advance
+    net = (
+        gross
+        - standard_deductions
+        - total_extra_ded
+        - late_penalty
+        - checkout_miss_penalty
+        - salary_advance_deduction
+    )
+
+    worked_hours = sum(bracket_hours.values())
+    return {
+        "base_salary": round2(hourly_rate),
+        "gross_pay": round2(gross),
+        # E2E bug 2026-08-20: the advance was subtracted from net/deduction
+        # totals but the ``salary_advance_deduction`` KEY was missing from the
+        # return shape — the review line / payslip field stayed 0 while the
+        # money WAS deducted (invisible deduction). Mirror compute_line.
+        "salary_advance_deduction": round2(salary_advance_deduction),
+        "total_deduction": round2(
+            standard_deductions
+            + total_extra_ded
+            + late_penalty
+            + checkout_miss_penalty
+            + salary_advance_deduction
+        ),
+        "net_pay": round2(net),
+        "hourly_rate": round2(hourly_rate),
+        "worked_hours": round2(worked_hours),
+        "bracket_hours_1": round2(bracket_hours.get(1.0, 0)),
+        "bracket_hours_1_2": round2(bracket_hours.get(1.2, 0)),
+        "bracket_hours_1_5": round2(bracket_hours.get(1.5, 0)),
+        "late_penalty": round2(late_penalty),
+        "checkout_miss_penalty": round2(checkout_miss_penalty),
+        "allowance_amount": round2(total_allowances),
+    }
+
+
+def compute_late_penalty(
+    late_minutes_list: list[float],
+    penalty_rules: list[dict],
+    daily_rate: float = 0.0,
+) -> float:
+    """Total late-occurrence penalty for an employee.
+
+    For each entry in ``late_minutes_list`` (minutes late per occurrence), find
+    the first matching ``VN Attendance Penalty Rule`` bracket and apply its amount.
+
+    M4 fix: ``Percentage`` used to add the raw number (5 → 5 VND) and
+    ``Half Day``/``Full Day`` silently contributed nothing. Percentage now
+    applies to the daily rate; half/full day deduct half/one daily rate.
+    """
+    total = 0.0
+    for late_min in late_minutes_list:
+        for rule in penalty_rules:
+            from_m = float(rule.get("from_minutes") or 0)
+            to_m = float(rule.get("to_minutes") or 9999)
+            if from_m <= late_min <= to_m:
+                ptype = rule.get("penalty_type", "Fixed Amount")
+                pval = float(rule.get("penalty_value") or 0)
+                if ptype == "Fixed Amount":
+                    total += pval
+                elif ptype == "Per Minute":
+                    total += late_min * pval
+                elif ptype == "Percentage":
+                    total += daily_rate * pval / 100.0
+                elif ptype == "Half Day":
+                    total += daily_rate / 2.0
+                elif ptype == "Full Day":
+                    total += daily_rate
+                break
+    return round2(total)
+
+
+# --------------------------------------------------------------------------- #
+# WP2 — bench loaders for the REAL-hours summary
+# --------------------------------------------------------------------------- #
+def _employee_hours_per_day(employee: str) -> float:
+    """Hours-per-day from the employee's active Shift Type (default 8).
+
+    Reads the custom ``vn_hours_per_day`` on the Shift Type of the employee's
+    active Shift Assignment when present; falls back to 8 (labour norm).
+    """
+    if frappe is None:
+        return 8.0
+    try:
+        st_name = frappe.db.get_value(
+            "Shift Assignment",
+            {
+                "employee": employee,
+                "docstatus": 1,
+                "status": "Active",
+                "start_date": ["<=", frappe.utils.today()],
+            },
+            "shift_type",
+        )
+        if st_name:
+            hpd = frappe.db.get_value("Shift Type", st_name, "vn_hours_per_day")
+            if hpd:
+                return max(float(hpd), 0.0001)
+    except Exception:
+        pass
+    return 8.0
+
+
+def load_employee_period_summary(employee: str, from_date, to_date) -> dict:
+    """WP2 (F-LC13) — REAL-hours summary of one employee's period.
+
+    Combines:
+
+    * the employee's VN Attendance Work Session rows in the window (the WS
+      engine's own numbers — payable/OT/late all come from there), and
+    * approved non-LWP leave days that have NO worked session that date
+      (each adds 1 payable day — PR2),
+
+    into :func:`summarize_work_sessions`. Guarded end-to-end so a missing
+    table outside a bench yields a neutral (zeroed) summary instead of an
+    exception.
+    """
+    if frappe is None:
+        return summarize_work_sessions([])
+    try:
+        rows = (
+            frappe.db.get_all(
+                "VN Attendance Work Session",
+                filters={
+                    "employee": employee,
+                    "docstatus": ["<", 2],
+                    "work_date": ["between", [from_date, to_date]],
+                },
+                fields=[
+                    "work_date",
+                    "regular_hours",
+                    "payable_day",
+                    "approved_overtime_hours",
+                    "need_review",
+                    "absent",
+                    "has_leave",
+                ],
+            )
+            or []
+        )
+    except Exception:
+        rows = []
+
+    worked_dates = {str(r.get("work_date")) for r in rows if _num(r.get("regular_hours")) > 0}
+
+    # Approved, non-LWP leave days inside the window with no worked session.
+    extra_leave_days = 0.0
+    try:
+        from datetime import date as _d, timedelta as _td
+
+        d0 = _d.fromisoformat(str(from_date)[:10])
+        d1 = _d.fromisoformat(str(to_date)[:10])
+        las = (
+            frappe.db.get_all(
+                "Leave Application",
+                filters={
+                    "employee": employee,
+                    "docstatus": 1,
+                    "from_date": ["<=", to_date],
+                    "to_date": [">=", from_date],
+                },
+                fields=["from_date", "to_date", "leave_type"],
+            )
+            or []
+        )
+        lwp_types = set(frappe.get_all("Leave Type", filters={"is_lwp": 1}, pluck="name") or [])
+        leave_dates: set[str] = set()
+        for la in las:
+            if (la.get("leave_type") or "") in lwp_types:
+                continue
+            lf = _d.fromisoformat(str(la["from_date"])[:10])
+            lt = _d.fromisoformat(str(la["to_date"])[:10])
+            day = max(lf, d0)
+            while day <= min(lt, d1):
+                leave_dates.add(day.isoformat())
+                day += _td(days=1)
+        extra_leave_days = float(len(leave_dates - worked_dates))
+    except Exception:
+        extra_leave_days = 0.0
+
+    return summarize_work_sessions(
+        rows,
+        hours_per_day=_employee_hours_per_day(employee),
+        extra_leave_days=extra_leave_days,
+    )
+
+
+def pending_checkout_miss_tickets(company: str | None, from_date, to_date) -> int:
+    """WP2 (PR6) — Pending checkout-miss tickets blocking payroll calculation.
+
+    A Pending ticket means the checkout-miss outcome (penalise / waive) is not
+    final; calculating pay on top of it risks a wrong penalty. The API layer
+    BLOCKS calculation while any ticket is still pending.
+    """
+    if frappe is None:
+        return 0
+    try:
+        filters = {
+            "status": "Pending",
+            "work_date": ["between", [from_date, to_date]],
+        }
+        if company:
+            filters["company"] = company
+        return int(frappe.db.count("VN Checkout Miss", filters) or 0)
+    except Exception:
+        return 0
+
+
+# Lock states of VN Ack (2026-08 ack/pay plan): once an employee has CONFIRMED
+# a payslip (or it has been paid), the whole period is frozen for recalc.
+VN_ACK_LOCK_STATES = ("Awaiting Payment", "Paid")
+
+
+def period_has_adjustment_requests(period_name: str) -> int:
+    """Count ``Requested`` (adjustment) slips of the period.
+
+    The adjustment loop (plans/payslip-ack-qr-payment-plan.md): when an
+    employee flags a published payslip as wrong, HR must be able to REOPEN
+    the terminal ``Published`` period — recalculate → approve → regenerate →
+    republish. ``Requested`` alone (no confirmed lock) is exactly the signal
+    that reopening is legitimate. Bench-free safe.
+    """
+    if frappe is None or not period_name:
+        return 0
+    try:
+        return int(
+            frappe.db.count(
+                "Salary Slip",
+                {"vn_payroll_review_period": period_name, "vn_ack_status": "Requested"},
+            )
+            or 0
+        )
+    except Exception:
+        return 0
+
+
+def period_ack_progress(period_name: str) -> dict:
+    """Ack progress of a period's visible slips for the Review badge.
+
+    Returns ``{"total": N, "confirmed": N, "requested": N}`` (visible slips
+    only — withheld employees are excluded). ``confirmed == total > 0`` is the
+    auto-lock condition (plan v2 §6.4). Bench-free safe."""
+    if frappe is None or not period_name:
+        return {"total": 0, "confirmed": 0, "requested": 0}
+    try:
+        rows = frappe.db.get_all(
+            "Salary Slip",
+            filters={"vn_payroll_review_period": period_name, "docstatus": ["<", 2]},
+            fields=["vn_employee_visible", "vn_ack_status"],
+        )
+    except Exception:
+        return {"total": 0, "confirmed": 0, "requested": 0}
+    visible = [r for r in rows if int(r.get("vn_employee_visible") or 0) == 1]
+    confirmed = sum(1 for r in visible if (r.get("vn_ack_status") or "") in ("Awaiting Payment", "Paid"))
+    requested = sum(1 for r in visible if (r.get("vn_ack_status") or "") == "Requested")
+    return {"total": len(visible), "confirmed": confirmed, "requested": requested}
+
+
+def period_has_confirmed_slips(period_name: str) -> int:
+    """Count slips of the period locked by an employee confirmation.
+
+    Business rule (2026-08, user decision #2): a single confirmed/paid slip
+    freezes the ENTIRE period — calculate/approve/generate/publish must all
+    refuse so the amounts the employee acknowledged can never change. Slips
+    in the ``Requested`` (adjustment) state do NOT lock: that is exactly the
+    loop where HR fixes the line, recalculates and republishes.
+    Bench-free safe.
+    """
+    if frappe is None or not period_name:
+        return 0
+    try:
+        return int(
+            frappe.db.count(
+                "Salary Slip",
+                {
+                    "vn_payroll_review_period": period_name,
+                    "vn_ack_status": ["in", VN_ACK_LOCK_STATES],
+                },
+            )
+            or 0
+        )
+    except Exception:
+        return 0
+
+
+def pending_advance_requests(company: str | None, from_date, to_date) -> int:
+    """Approved-not-yet-Paid salary advance requests blocking payroll calc.
+
+    Business rule (2026-08): an advance requested within period P (e.g.
+    01/07–31/07) is deducted from period P's salary — disbursed the next
+    month. The deduction only materialises once the request reaches ``Paid``;
+    calculating the period while a request is still ``Approved`` would
+    silently drop its deduction (the next period's window no longer contains
+    the posting_date). The API layer therefore BLOCKS calculation until every
+    in-window request is Paid / Rejected / Cancelled. Bench-free safe.
+    """
+    if frappe is None:
+        return 0
+    try:
+        filters = {
+            "workflow_state": "Approved",
+            "posting_date": ["between", [from_date, to_date]],
+            "docstatus": ["<", 2],
+        }
+        if company:
+            filters["company"] = company
+        return int(frappe.db.count("VN Salary Advance Request", filters) or 0)
+    except Exception:
+        return 0

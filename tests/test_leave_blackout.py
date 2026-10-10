@@ -291,3 +291,80 @@ def test_decision_fields_matched_non_dict_ignored():
     out = bk.blackout_decision_fields(decision)
     # Non-dict entries ignored; the valid Block dict is the source of the action.
     assert out == {"vn_requires_blackout_approval": 1, "vn_blackout_decision": "Block"}
+
+
+# --------------------------------------------------------------------------- #
+# overlapping_rules — overlap guard (plan blackout desk-free §B7, BC1–BC4)
+# --------------------------------------------------------------------------- #
+def _rule(**overrides):
+    rule = {
+        "name": "BLK-1",
+        "blackout_name": "Tết",
+        "company": "Gege Demo",
+        "branch": "",
+        "department": "",
+        "from_date": "2026-06-01",
+        "to_date": "2026-06-30",
+        "applies_to_leave_type": "",
+        "is_active": True,
+        "action": "Block",
+        "reason": "cao điểm",
+        "modified": "2026-06-01",
+        "owner": "hr@test.local",
+        "modified_by": "hr@test.local",
+    }
+    rule.update(overrides)
+    return rule
+
+
+def test_bc1_generic_rule_covers_branch_request():
+    rules = [_rule(branch="")]  # generic scope
+    out = bk.overlapping_rules(rules, from_date="2026-06-10", to_date="2026-06-15", branch="HNI")
+    assert [r["blackout_name"] for r in out] == ["Tết"]
+
+
+def test_bc2_leave_type_mismatch_does_not_overlap():
+    rules = [_rule(applies_to_leave_type="Sick Leave")]
+    kwargs = {"from_date": "2026-06-10", "to_date": "2026-06-15"}
+    assert bk.overlapping_rules(rules, leave_type="Casual Leave", **kwargs) == []
+    assert [r["name"] for r in bk.overlapping_rules(rules, leave_type="Sick Leave", **kwargs)] == ["BLK-1"]
+
+
+def test_bc3_exclude_drops_the_rule_being_edited():
+    rules = [_rule(name="BLK-1"), _rule(name="BLK-2", blackout_name="Hè")]
+    out = bk.overlapping_rules(
+        rules,
+        from_date="2026-06-10",
+        to_date="2026-06-15",
+        exclude="BLK-1",
+    )
+    assert [r["name"] for r in out] == ["BLK-2"]
+
+
+def test_bc4_disjoint_window_returns_empty():
+    rules = [_rule(from_date="2026-01-01", to_date="2026-01-31")]
+    assert bk.overlapping_rules(rules, from_date="2026-06-10", to_date="2026-06-15") == []
+
+
+def test_bc4b_inactive_rules_never_overlap():
+    rules = [_rule(is_active=False)]
+    assert bk.overlapping_rules(rules, from_date="2026-06-10", to_date="2026-06-15") == []
+
+
+# --------------------------------------------------------------------------- #
+# build_blackout_csv — Excel-safe export serialiser (§B6)
+# --------------------------------------------------------------------------- #
+def test_build_blackout_csv_bom_header_and_row():
+    csv_text = bk.build_blackout_csv([_rule()])
+    assert csv_text.startswith("\ufeff")  # UTF-8 BOM — Excel-safe Vietnamese
+    assert csv_text.lstrip("\ufeff").splitlines()[0].startswith("Tên kỳ cấm")
+    assert "Tết" in csv_text
+    assert "Gege Demo" in csv_text
+
+
+def test_build_blackout_csv_empty_and_garbage_rows():
+    empty = bk.build_blackout_csv([])
+    assert empty.startswith("\ufeff")
+    assert len(empty.strip("\ufeff").splitlines()) == 1  # header only
+    # non-dict entries are skipped, not crashing
+    assert "Tên kỳ cấm" in bk.build_blackout_csv(["junk", _rule()])

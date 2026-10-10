@@ -1,0 +1,28 @@
+{
+ "actions": [],
+ "autoname": "field:template_name",
+ "creation": "2026-08-08 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "info_break", "fieldtype": "Section Break", "label": "Info"},
+  {"fieldname": "template_name", "fieldtype": "Data", "in_list_view": 1, "label": "Template Name", "reqd": 1, "unique": 1},
+  {"fieldname": "company", "fieldtype": "Link", "in_list_view": 1, "label": "Company", "options": "Company"},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"default": "1", "fieldname": "is_active", "fieldtype": "Check", "in_list_view": 1, "label": "Is Active"},
+  {"fieldname": "tasks_break", "fieldtype": "Section Break", "label": "Tasks"},
+  {"fieldname": "tasks", "fieldtype": "Table", "label": "Tasks", "options": "VN Onboarding Task", "reqd": 1}
+ ],
+ "links": [],
+ "module": "gege_hr",
+ "name": "VN Onboarding Template",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"read": 1, "role": "HR User"}
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "title_field": "template_name",
+ "track_changes": 1
+}

@@ -1,0 +1,28 @@
+{
+ "actions": [],
+ "creation": "2026-08-10 05:49:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "adjustment_type", "fieldtype": "Select", "in_list_view": 1, "label": "Loại", "options": "Bonus\nPenalty\nDeduction\nOther", "reqd": 1},
+  {"fieldname": "description", "fieldtype": "Data", "in_list_view": 1, "label": "Nội dung", "reqd": 1},
+  {"fieldname": "amount", "fieldtype": "Currency", "in_list_view": 1, "label": "Số tiền", "options": "Company:company:default_currency", "reqd": 1},
+  {"fieldname": "signed_amount", "fieldtype": "Currency", "in_list_view": 1, "label": "Số tiền (có dấu)", "options": "Company:company:default_currency", "read_only": 1},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "added_by", "fieldtype": "Link", "label": "Người thêm", "options": "User", "read_only": 1},
+  {"fieldname": "added_on", "fieldtype": "Datetime", "label": "Thời điểm", "read_only": 1},
+  {"fieldname": "note", "fieldtype": "Small Text", "label": "Ghi chú"}
+ ],
+ "istable": 1,
+ "module": "gege_hr",
+ "name": "VN Payroll Adjustment",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"create": 1, "delete": 1, "read": 1, "role": "Payroll Manager", "write": 1},
+  {"read": 1, "role": "HR User"}
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 0
+}

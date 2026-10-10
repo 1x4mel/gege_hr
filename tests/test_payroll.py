@@ -126,7 +126,60 @@ def test_compute_line_salary_advance_deduction():
     line = P.compute_line(agg, base_salary=10_000_000, config=cfg)
     assert line["salary_advance_deduction"] == 2_000_000
     assert line["total_deduction"] == 2_000_000
-    assert line["net_pay"] == 8_000_000
+
+
+def test_compute_hourly_line_exposes_advance_deduction_key():
+    """E2E bug 2026-08-20 — compute_hourly_line subtracted the advance from
+    net/total_deduction but never RETURNED the key, so the review-line /
+    payslip field stayed 0 while the money was deducted (invisible advance)."""
+    line = P.compute_hourly_line(
+        bracket_hours={1.0: 208.0},
+        hourly_rate=50_000,
+        deduction_rates={},
+        late_penalty=100_000,
+        checkout_miss_penalty=0,
+        salary_advance_deduction=2_000_000,
+    )
+    assert line["salary_advance_deduction"] == 2_000_000
+    assert line["total_deduction"] == 2_100_000
+    assert line["net_pay"] == line["gross_pay"] - 2_100_000  # 10.4M − 2.1M
+
+
+# --------------------------------------------------------------------------- #
+# Checkout-miss penalty (GĐ2 — folds into total_deduction / net_pay)
+# --------------------------------------------------------------------------- #
+def test_compute_line_checkout_miss_penalty_added_to_deduction():
+    # B9: config checkout_miss_penalty increases total_deduction + reduces net.
+    agg = P.aggregate_work_sessions([{"payable_day": 26.0, "regular_hours": 208.0}])
+    line_base = P.compute_line(agg, base_salary=10_000_000, config=P.default_config())
+    cfg = P.default_config()
+    cfg["checkout_miss_penalty"] = 50_000
+    line = P.compute_line(agg, base_salary=10_000_000, config=cfg)
+    assert line["checkout_miss_penalty"] == 50_000
+    assert line["total_deduction"] == line_base["total_deduction"] + 50_000
+    assert line["net_pay"] == line_base["net_pay"] - 50_000
+
+
+def test_compute_line_checkout_miss_penalty_default_zero():
+    # B10: absent config → 0, total_deduction unchanged.
+    agg = P.aggregate_work_sessions([{"payable_day": 26.0, "regular_hours": 208.0}])
+    line = P.compute_line(agg, base_salary=10_000_000)
+    assert line["checkout_miss_penalty"] == 0
+    assert line["total_deduction"] == 0
+
+
+def test_compute_hourly_line_checkout_miss_penalty():
+    # Active payroll path: penalty folded into total_deduction + net.
+    base = P.compute_hourly_line({1.0: 160.0}, hourly_rate=50_000, deduction_rates={"BHXH": 8})
+    out = P.compute_hourly_line(
+        {1.0: 160.0},
+        hourly_rate=50_000,
+        deduction_rates={"BHXH": 8},
+        checkout_miss_penalty=50_000,
+    )
+    assert out["checkout_miss_penalty"] == 50_000
+    assert out["total_deduction"] == base["total_deduction"] + 50_000
+    assert out["net_pay"] == base["net_pay"] - 50_000
 
 
 def test_compute_line_net_never_negative_clamped():
@@ -179,37 +232,49 @@ class _FakeDB:
 
     def get_all(self, doctype, filters=None, fields=None, order_by=None):
         rows = self._store.get(doctype, [])
-        out = []
-        for r in rows:
-            ok = True
-            for k, v in (filters or {}).items():
-                if isinstance(v, list):
-                    op, val = v[0], v[1]
-                    rv = r.get(k)
-                    if op == "in" and rv not in val:
-                        ok = False
-                else:
-                    if r.get(k) != v:
-                        ok = False
-                if not ok:
-                    break
-            if ok:
-                out.append({f: r.get(f) for f in (fields or r.keys())})
-        return out
+        out = [r for r in rows if self._matches(r, filters)]
+        return [{f: r.get(f) for f in (fields or r.keys())} for r in out]
+
+    def count(self, doctype, filters=None, **_kw):
+        return len(self.get_all(doctype, filters=filters))
+
+    @staticmethod
+    def _cmp(v):
+        """Comparable key: numeric when possible, else string (ISO dates sort)."""
+        try:
+            return (0, float(v))
+        except (TypeError, ValueError):
+            return (1, str(v))
 
     def _matches(self, r, filters):
         for k, v in (filters or {}).items():
             rv = r.get(k)
             if isinstance(v, list):
                 op, val = v[0], v[1]
+                if op == "between":
+                    lo, hi = val
+                    if not (self._cmp(lo) <= self._cmp(rv) <= self._cmp(hi)):
+                        return False
+                    continue
+                if op in ("<", "<=", ">", ">="):
+                    a, b = self._cmp(rv), self._cmp(val)
+                    if op == "<" and not a < b:
+                        return False
+                    if op == "<=" and not a <= b:
+                        return False
+                    if op == ">" and not a > b:
+                        return False
+                    if op == ">=" and not a >= b:
+                        return False
+                    continue
                 # Coerce to strings so dates (str vs date) compare cleanly.
                 sval = str(val) if not isinstance(val, str) else val
                 srv = str(rv) if rv is not None and not isinstance(rv, str) else rv
-                if op == "<=" and not (srv is not None and srv <= sval):
-                    return False
-                if op == ">=" and not (srv is not None and srv >= sval):
-                    return False
                 if op == "in" and rv not in val:
+                    return False
+                if op == "not in" and rv in val:
+                    return False
+                if op == "!=" and srv == sval:
                     return False
             else:
                 if rv != v:
@@ -367,9 +432,313 @@ def test_employee_advance_deductions(fake_frappe):
         P.frappe = None
 
 
+def test_employee_advance_deductions_period_boundaries(fake_frappe):
+    """TC-E3/E4/E5 — advance posted in period P is deducted from P only.
+
+    Requests on the window edges (01/07 and 31/07) hit the July period; a
+    request posted 01/08 belongs to August — July must NOT pick it up (no
+    re-deduction, and no leakage across periods).
+    """
+    fake_frappe.db.register(
+        "VN Salary Advance Request",
+        [
+            {
+                "employee": "EMP-1",
+                "approved_amount": 500_000,
+                "company": "C1",
+                "workflow_state": "Paid",
+                "posting_date": "2026-07-01",
+                "docstatus": 1,
+            },
+            {
+                "employee": "EMP-1",
+                "approved_amount": 700_000,
+                "company": "C1",
+                "workflow_state": "Paid",
+                "posting_date": "2026-07-31",
+                "docstatus": 1,
+            },
+            {
+                "employee": "EMP-2",
+                "approved_amount": 900_000,
+                "company": "C1",
+                "workflow_state": "Paid",
+                "posting_date": "2026-08-01",
+                "docstatus": 1,
+            },
+        ],
+    )
+    P.frappe = fake_frappe
+    try:
+        assert P.employee_advance_deductions("C1", ["EMP-1", "EMP-2"], "2026-07-01", "2026-07-31") == {
+            "EMP-1": 1_200_000
+        }
+        assert P.employee_advance_deductions("C1", ["EMP-1", "EMP-2"], "2026-08-01", "2026-08-31") == {
+            "EMP-2": 900_000
+        }
+    finally:
+        P.frappe = None
+
+
+def test_employee_advance_deductions_excludes_closed_states(fake_frappe):
+    """TC-E7 — only Approved/Paid in-window rows count; Rejected / Cancelled /
+    doc-cancelled (docstatus 2) never reach the payslip."""
+    fake_frappe.db.register(
+        "VN Salary Advance Request",
+        [
+            {
+                "employee": "EMP-1",
+                "approved_amount": 1_000_000,
+                "company": "C1",
+                "workflow_state": "Paid",
+                "posting_date": "2026-07-10",
+                "docstatus": 1,
+            },
+            {
+                "employee": "EMP-1",
+                "approved_amount": 300_000,
+                "company": "C1",
+                "workflow_state": "Rejected",
+                "posting_date": "2026-07-12",
+                "docstatus": 0,
+            },
+            {
+                "employee": "EMP-1",
+                "approved_amount": 250_000,
+                "company": "C1",
+                "workflow_state": "Cancelled",
+                "posting_date": "2026-07-14",
+                "docstatus": 2,
+            },
+            {
+                "employee": "EMP-2",
+                "approved_amount": 400_000,
+                "company": "C2",
+                "workflow_state": "Paid",
+                "posting_date": "2026-07-15",
+                "docstatus": 1,
+            },
+        ],
+    )
+    P.frappe = fake_frappe
+    try:
+        assert P.employee_advance_deductions("C1", ["EMP-1"], "2026-07-01", "2026-07-31") == {
+            "EMP-1": 1_000_000
+        }
+    finally:
+        P.frappe = None
+
+
+def test_pending_advance_requests_blocks_only_approved_in_window(fake_frappe):
+    """TC-G1/G2/G3 — payroll calc blocks on Approved requests in the period:
+    out-of-window, Paid and doc-cancelled rows never block; other companies
+    are not counted."""
+    fake_frappe.db.register(
+        "VN Salary Advance Request",
+        [
+            {
+                "company": "C1",
+                "workflow_state": "Approved",
+                "posting_date": "2026-07-05",
+                "docstatus": 0,
+            },
+            {
+                "company": "C1",
+                "workflow_state": "Approved",
+                "posting_date": "2026-06-20",
+                "docstatus": 0,
+            },
+            {
+                "company": "C1",
+                "workflow_state": "Paid",
+                "posting_date": "2026-07-10",
+                "docstatus": 1,
+            },
+            {
+                "company": "C1",
+                "workflow_state": "Approved",
+                "posting_date": "2026-07-15",
+                "docstatus": 2,
+            },
+            {
+                "company": "C2",
+                "workflow_state": "Approved",
+                "posting_date": "2026-07-15",
+                "docstatus": 0,
+            },
+        ],
+    )
+    P.frappe = fake_frappe
+    try:
+        assert P.pending_advance_requests("C1", "2026-07-01", "2026-07-31") == 1
+        assert P.pending_advance_requests("C1", "2026-08-01", "2026-08-31") == 0
+    finally:
+        P.frappe = None
+
+
+def test_period_has_adjustment_requests_reopen_signal(fake_frappe):
+    """L5 — Requested slips are the reopen signal for a Published period."""
+    fake_frappe.db.register(
+        "Salary Slip",
+        [
+            {"vn_payroll_review_period": "PRP-P", "vn_ack_status": "Requested"},
+            {"vn_payroll_review_period": "PRP-P", "vn_ack_status": "Requested"},
+            {"vn_payroll_review_period": "PRP-Q", "vn_ack_status": "Awaiting Payment"},
+            {"vn_payroll_review_period": "PRP-R", "vn_ack_status": ""},
+        ],
+    )
+    P.frappe = fake_frappe
+    try:
+        assert P.period_has_adjustment_requests("PRP-P") == 2
+        assert P.period_has_adjustment_requests("PRP-Q") == 0  # locks ≠ adjustment
+        assert P.period_has_adjustment_requests("PRP-R") == 0
+    finally:
+        P.frappe = None
+
+
+def test_period_ack_progress_counts_visible_only(fake_frappe):
+    """Plan v2 badge source: visible slips only; confirmed==total ⇒ auto-lock."""
+    fake_frappe.db.register(
+        "Salary Slip",
+        [
+            {
+                "vn_payroll_review_period": "PRP-B",
+                "vn_employee_visible": 1,
+                "vn_ack_status": "Awaiting Payment",
+                "docstatus": 0,
+            },
+            {
+                "vn_payroll_review_period": "PRP-B",
+                "vn_employee_visible": 1,
+                "vn_ack_status": "Paid",
+                "docstatus": 0,
+            },
+            {
+                "vn_payroll_review_period": "PRP-B",
+                "vn_employee_visible": 1,
+                "vn_ack_status": "",
+                "docstatus": 0,
+            },
+            {
+                "vn_payroll_review_period": "PRP-B",
+                "vn_employee_visible": 1,
+                "vn_ack_status": "Requested",
+                "docstatus": 0,
+            },
+            {
+                "vn_payroll_review_period": "PRP-B",
+                "vn_employee_visible": 0,
+                "vn_ack_status": "Paid",
+                "docstatus": 0,
+            },  # withheld → ignored
+        ],
+    )
+    P.frappe = fake_frappe
+    try:
+        out = P.period_ack_progress("PRP-B")
+        assert out == {"total": 4, "confirmed": 2, "requested": 1}
+    finally:
+        P.frappe = None
+
+
+def test_period_ack_progress_safe_without_frappe(monkeypatch):
+    monkeypatch.setattr(P, "frappe", None)
+    assert P.period_ack_progress("PRP-X") == {"total": 0, "confirmed": 0, "requested": 0}
+
+
+def test_period_has_confirmed_slips_lock_rule(fake_frappe):
+    """L1/L3 — decision #2: Awaiting Payment / Paid lock the period;
+    Requested / empty do NOT (that's the adjustment loop)."""
+    fake_frappe.db.register(
+        "Salary Slip",
+        [
+            {"vn_payroll_review_period": "PRP-1", "vn_ack_status": "Awaiting Payment"},
+            {"vn_payroll_review_period": "PRP-1", "vn_ack_status": ""},
+            {"vn_payroll_review_period": "PRP-1", "vn_ack_status": "Requested"},
+            {"vn_payroll_review_period": "PRP-2", "vn_ack_status": ""},
+            {"vn_payroll_review_period": "PRP-2", "vn_ack_status": "Paid"},
+        ],
+    )
+    P.frappe = fake_frappe
+    try:
+        assert P.period_has_confirmed_slips("PRP-1") == 1  # only Awaiting locks
+        assert P.period_has_confirmed_slips("PRP-2") == 1  # Paid locks
+        assert P.period_has_confirmed_slips("PRP-3") == 0  # unknown period
+    finally:
+        P.frappe = None
+
+
+def test_period_lock_safe_without_frappe(monkeypatch):
+    monkeypatch.setattr(P, "frappe", None)
+    assert P.period_has_confirmed_slips("PRP-1") == 0
+
+
+def test_pending_advance_requests_safe_without_frappe(monkeypatch):
+    monkeypatch.setattr(P, "frappe", None)
+    assert P.pending_advance_requests("C1", "2026-07-01", "2026-07-31") == 0
+
+
 def test_loaders_safe_without_frappe(monkeypatch):
     monkeypatch.setattr(P, "frappe", None)
     assert P.load_segment_multipliers("C1") == {}
     assert P.load_component_map("C1") == {}
     assert P.resolve_base_salary("EMP-1") == 0.0
     assert P.employee_advance_deductions("C1", ["EMP-1"], "2026-01-01", "2026-01-31") == {}
+    assert P.load_checkout_miss_penalty("EMP-1", "2026-01-01", "2026-01-31") == 0.0
+
+
+def test_load_checkout_miss_penalty_sums_penalised(fake_frappe):
+    fake_frappe.db.register(
+        "VN Checkout Miss",
+        [
+            {
+                "employee": "EMP-1",
+                "status": "Penalised",
+                "penalty_waived": 0,
+                "docstatus": 1,
+                "work_date": "2026-06-05",
+                "penalty_amount": 100_000,
+            },
+            {
+                "employee": "EMP-1",
+                "status": "Penalised",
+                "penalty_waived": 0,
+                "docstatus": 1,
+                "work_date": "2026-06-20",
+                "penalty_amount": 100_000,
+            },
+            # excluded: waived
+            {
+                "employee": "EMP-1",
+                "status": "Penalised",
+                "penalty_waived": 1,
+                "docstatus": 1,
+                "work_date": "2026-06-10",
+                "penalty_amount": 100_000,
+            },
+            # excluded: still Pending
+            {
+                "employee": "EMP-1",
+                "status": "Pending",
+                "penalty_waived": 0,
+                "docstatus": 1,
+                "work_date": "2026-06-12",
+                "penalty_amount": 100_000,
+            },
+            # excluded: other employee
+            {
+                "employee": "EMP-2",
+                "status": "Penalised",
+                "penalty_waived": 0,
+                "docstatus": 1,
+                "work_date": "2026-06-12",
+                "penalty_amount": 100_000,
+            },
+        ],
+    )
+    P.frappe = fake_frappe
+    try:
+        total = P.load_checkout_miss_penalty("EMP-1", "2026-06-01", "2026-06-30")
+        assert total == 200_000.0
+    finally:
+        P.frappe = None

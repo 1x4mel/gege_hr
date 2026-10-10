@@ -58,20 +58,54 @@ def _last_log_of_type(logs: Iterable[dict], log_type: str) -> datetime | None:
 
 
 def _as_dt(value: Any) -> datetime:
-    """Coerce a Frappe datetime string / datetime into a portal-aware datetime."""
+    """Coerce a raw datetime/string into a PORTAL-AWARE datetime.
+
+    PHASE-1 FRAME: naive values are ALREADY portal wall (the live DB storage
+    frame — this was the late=565' bug: +7-ing a wall value). Naive → attach
+    the portal tzinfo directly; aware → fold via ``to_portal``.
+    """
     if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=tz_utils.get_tzinfo())
         return tz_utils.to_portal(value)
     if not value:
         return None
-    # Frappe stores "YYYY-MM-DD HH:MM:SS" (UTC, naive). Normalize then convert.
     text = str(value).replace("T", " ")
     if text.endswith("Z"):
         text = text[:-1]
     try:
-        naive = datetime.fromisoformat(text)
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
-    return tz_utils.to_portal(naive)
+    if parsed.tzinfo is not None:  # true offset string → fold to portal
+        return tz_utils.to_portal(parsed)
+    return parsed.replace(tzinfo=tz_utils.get_tzinfo())
+
+
+def _db_dt(value) -> str | None:
+    """Convert an ISO-8601/ISO-Z/datetime value into a Frappe Datetime DB string.
+
+    ``calculate_work_session`` emits ``planned_start``/``actual_checkin`` etc. as
+    ``tz_utils.utc_iso(...)`` (e.g. ``2026-06-24T01:00:00Z``). MariaDB rejects the
+    ``T…Z`` form for ``Datetime`` columns ("Incorrect datetime value"), which
+    silently broke every ``VN Attendance Work Session`` insert. This normalises
+    the value to ``YYYY-MM-DD HH:MM:SS`` in UTC for safe persistence.
+    """
+    if value is None:
+        return None
+    # PHASE-1 FRAME: fold everything to naive PORTAL WALL (tz.wall) so WS rows
+    # persist in the same frame as Employee Checkin.time.
+    if isinstance(value, datetime):
+        return tz_utils.wall(value).strftime("%Y-%m-%d %H:%M:%S")
+    raw = str(value).strip()
+    if not raw:
+        return None
+    iso = raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw.replace("T", " ")
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return raw  # let the caller decide; better than dropping the value
+    return tz_utils.wall(dt).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _night_band(policy: dict) -> tuple[time, time]:
@@ -81,9 +115,25 @@ def _night_band(policy: dict) -> tuple[time, time]:
     def _parse(s):
         if hasattr(s, "strftime"):
             return s  # already a time
-        h, m, *rest = str(s).split(":")
-        sec = int(rest[0]) if rest else 0
-        return time(int(h), int(m), sec)
+        parts = str(s).split(":")
+        if len(parts) < 2:
+            return time(0, 0)
+
+        # Frappe/pymysql can hand back Time values with fractional seconds
+        # ("22:00:04.271516") or as timedelta strings — int() on "04.271516"
+        # raised ValueError and aborted the whole Work-Session calculation.
+        # Parse via float and clamp to a valid time so night-band detection
+        # degrades gracefully instead of crashing.
+        def _i(x):
+            try:
+                return int(float(x))
+            except (TypeError, ValueError):
+                return 0
+
+        h = min(23, max(0, _i(parts[0])))
+        m = min(59, max(0, _i(parts[1])))
+        sec = min(59, max(0, _i(parts[2]))) if len(parts) > 2 else 0
+        return time(h, m, sec)
 
     return _parse(ns), _parse(ne)
 
@@ -210,19 +260,70 @@ def match_overtime_request(actual_ot_windows: list[dict] | None, ot_requests: li
     return round(approved, 4)
 
 
+def match_overtime_request_detailed(
+    actual_ot_windows: list[dict] | None, ot_requests: list[dict] | None
+) -> dict:
+    """Per-request overlap (hours) of actual OT windows with approved OT requests.
+
+    Sibling of :func:`match_overtime_request` — same overlap math, but the result
+    is broken down per request ``name`` so the persistence layer can stamp
+    ``actual_hours`` / ``approved_hours`` back onto each ``VN Overtime Request``
+    (plan T3 / BUG-2). Requests without a ``name`` are aggregated under ``""``.
+
+    Contract: the summed values always equal :func:`match_overtime_request` over
+    the same inputs (TC-U-07) — this keeps the pure function testable in isolation.
+    """
+    # M1: two overlapping approved requests (A 20:00-22:00, B 21:00-23:00) over
+    # one 3h actual window used to yield 2h + 2h = 4h written back — HR saw 4h
+    # served for 3h worked. Walk the actual window minute-by-minute instead and
+    # credit each unit of served time to exactly ONE request (first covering
+    # request wins), so Σ per-request == actual served hours.
+    per_name: dict[str, float] = {}
+    STEP = 5.0 / 60.0  # 5-minute resolution — coarse enough to stay cheap
+    for win in actual_ot_windows or []:
+        ws = _as_dt(win.get("start"))
+        we = _as_dt(win.get("end"))
+        if not ws or not we:
+            continue
+        covered = [
+            (
+                _as_dt(req.get("from_datetime") or req.get("start")),
+                _as_dt(req.get("to_datetime") or req.get("end")),
+                req.get("name") or "",
+            )
+            for req in ot_requests or []
+        ]
+        covered = [(s, e, n) for s, e, n in covered if s and e]
+        span = (we - ws).total_seconds() / 3600.0
+        steps = max(1, int(round(span / STEP)))
+        for i in range(steps):
+            mid = ws.timestamp() + ((i + 0.5) / steps) * (we - ws).total_seconds()
+            import datetime as _dtm
+
+            point = _dtm.datetime.fromtimestamp(mid, tz=ws.tzinfo)
+            for s, e, n in covered:
+                if s <= point <= e:
+                    per_name[n] = per_name.get(n, 0.0) + span / steps
+                    break
+    return {k: round(v, 4) for k, v in per_name.items()}
+
+
 def round_overtime(hours: float, policy: dict) -> float:
     """Apply the Policy ``overtime_rounding_method`` (plan §9.4.1). Pure.
 
     Methods (see VN Attendance Policy): No Rounding / Nearest Nmin / Up to Nmin,
     where N comes from ``overtime_rounding_minutes`` (15/30).
     """
+    # M9 note: rounding below uses floor(x + 0.5) — half-UP. The old
+    # round() is banker's rounding (half-to-even): 7.5 steps → 0, 22.5 → 2.
     method = (policy.get("overtime_rounding_method") or "No Rounding").strip()
     minutes = int(_num(policy.get("overtime_rounding_minutes"), 15)) or 15
     if method == "No Rounding" or minutes <= 0:
         return round(_num(hours), 4)
     total_min = _num(hours) * 60.0
     if method.lower().startswith("nearest"):
-        total_min = round(total_min / minutes) * minutes
+        # half-UP (floor(x+0.5)) — see M9 note above
+        total_min = math.floor(total_min / minutes + 0.5) * minutes
     elif method.lower().startswith("up to"):
         total_min = math.ceil(total_min / minutes) * minutes
     return round(total_min / 60.0, 4)
@@ -291,25 +392,32 @@ def calculate_work_session(
 
     missing_checkin = actual_checkin is None
     missing_checkout = actual_checkout is None
-    need_review = missing_checkin or missing_checkout
+    # FINDING-P3 (E2E G2): an INVERTED pair (last OUT strictly BEFORE the
+    # first IN — the orphan-OUT self-heal shape) used to pass silently with
+    # 0h / huge early-leave and need_review=0. Flag it so HR sees the anomaly.
+    inverted_pair = bool(
+        actual_checkin is not None and actual_checkout is not None and actual_checkout < actual_checkin
+    )
+    need_review = missing_checkin or missing_checkout or inverted_pair
 
     # If either end is missing, fall back to a zero-length window so downstream
     # math stays numerically safe (paid 0, no OT, no negative hours).
     safe_in = actual_checkin or planned_start
     safe_out = actual_checkout or planned_start
 
-    # --- 3. late_minutes (minus grace) -------------------------------------
+    # --- 3. late_minutes (only when the employee checked in) ----------------
     grace_late = int(_num(policy.get("grace_late_minutes"), 5))
-    late_minutes = max(
-        0.0,
-        tz_utils.minutes_between(planned_start, safe_in) - grace_late,
+    late_minutes = (
+        max(0.0, tz_utils.minutes_between(planned_start, safe_in) - grace_late) if actual_checkin else 0.0
     )
 
-    # --- 4. early_leave_minutes (minus grace) ------------------------------
+    # --- 4. early_leave_minutes (only when the employee checked out) --------
+    # When there's no checkout, early_leave MUST be 0 — otherwise safe_out
+    # falls back to planned_start, giving minutes_between(planned_start,
+    # planned_end) = full shift = 720' for a 12h shift → wrongly "Về sớm".
     grace_early = int(_num(policy.get("grace_early_leave_minutes"), 0))
-    early_leave_minutes = max(
-        0.0,
-        tz_utils.minutes_between(safe_out, planned_end) - grace_early,
+    early_leave_minutes = (
+        max(0.0, tz_utils.minutes_between(safe_out, planned_end) - grace_early) if actual_checkout else 0.0
     )
 
     # --- 5. Total actual hours ---------------------------------------------
@@ -379,6 +487,11 @@ def calculate_work_session(
         approved_hours = payable_raw_ot
     approved_overtime_hours = round_overtime(approved_hours, policy)
 
+    # Per-request OT breakdown for write-back to the VN Overtime Request rows
+    # (actual_hours / approved_hours — plan T3 / BUG-2). Uncapped overlap per
+    # request; the aggregate cap/rounding above still governs the WS total.
+    ot_request_breakdown = match_overtime_request_detailed(actual_ot_windows, ot_requests)
+
     # --- 11. Threshold checks → need_review --------------------------------
     max_total = _num(shift_instance.get("vn_max_total_work_hours"), 20.0)
     max_ot = _num(shift_instance.get("vn_max_overtime_hours"), 4.0)
@@ -417,6 +530,7 @@ def calculate_work_session(
         # Flags
         "missing_checkin": int(missing_checkin),
         "missing_checkout": int(missing_checkout),
+        "inverted_pair": int(inverted_pair),
         "absent": 0,
         "need_review": int(bool(need_review)),
         # Audit
@@ -428,13 +542,28 @@ def calculate_work_session(
     result["_planned_end"] = planned_end
     result["_actual_checkin"] = actual_checkin
     result["_actual_checkout"] = actual_checkout
+    # Per-request OT breakdown consumed by persist_work_session write-back (T3).
+    result["_ot_request_breakdown"] = ot_request_breakdown
     result["_policy"] = policy
     result["_shift_instance"] = shift_instance
     result["_actual_ot_windows"] = actual_ot_windows
     result["_require_overtime_approval"] = require_approval
 
-    # --- 12. Payable day ---------------------------------------------------
-    result["payable_regular_hours"] = round(regular_hours, 4)
+    # --- 12. Payable hours + payable day ----------------------------------
+    # Ân hạn đi trễ KHÔNG bị trừ (owner 2026-10-08): phút trễ nằm trong ân hạn
+    # được cộng lại vào giờ tính lương — trễ 3' (ân hạn 5') trả đủ, trễ 12'
+    # chỉ trừ phần vượt 7'. Chỉ áp dụng khi có đủ cặp IN/OUT hợp lệ (thiếu OUT
+    # → giờ trong ca = 0, không "tặng" phút ân hạn). Về sớm không có ân hạn.
+    grace_credit_minutes = 0.0
+    if actual_checkin and actual_checkout and not inverted_pair and actual_within_shift_hours > 0:
+        raw_late = max(0.0, tz_utils.minutes_between(planned_start, actual_checkin))
+        grace_credit_minutes = min(raw_late, float(grace_late))
+    payable_regular_hours = min(
+        scheduled_regular_hours,
+        regular_hours + grace_credit_minutes / 60.0,
+    )
+    result["grace_credit_minutes"] = int(round(grace_credit_minutes))
+    result["payable_regular_hours"] = round(payable_regular_hours, 4)
     result["payable_day"] = calculate_payable_day(result, policy, leave_info)
 
     return result
@@ -503,8 +632,13 @@ def generate_segments(work_session: dict, holiday_dates: set[date] | None = None
         _emit_ot(actual_checkin, planned_start)
 
     # 2. Regular: overlap of [actual] with [planned]
+    # M3: without an OUT, reg_end fell back to planned_end and emitted a full
+    # regular segment (8h night on a never-checked-out session) while the
+    # engine had already computed regular_hours = 0 / payable_day = 0 —
+    # segments and headline numbers disagreed. Only emit when a real OUT (or
+    # the auto-close at planned_end) exists.
     reg_start = max(filter(None, [actual_checkin, planned_start]))
-    reg_end = min(filter(None, [actual_checkout, planned_end]))
+    reg_end = min(filter(None, [actual_checkout, planned_end])) if actual_checkout else None
     if reg_end and reg_start and reg_end > reg_start:
         _emit_regular(reg_start, reg_end)
 
@@ -570,14 +704,62 @@ def calculate_payable_day(work_session: dict, policy: dict, leave_info: dict | N
             return round(equiv * 0.5, 2)
         return 0.0  # Unpaid
 
-    actual_hours = _num(work_session.get("actual_within_shift_hours"))
-    min_full = _num(policy.get("min_working_hours_full_day"), 4.0)
-    min_half = _num(policy.get("min_working_hours_half_day"), 2.0)
-    if actual_hours >= min_full > 0:
+    # Giờ tính lương (đã cộng ân hạn trễ); thiếu khóa → giờ trong ca (cũ).
+    hours = work_session.get("payable_regular_hours")
+    if hours is None:
+        hours = work_session.get("actual_within_shift_hours")
+    hours = _num(hours)
+    shift_hours = _num(work_session.get("scheduled_regular_hours"))
+    si = work_session.get("_shift_instance") or {}
+    method = (si.get("vn_payable_day_method") or "").strip() or PAYABLE_METHOD_THRESHOLD
+
+    # "Theo phút": công = giờ tính lương / độ dài ca, tối đa 1 (2 số lẻ).
+    if method == PAYABLE_METHOD_PER_MINUTE and shift_hours > 0:
+        return round(min(1.0, max(0.0, hours / shift_hours)), 2)
+
+    full_req, half_req = payable_thresholds(policy, shift_hours)
+    if hours >= full_req > 0:
         return 1.0
-    if actual_hours >= min_half > 0:
+    if hours >= half_req > 0:
         return 0.5
     return 0.0
+
+
+PAYABLE_METHOD_THRESHOLD = "Theo ngưỡng giờ"
+PAYABLE_METHOD_PER_MINUTE = "Theo phút"
+
+
+def is_valid_payable_day(value) -> bool:
+    """Ngày công hợp lệ: 0 ≤ công ≤ 1 (công lẻ của ca "Theo phút" được phép)."""
+    try:
+        v = round(float(value), 2)
+    except (TypeError, ValueError):
+        return False
+    return 0.0 <= v <= 1.0
+
+
+def payable_thresholds(policy: dict, shift_hours: float | None) -> tuple[float, float]:
+    """Ngưỡng (đủ công, nửa công) tính bằng giờ cho một ca dài ``shift_hours``.
+
+    Công thức chung cho mọi độ dài ca (plans/plan-cach-tinh-cong-theo-ca.md):
+
+    - đủ công  = min(min_working_hours_full_day, độ dài ca − dung sai)
+    - nửa công = min(min_working_hours_half_day, độ dài ca / 2)
+
+    với dung sai = ``full_day_shortage_tolerance_minutes`` (mặc định 30').
+    Ca 12h + chính sách 8h/4h → 8h/4h (giữ nguyên); ca 8h → 7h30/4h; ca 6h →
+    5h30/3h. Không biết độ dài ca (``shift_hours`` ≤ 0) → ngưỡng chính sách.
+    """
+    min_full = _num(policy.get("min_working_hours_full_day"), 4.0)
+    min_half = _num(policy.get("min_working_hours_half_day"), 2.0)
+    shift_hours = _num(shift_hours)
+    if shift_hours <= 0:
+        return min_full, min_half
+    tolerance_h = max(0.0, _num(policy.get("full_day_shortage_tolerance_minutes"), 30)) / 60.0
+    cap = shift_hours - tolerance_h if shift_hours > tolerance_h else shift_hours
+    full_req = min(min_full, cap) if min_full > 0 else min_full
+    half_req = min(min_half, shift_hours / 2.0) if min_half > 0 else min_half
+    return full_req, half_req
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +794,9 @@ def load_policy(policy_name: str | None, employee: str | None = None) -> dict:
         "grace_early_leave_minutes": doc.grace_early_leave_minutes,
         "min_working_hours_full_day": doc.min_working_hours_full_day,
         "min_working_hours_half_day": doc.min_working_hours_half_day,
+        "full_day_shortage_tolerance_minutes": _num(
+            getattr(doc, "full_day_shortage_tolerance_minutes", None), 30
+        ),
         "allow_ot_compensate_late": bool(doc.allow_ot_compensate_late),
         "allow_ot_compensate_early_leave": bool(doc.allow_ot_compensate_early_leave),
         "night_start_time": str(doc.night_start_time or "22:00:00"),
@@ -681,6 +866,7 @@ def _default_policy() -> dict:
         "grace_early_leave_minutes": 0,
         "min_working_hours_full_day": 4.0,
         "min_working_hours_half_day": 2.0,
+        "full_day_shortage_tolerance_minutes": 30,
         "allow_ot_compensate_late": False,
         "allow_ot_compensate_early_leave": False,
         "night_start_time": "22:00:00",
@@ -721,12 +907,63 @@ def load_shift_instance(shift_instance_name: str) -> dict:
         "vn_max_overtime_hours": st_attr("vn_max_overtime_hours", 4.0),
         "vn_max_total_work_hours": st_attr("vn_max_total_work_hours", 20.0),
         "vn_max_checkout_after_end_minutes": st_attr("vn_max_checkout_after_end_minutes", 360),
+        "vn_payable_day_method": st_attr("vn_payable_day_method") or PAYABLE_METHOD_THRESHOLD,
+        # SI check-in/out windows (set by _ensure_shift_instance in shift.py;
+        # used by _filter_logs_to_window to avoid pulling adjacent-day checkins).
+        "checkin_window_start": getattr(si, "checkin_window_start", None),
+        "checkout_window_end": getattr(si, "checkout_window_end", None),
+        "max_checkout_time": getattr(si, "max_checkout_time", None),
     }
 
 
 # ---------------------------------------------------------------------------
 # §9.5  Holiday List + OT Request loaders (bench-required; import-safe outside)
 # ---------------------------------------------------------------------------
+
+
+def _resolve_holiday_list(emp) -> str | None:
+    """Resolve an employee's Holiday List WITHOUT crashing session calculation.
+
+    Priority: ``Department.holiday_list`` → ``Company.default_holiday_list``.
+
+    Some sites ship a ``tabDepartment`` whose doctype has no ``holiday_list``
+    column (custom/minimal Department). Querying it raised
+    ``OperationalError(1054, "Unknown column 'holiday_list'")`` which aborted
+    the ENTIRE Work-Session calculation — so a brand-new check-in never became a
+    Work Session and stayed invisible in the HR admin view. Holiday detection is
+    non-essential (a payable-day flag), so each lookup is guarded: a missing
+    field/column or any DB error simply yields ``None`` ("no holiday list")
+    instead of propagating.
+    """
+    try:
+        import frappe
+    except Exception:
+        return None
+    if not emp:
+        return None
+
+    def _safe(doctype, name, field):
+        if not name:
+            return None
+        try:
+            # Skip the query entirely when the field isn't part of the doctype
+            # meta (covers a custom Department without `holiday_list`).
+            meta = frappe.get_meta(doctype)
+            if meta and not meta.has_field(field):
+                return None
+            return frappe.db.get_value(doctype, name, field)
+        except Exception:
+            return None
+
+    if emp.department:
+        hl = _safe("Department", emp.department, "holiday_list")
+        if hl:
+            return hl
+    if emp.company:
+        hl = _safe("Company", emp.company, "default_holiday_list")
+        if hl:
+            return hl
+    return None
 
 
 def is_holiday(day: date, employee: str | None) -> bool:
@@ -743,9 +980,7 @@ def is_holiday(day: date, employee: str | None) -> bool:
     emp = frappe.db.get_value("Employee", employee, ["department", "company"], as_dict=True)
     if not emp:
         return False
-    holiday_list = (
-        frappe.db.get_value("Department", emp.department, "holiday_list") if emp.department else None
-    ) or (frappe.db.get_value("Company", emp.company, "default_holiday_list") if emp.company else None)
+    holiday_list = _resolve_holiday_list(emp)
     if not holiday_list:
         return False
     return bool(frappe.db.exists("Holiday", {"parent": holiday_list, "holiday_date": day}))
@@ -771,9 +1006,7 @@ def load_holiday_dates(
     emp = frappe.db.get_value("Employee", employee, ["department", "company"], as_dict=True)
     if not emp:
         return set()
-    holiday_list = (
-        frappe.db.get_value("Department", emp.department, "holiday_list") if emp.department else None
-    ) or (frappe.db.get_value("Company", emp.company, "default_holiday_list") if emp.company else None)
+    holiday_list = _resolve_holiday_list(emp)
     if not holiday_list:
         return set()
     rows = frappe.db.get_all(
@@ -796,7 +1029,11 @@ def get_approved_ot_requests(employee: str | None, work_date) -> list[dict]:
         return []
     if not employee or not work_date:
         return []
-    if not frappe.db.table_exists("tabVN Overtime Request"):  # type: ignore[attr-defined]
+    # NOTE: ``db.table_exists`` takes the bare DocType name here — passing the
+    # ``tab``-prefixed table name returns False on this Frappe build, which used
+    # to short-circuit this function to [] and silently drop EVERY approved OT
+    # request (root cause of "approved_overtime_hours always 0"). See E2E probe.
+    if not frappe.db.table_exists("VN Overtime Request"):  # type: ignore[attr-defined]
         return []
     rows = (
         frappe.db.get_all(
@@ -827,17 +1064,63 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
     if not si:
         return None
 
+    # H2 race guard: checkin hook, OT-approval write-back and manual recalc can
+    # all enqueue persist_work_session for the SAME shift instance at once.
+    # Both used to read ws=None → both INSERT → duplicate Work Session (double
+    # hours in payroll). Serialize on the Shift Instance row itself (FOR UPDATE,
+    # held until the request/job commits): the second runner re-reads the WS
+    # created by the first and takes the update path instead.
+    frappe.db.sql(
+        "SELECT name FROM `tabVN Employee Shift Instance` WHERE name = %(name)s FOR UPDATE",
+        {"name": shift_instance_name},
+    )
+
+    # M10: don't filter on Employee Checkin.shift — HRMS only stamps that
+    # column when the punch falls inside the Shift Type's own (narrow) margin,
+    # so early pre-OT / late post-OT punches arrived with shift=None and were
+    # dropped from the session. Fetch by employee inside the widened window
+    # (the cap span keeps the query bounded) and let _filter_logs_to_window
+    # decide membership.
+    _ps = _as_dt(si["planned_start"])
+    _pe = _as_dt(si["planned_end"])
+    try:
+        _cap_h = float(si.get("vn_max_total_work_hours") or 20)
+    except (TypeError, ValueError):
+        _cap_h = 20.0
+    _wlo = (_ps or _pe) - timedelta(hours=_cap_h + 2)
+    _whi = (_pe or _ps) + timedelta(hours=_cap_h + 2)
     logs = (
         frappe.db.get_all(
             "Employee Checkin",
-            filters={"employee": si["employee"], "shift": si.get("shift_type")},
-            fields=["name", "time", "log_type"],
+            # F601 fix: the dict literal repeated the "time" key so the
+            # lower bound silently overwrote the upper one (range collapsed
+            # to `<= whi`). List filters keep BOTH bounds as intended.
+            filters=[
+                ["employee", "=", si["employee"]],
+                ["time", ">=", _wlo.strftime("%Y-%m-%d %H:%M:%S")],
+                ["time", "<=", _whi.strftime("%Y-%m-%d %H:%M:%S")],
+            ],
+            fields=["name", "time", "log_type", "vn_auto_generated"],
             order_by="time asc",
         )
         or []
     )
-    # Narrow to logs inside the planned window ± 24h to avoid pulling history.
-    logs = _filter_logs_to_window(logs, si["planned_start"], si["planned_end"])
+    logs = _filter_logs_to_window(logs, si["planned_start"], si["planned_end"], si)
+    # FINDING-P5: derive the auto-close claim flag from the OUT log marker
+    # (vn_auto_generated) so every recalc — the fake-OUT insert's enqueue, the
+    # admin period recalc, monthly close — SELF-HEALS vn_auto_checkout instead
+    # of losing it (a lost flag flipped "Quên chấm ra" back to a green day and
+    # hid the ticket state from payroll/UI).
+    # FIX 2026-09-12: cờ phải phản ánh lượt RA ĐƯỢC DÙNG (lượt OUT CUỐI trong
+    # cửa sổ), không phải "tồn tại bất kỳ lượt OUT giả nào" — khi lượt RA THẬT
+    # về muộn (sync máy chấm) đè lên lượt giả của auto-close, cờ cũ giữ 1
+    # khiến ô lưới treo "Thiếu chấm ra" dù giờ ra thật đã có (ca 20h-8h 10/09).
+    _out_logs = sorted(
+        (lg for lg in logs if lg.get("log_type") == "OUT"),
+        key=lambda lg: str(lg.get("time") or ""),
+    )
+    _last_out = _out_logs[-1] if _out_logs else None
+    auto_checkout_flag = bool(_last_out and _last_out.get("vn_auto_generated"))
 
     policy = load_policy(si.get("attendance_policy"), si["employee"])
 
@@ -848,19 +1131,46 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
     if policy.get("require_overtime_approval"):
         ot_requests = get_approved_ot_requests(si["employee"], si.get("work_date"))
 
-    calc = calculate_work_session(si, logs, policy, calculate_mode=calculate_mode, ot_requests=ot_requests)
+    # FIX 2026-09-16: query Approved Leave Application covering work_date —
+    # engine trước đây nhận leave_info=None mãi → has_leave không bao giờ được
+    # set trên WS (vd Vũ Winner nghỉ 13-14/09 Approved nhưng WS vẫn absent=1).
+    leave_info = _load_leave_info(si["employee"], si.get("work_date"))
+    calc = calculate_work_session(
+        si, logs, policy, calculate_mode=calculate_mode, leave_info=leave_info, ot_requests=ot_requests
+    )
     calc["segments"] = generate_segments(calc, holiday_dates)
 
     ws_name = frappe.db.get_value("VN Attendance Work Session", {"shift_instance": shift_instance_name})
     review_reasons = _review_reasons(calc)
 
-    payload = _ws_payload(si, calc, policy)
+    payload = _ws_payload(si, calc, policy, leave_info)
     payload["review_reason"] = "\n".join(review_reasons) if review_reasons else None
+    # FIX 2026-09-11: ghi tường minh 0/1 mỗi lần recalc. Trước đây chỉ thêm key
+    # khi =1 — cờ 1 cũ KHÔNG BAO GIỜ được xoá (admin sửa giờ lượt OUT giả của
+    # auto-close → marker đã sạch nhưng cờ session vẫn 1 → UI che "--:--").
+    payload["vn_auto_checkout"] = 1 if auto_checkout_flag else 0
 
     if ws_name:
         ws = frappe.get_doc("VN Attendance Work Session", ws_name)
-        # CAS lock (plan §19.3): refuse to overwrite a Locked / Recalculating session.
-        if ws.calculation_status in ("Locked",):
+        # FIX 2026-09-12: link Attendance treo (dòng đích đã bị xóa — vd đợt
+        # dọn Attendance tương lai) làm LinkValidationError crash TOÀN BỘ
+        # recalc → session đứng mãi dù có lượt chấm mới. Xóa link treo trước
+        # khi save; _sync_attendance_internal sẽ tự tái tạo link đúng sau đó.
+        if getattr(ws, "attendance", None) and not frappe.db.exists("Attendance", ws.attendance):
+            try:
+                frappe.db.set_value(
+                    "VN Attendance Work Session",
+                    ws_name,
+                    "attendance",
+                    None,
+                    update_modified=False,
+                )
+                ws.attendance = None
+            except Exception:
+                pass
+        # CAS lock (plan §19.3): refuse to overwrite a Locked / Recalculating
+        # session (the comment always said both — the code now matches it).
+        if ws.calculation_status in ("Locked", "Recalculating"):
             return ws_name
         for k, v in payload.items():
             if k == "segments":
@@ -883,18 +1193,122 @@ def persist_work_session(shift_instance_name: str, calculate_mode: str = "realti
         ws.insert(ignore_permissions=True)
         ws_name = ws.name
 
+    # Stamp actual/approved hours back onto the day's OT requests so /hr/overtime
+    # reflects how much of each request was actually served (BUG-2 / plan T3).
+    # Best-effort: a failure here never aborts the Work Session save.
+    _writeback_ot_request_hours(si, calc, ot_requests)
+
     _maybe_raise_exceptions(ws_name, calc, si)
+    # Giờ ra thật xuất hiện (kể cả muộn) → tự đóng ticket quên chấm ra đang treo.
+    _auto_resolve_checkout_miss(payload)
     return ws_name
 
 
-def _filter_logs_to_window(logs: list[dict], planned_start, planned_end) -> list[dict]:
+def _writeback_ot_request_hours(shift_instance, calc_result, ot_requests) -> None:
+    """Write ``actual_hours`` / ``approved_hours`` onto the day's OT requests.
+
+    Reads the per-request overlap breakdown stashed by ``calculate_work_session``
+    (``_ot_request_breakdown``). Matched requests get the served overlap; any
+    approved-but-unserved request for the day is zeroed so the per-request view
+    stays honest. No-op outside a bench / when the doctype is absent. Pure
+    side-effect: safe to call from any persist path (plan T3 / BUG-2).
+    """
+    import frappe  # calc.py lazy-imports frappe per-function (no module-level import)
+
+    try:
+        breakdown = (calc_result or {}).get("_ot_request_breakdown") or {}
+        if not breakdown and not (ot_requests or []):
+            return
+        if not frappe.db.table_exists("VN Overtime Request"):  # type: ignore[attr-defined]
+            return
+        matched = set()
+        for name, hours in breakdown.items():
+            if not name:
+                continue
+            matched.add(name)
+            frappe.db.set_value(
+                "VN Overtime Request",
+                name,
+                {"actual_hours": hours, "approved_hours": hours},
+            )
+        # Approved requests the employee did NOT serve OT for → 0.
+        for req in ot_requests or []:
+            name = req.get("name")
+            if name and name not in matched:
+                frappe.db.set_value(
+                    "VN Overtime Request",
+                    name,
+                    {"actual_hours": 0, "approved_hours": 0},
+                )
+    except Exception:
+        si_name = shift_instance.get("name") if isinstance(shift_instance, dict) else shift_instance
+        frappe.log_error(
+            title="OT request hours write-back failed",
+            message=f"shift_instance={si_name}",
+        )
+
+
+def _filter_logs_to_window(
+    logs: list[dict], planned_start, planned_end, si: dict | None = None
+) -> list[dict]:
     ps = _as_dt(planned_start)
     pe = _as_dt(planned_end)
     if not ps or not pe:
         return logs
-    lo = ps - timedelta(hours=24)
-    hi = pe + timedelta(hours=24)
-    return [lg for lg in logs if lo <= _as_dt(lg.get("time")) <= hi]
+    # Use the Shift Instance's configured check-in/out window (tight — avoids
+    # pulling checkins from ADJACENT DAYS which caused cross-day OT/hours bugs
+    # with the old ±24h margin). Fall back to ±2h if SI window fields are missing.
+    lo = _as_dt(si.get("checkin_window_start")) if si else None
+    hi = _as_dt(si.get("max_checkout_time")) if si else None
+    # H5: the SI window is the *permitted check-in/out* window, which is
+    # NARROWER than the hours the engine must credit — an early pre-OT IN
+    # (before checkin_window_start) or a long approved post-shift OT OUT
+    # (past max_checkout_time, still under vn_max_total_work_hours) was being
+    # dropped from the session entirely (missing_checkin / zero hours).
+    # Widen each side to the engine's own work-hour caps: total span may not
+    # exceed vn_max_total_work_hours (default 20h) around the planned shift.
+    try:
+        max_total_h = float(si.get("vn_max_total_work_hours") or 20) if si else 20.0
+    except (TypeError, ValueError):
+        max_total_h = 20.0
+    cap_lo = pe - timedelta(hours=max_total_h)
+    cap_hi = ps + timedelta(hours=max_total_h)
+    # WIDEN (never narrow): union of the SI window and the engine's cap.
+    if lo is None or cap_lo < lo:
+        lo = cap_lo
+    if hi is None or cap_hi > hi:
+        hi = cap_hi
+    kept = [lg for lg in logs if lo <= _as_dt(lg.get("time")) <= hi]
+    return _drop_adjacent_session_punches(kept, ps, pe)
+
+
+def _drop_adjacent_session_punches(logs: list[dict], ps: datetime, pe: datetime) -> list[dict]:
+    """Bỏ lượt chấm thuộc PHIÊN CA LIỀN KỀ lọt vào cửa sổ nới rộng.
+
+    FIX 2026-10-05: cửa sổ ``[pe - cap, ps + cap]`` (cap 20h) của ca sáng 8h-20h
+    bắt đầu từ 00:00 → nuốt lượt RA 08:00 đóng ca tối 20h-8h đêm trước (NV đổi
+    ca tối → sáng: ô 05/10 hiện "Thiếu check-in" + giờ ra 08:00). Đối xứng, ca
+    tối hôm trước nuốt lượt VÀO của ca sáng hôm sau (trước ps + cap).
+
+    - OUT nằm TRƯỚC (hoặc đúng) ``ps`` và trước mọi lượt IN → đóng phiên trước.
+    - IN nằm SAU (hoặc đúng) ``pe`` và sau mọi lượt OUT → mở phiên sau.
+    """
+    rows = sorted(logs, key=lambda lg: _as_dt(lg.get("time")))
+    start = 0
+    while (
+        start < len(rows)
+        and str(rows[start].get("log_type") or "").upper() == "OUT"
+        and _as_dt(rows[start].get("time")) <= ps
+    ):
+        start += 1
+    end = len(rows)
+    while (
+        end > start
+        and str(rows[end - 1].get("log_type") or "").upper() == "IN"
+        and _as_dt(rows[end - 1].get("time")) >= pe
+    ):
+        end -= 1
+    return rows[start:end]
 
 
 def _review_reasons(calc: dict) -> list[str]:
@@ -903,6 +1317,8 @@ def _review_reasons(calc: dict) -> list[str]:
         reasons.append("Thiếu check-in (IN).")
     if calc["missing_checkout"]:
         reasons.append("Thiếu check-out (OUT).")
+    if calc.get("inverted_pair"):
+        reasons.append("Giờ ra trước giờ vào (OUT < IN) — cần xem lại.")
     if calc["total_actual_hours"] > calc.get("vn_max_total_work_hours", 20) and calc.get(
         "vn_max_total_work_hours"
     ):
@@ -910,12 +1326,12 @@ def _review_reasons(calc: dict) -> list[str]:
     return reasons
 
 
-def _ws_payload(si: dict, calc: dict, policy: dict) -> dict:
+def _ws_payload(si: dict, calc: dict, policy: dict, leave_info: dict | None = None) -> dict:
     segments = [
         {
             "segment_type": s["segment_type"],
-            "from_datetime": s["from_datetime"],
-            "to_datetime": s["to_datetime"],
+            "from_datetime": _db_dt(s["from_datetime"]),
+            "to_datetime": _db_dt(s["to_datetime"]),
             "hours": s["hours"],
             "calendar_date": s["calendar_date"],
             "is_night": s["is_night"],
@@ -932,10 +1348,10 @@ def _ws_payload(si: dict, calc: dict, policy: dict) -> dict:
         "shift_type": si.get("shift_type"),
         "company": si.get("company"),
         "attendance_policy": policy.get("name"),
-        "planned_start": calc["planned_start"],
-        "planned_end": calc["planned_end"],
-        "actual_checkin": calc["actual_checkin"],
-        "actual_checkout": calc["actual_checkout"],
+        "planned_start": _db_dt(calc["planned_start"]),
+        "planned_end": _db_dt(calc["planned_end"]),
+        "actual_checkin": _db_dt(calc["actual_checkin"]),
+        "actual_checkout": _db_dt(calc["actual_checkout"]),
         "total_actual_hours": calc["total_actual_hours"],
         "scheduled_regular_hours": calc["scheduled_regular_hours"],
         "actual_within_shift_hours": calc["actual_within_shift_hours"],
@@ -956,6 +1372,7 @@ def _ws_payload(si: dict, calc: dict, policy: dict) -> dict:
         "missing_checkin": calc["missing_checkin"],
         "missing_checkout": calc["missing_checkout"],
         "absent": calc["absent"],
+        "has_leave": bool(calc.get("has_leave") or (leave_info and leave_info.get("has_leave"))),
         "need_review": calc["need_review"],
         "payable_regular_hours": calc["payable_regular_hours"],
         "payable_day": calc["payable_day"],
@@ -969,9 +1386,365 @@ def _sum_night_hours(segments: list[dict], types: list[str]) -> float:
     return round(sum(s["hours"] for s in segments if s["segment_type"] in types), 4)
 
 
-def _maybe_raise_exceptions(ws_name: str, calc: dict, si: dict) -> None:
-    """Late-checkout warning (plan §10 note 9): OUT exists but > planned_end+360m."""
+def _auto_resolve_checkout_miss(ws_payload: dict) -> None:
+    """Best-effort: session có giờ ra THẬT → tự đóng ticket "Quên chấm ra"
+    đang treo (Pending/Explained) của cùng (employee, work_date).
+
+    FIX 2026-09-12: khi lượt ra thật về muộn (sync máy chấm) đè lên lượt giả
+    của auto-close, ticket cũ vẫn treo Pending — HR phải đóng tay từng cái.
+    Chỉ đụng ticket CHƯA xử lý; Penalised/Waived/Closed (HR đã quyết) giữ nguyên.
+    """
     import frappe
+
+    try:
+        if not ws_payload or ws_payload.get("vn_auto_checkout"):
+            return  # chưa có giờ ra thật (cờ giả vẫn thắng) hoặc thiếu dữ liệu
+        emp = ws_payload.get("employee")
+        day = str(ws_payload.get("work_date") or "")[:10]
+        if not emp or not day:
+            return
+        for t in frappe.get_all(
+            "VN Checkout Miss",
+            filters={
+                "employee": emp,
+                "work_date": day,
+                "status": ["in", ["Pending", "Explained"]],
+                "docstatus": ["!=", 2],
+            },
+            fields=["name"],
+            limit=5,
+        ):
+            frappe.db.set_value(
+                "VN Checkout Miss",
+                t.name,
+                {
+                    "status": "Closed",
+                    "explanation": (frappe.db.get_value("VN Checkout Miss", t.name, "explanation") or "")
+                    + " [tự đóng: đã có lượt chấm ra thật]",
+                },
+            )
+    except Exception:
+        pass
+
+
+def _raise_no_show_exception(ws_name: str, calc: dict, si: dict) -> None:
+    """Best-effort: nâng ngoại lệ Missing Check-in cho ngày thiếu công."""
+    import frappe
+
+    try:
+        if not (calc.get("missing_checkin") and calc.get("missing_checkout")):
+            return
+        if calc.get("has_leave") or calc.get("absent"):
+            return  # đã được xử lý (có phép / đã đánh vắng)
+        pe = calc.get("_planned_end")
+        now = frappe.utils.now_datetime()
+        if not pe or (now - pe).total_seconds() / 60.0 < _NO_SHOW_GRACE_MINS:
+            return  # ca chưa kết thúc đủ lâu — có thể ca đêm đang tới hạn
+        if frappe.db.exists(
+            "VN Attendance Exception",
+            {"work_session": ws_name, "exception_type": "Missing Check-in"},
+        ):
+            return
+        frappe.get_doc(
+            {
+                "doctype": "VN Attendance Exception",
+                "work_session": ws_name,
+                "shift_instance": si["name"],
+                "employee": si["employee"],
+                "work_date": si["work_date"],
+                "exception_type": "Missing Check-in",
+                "severity": "High",
+                "status": "Open",
+                "description": (
+                    "Thiếu công: ca làm việc đã kết thúc nhưng không có lượt chấm nào "
+                    "(thiếu cả check-in lẫn check-out). Cần giải trình — nghỉ có phép "
+                    "(nộp đơn nghỉ phép) hoặc không phép (đánh dấu Absent)."
+                ),
+            }
+        ).insert(ignore_permissions=True)
+    except Exception:
+        pass  # best-effort: không bao giờ làm hỏng luồng tính công
+
+
+def _load_leave_info(employee: str, work_date) -> dict | None:
+    """Best-effort: Approved Leave Application covering ``work_date``.
+
+    FIX 2026-09-16: engine trước đây không query nghỉ phép → WS có ngày nghỉ
+    đã duyệt vẫn absent=1, has_leave=0 (monthly view hiển thị "Cần xem xét"
+    thay vì "Nghỉ phép").
+    """
+    import frappe
+
+    if not employee or not work_date:
+        return None
+    try:
+        la = frappe.db.get_value(
+            "Leave Application",
+            {
+                "employee": employee,
+                "from_date": ["<=", str(work_date)[:10]],
+                "to_date": [">=", str(work_date)[:10]],
+                "status": "Approved",
+                "docstatus": 1,
+            },
+            ["name", "leave_type", "total_leave_days"],
+            as_dict=True,
+        )
+    except Exception:
+        return None
+    if not la:
+        return None
+    # Cap 1 ngày / session — Leave Application nhiều ngày (vd 4 ngày) trả
+    # total_leave_days=4 nhưng payable_day chỉ nhận 0/0.5/1.0.
+    return {
+        "has_leave": True,
+        "leave_application": la.name,
+        "leave_type": la.leave_type,
+        "salary_impact_type": "Paid",  # giản lược — engine payable_day xử lý chi tiết
+        "leave_days_equivalent": min(float(la.total_leave_days or 1.0), 1.0),
+    }
+
+
+_PUNCH_WS_FIELDS = [
+    "name",
+    "shift_instance",
+    "calculated_at",
+    "planned_start",
+    "planned_end",
+    "actual_checkin",
+    "actual_checkout",
+]
+
+
+def _punch_in_ws_window(ws, punch_time) -> bool:
+    """A punch sits in a session's window [planned_start - 4h, planned_end + 6h]
+    (no time / no planned window → True, as before)."""
+    if not punch_time or not ws or not ws.planned_start or not ws.planned_end:
+        return True
+    ps = _as_dt(ws.planned_start)
+    pe = _as_dt(ws.planned_end)
+    pt = _as_dt(punch_time)
+    return bool(ps and pe and pt and ps - timedelta(hours=4) <= pt <= pe + timedelta(hours=6))
+
+
+def _ws_finder(pairs):
+    """Batched :func:`_find_ws_for_punch`: ONE query loads every Work Session of
+    the ``(employee, day)`` pairs (+ the day before, for overnight shifts) and
+    returns ``find(employee, day, punch_time)`` applying the same rules.
+
+    PERF 2026-10-04: heal-on-read called _find_ws_for_punch once per punch — 1 009
+    queries / 4.6 s for September in the team grid (and on every today_status).
+    """
+    import frappe
+    from frappe.utils import getdate as _gd
+
+    emps = sorted({e for e, _d in pairs if e})
+    days = sorted({d for _e, d in pairs if d})
+    by: dict = {}
+    if emps and days:
+        try:
+            rows = frappe.get_all(
+                "VN Attendance Work Session",
+                filters={
+                    "employee": ["in", emps],
+                    "work_date": ["between", [(_gd(days[0]) - timedelta(days=1)).isoformat(), days[-1]]],
+                    "docstatus": ["!=", 2],
+                },
+                fields=[*_PUNCH_WS_FIELDS, "employee", "work_date"],
+                order_by="modified desc",
+                limit_page_length=0,
+            )
+        except Exception:
+            rows = []
+        for r in rows or []:
+            by.setdefault((r.get("employee"), str(r.get("work_date"))[:10]), r)
+
+    def find(employee: str, day: str, punch_time=None):
+        ws = by.get((employee, day))
+        if ws and ws.shift_instance and _punch_in_ws_window(ws, punch_time):
+            return ws
+        try:
+            prev = (_gd(day) - timedelta(days=1)).isoformat()
+        except Exception:
+            return None
+        ws_prev = by.get((employee, prev))
+        return ws_prev if ws_prev and ws_prev.shift_instance else None
+
+    return find
+
+
+def _find_ws_for_punch(employee: str, day: str, punch_time=None):
+    """Tìm Work Session mà punch của ngày ``day`` thuộc về.
+
+    FIX 2026-09-17: ca qua đêm — punch sáng ngày D+1 thuộc WS work_date=D.
+    FIX 2026-09-17b: nhận punch_time trực tiếp (trước đây query punch đầu
+    tiên trong ngày → map nhầm WS khi có nhiều punch).
+    Thứ tự: WS hôm nay (punch trong cửa sổ) → WS hôm trước. Nhiều punch một
+    lượt → dùng :func:`_ws_finder` (một truy vấn cho tất cả).
+    """
+    return _ws_finder([(employee, day)])(employee, day, punch_time)
+
+
+def _ws_stale(ws, punch) -> bool:
+    """Session có cần tính lại không?
+
+    FIX 2026-09-16: ngoài tiêu chí "lượt chấm MỚI hơn lần tính cuối" (so
+    creation — thua keo với lượt chấm sync từ máy chấm có creation backdate
+    nhỏ hơn calculated_at, vd Tiền ca đêm 12-14/09 đứng mãi thiếu giờ vào),
+    thêm tiêu chí NỘI DUNG: phiên thiếu IN/OUT trong khi CÓ lượt chấm cùng
+    loại nằm trong cửa sổ ca [start-4h, end+6h] → chắc chắn lệch, tính lại.
+    """
+    if not ws or not getattr(ws, "shift_instance", None):
+        return False
+    p = punch if isinstance(punch, dict) else {}
+    if not ws.calculated_at or str(ws.calculated_at) < str(p.get("creation")):
+        return True
+    t = _as_dt(p.get("time"))
+    ps = _as_dt(ws.planned_start)
+    pe = _as_dt(ws.planned_end)
+    if not t or not ps or not pe:
+        return False
+    from datetime import timedelta as _td
+
+    if ps - _td(hours=4) <= t <= pe + _td(hours=6):
+        lt = str(p.get("log_type") or "")
+        if lt == "IN" and not ws.actual_checkin:
+            return True
+        if lt == "OUT" and not ws.actual_checkout:
+            return True
+    return False
+
+
+def heal_stale_sessions(start_date, end_date, limit: int = 100) -> int:
+    """Heal-on-read (2026-09-12): tính lại NGAY các session trong một khoảng
+    ngày có lượt chấm mới hơn lần tính cuối.
+
+    Dùng ngay trước khi dựng team grid/roster để dữ liệu luôn tươi DÙ queue
+    nền đang chết (hook after_insert enqueue recalc lên "short" — khi worker
+    chạy code cũ/lỗi, session đứng yên dù nhân viên đã chấm, vd Lâm Hoan
+    Quốc 12/09 chấm 08:03/20:05 vẫn bị "Thiếu công"). Chỉ session LỆCH mới
+    bị tính lại nên chi phí gần như 0 khi hệ thống khỏe. Trả về số session
+    đã heal.
+    """
+    import frappe
+    from frappe.utils import getdate
+
+    try:
+        d0 = (getdate(start_date) - __import__("datetime").timedelta(days=1)).isoformat()
+        d1 = (getdate(end_date) + __import__("datetime").timedelta(days=1)).isoformat()
+    except Exception:
+        return 0
+    try:
+        punches = frappe.get_all(
+            "Employee Checkin",
+            filters=[["time", ">=", f"{d0} 00:00:00"], ["time", "<=", f"{d1} 23:59:59"]],
+            fields=["name", "employee", "time", "creation"],
+            order_by="creation asc",
+            limit=2000,
+        )
+    except Exception:
+        return 0
+    seen: set[tuple[str, str]] = set()
+    healed: set[str] = set()
+    find_ws = _ws_finder({(_p.get("employee"), str(_p.get("time"))[:10]) for _p in punches})
+    done = 0
+    for _p in punches:
+        day = str(_p.get("time"))[:10]
+        key = (_p.get("employee"), day)
+        if key in seen:
+            continue
+        ws = find_ws(_p.get("employee"), day, _p.get("time"))
+        # The batch row is a pre-loop snapshot: a session healed above must not
+        # be recalculated again for a later punch of another day.
+        if not ws or ws.name in healed:
+            continue
+        if not _ws_stale(ws, _p):
+            continue
+        seen.add(key)
+        healed.add(ws.name)
+        try:
+            persist_work_session(ws.shift_instance, calculate_mode="recalc")
+            done += 1
+        except Exception:
+            pass
+        if done >= limit:
+            break
+    return done
+
+
+def recalc_stale_sessions(lookback_hours: int = 48, limit: int = 200) -> int:
+    """Scheduler self-heal (2026-09-12): tính lại các Work Session có lượt chấm
+    MỚI HƠN lần tính cuối.
+
+    Hook ``after_insert`` của Employee Checkin enqueue recalc lên queue
+    "short" — khi job queue lỗi/fail hàng loạt (đã xảy ra: đợt 10:56
+    11/09), mọi recalc theo hook chết ngầm → session thiếu giờ ra dù nhân
+    viên đã chấm (vd Minh Châu 11/09 Ra 20:12). Job này quét lượt chấm
+    gần đây, với mỗi (employee, ngày) có lượt chấm mới hơn ``calculated_at``
+    của session → tính lại qua ``persist_work_session`` (inline, không phụ
+    thuộc queue). Trả về số session đã tính lại.
+    """
+    import frappe
+    from frappe.utils import add_to_date
+
+    since = add_to_date(None, hours=-int(lookback_hours or 48))
+    punches = frappe.get_all(
+        "Employee Checkin",
+        filters={"creation": [">=", since]},
+        fields=["name", "employee", "time", "creation"],
+        order_by="creation asc",
+        limit=5000,
+    )
+    seen: set[tuple[str, str]] = set()
+    healed: set[str] = set()
+    find_ws = _ws_finder({(p.get("employee"), str(p.get("time"))[:10]) for p in punches})
+    done = 0
+    for p in punches:
+        try:
+            day = str(p.get("time"))[:10]
+        except Exception:
+            continue
+        key = (p.get("employee"), day)
+        if key in seen:
+            continue
+        ws = find_ws(p.get("employee"), day, p.get("time"))
+        if not ws or ws.name in healed:
+            continue
+        if not _ws_stale(ws, p):
+            continue
+        seen.add(key)
+        healed.add(ws.name)
+        try:
+            persist_work_session(ws.shift_instance, calculate_mode="recalc")
+            done += 1
+        except Exception:
+            try:
+                frappe.log_error(title=f"recalc_stale_sessions: {key}")
+            except Exception:
+                pass
+        if done >= limit:
+            break
+    return done
+
+
+# Thiếu công — thời gian đệm sau kết thúc ca trước khi coi ngày không-chấm-đâu
+# là "thiếu công" cần giải trình (tránh báo động giữa ca / ca đêm chưa tới hạn).
+_NO_SHOW_GRACE_MINS = 240
+
+
+def _maybe_raise_exceptions(ws_name: str, calc: dict, si: dict) -> None:
+    """Engine exceptions sau mỗi lần tính Work Session.
+
+    - Thiếu công (2026-09-11): session KHÔNG có lượt chấm nào sau khi ca kết
+      thúc quá đệm → nâng "Missing Check-in" vào hàng đợi HR (/hr/exceptions)
+      — yêu cầu giải trình: nghỉ CÓ phép (nộp đơn nghỉ) hoặc KHÔNG phép (HR
+      Đánh dấu công = Absent). Không đụng luồng "quên chấm ra" (engine
+      auto-close chỉ dành cho session CÓ check-in).
+    - Late-checkout warning (plan §10 note 9): OUT > planned_end + 360m.
+    """
+    import frappe
+
+    _raise_no_show_exception(ws_name, calc, si)
 
     if calc["missing_checkout"] or not calc.get("_actual_checkout"):
         return

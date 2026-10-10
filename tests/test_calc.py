@@ -10,8 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from gege_hr.gege_hr.utils import calc
-from gege_hr.gege_hr.utils import tz as tz_utils
+from gege_hr.gege_hr.utils import calc, tz as tz_utils
 
 VN = ZoneInfo("Asia/Ho_Chi_Minh")
 
@@ -279,6 +278,21 @@ class TestCalculateWorkSession:
         assert r["ot_compensated_early_minutes"] == 30
         assert r["raw_overtime_hours"] == pytest.approx(1.5, abs=1e-6)
 
+    def test_inverted_pair_need_review(self):
+        # FINDING-P3 (E2E G2): orphan-OUT self-heal shape — the IN lands AFTER
+        # the existing OUT. The pair is inverted (OUT < IN) and must surface
+        # need_review, never pass silently with 0h.
+        si = base_shift(self.PS, self.PE)
+        logs = [
+            log(_vn(2026, 6, 20, 10, 0), "OUT"),
+            log(_vn(2026, 6, 20, 10, 38), "IN"),
+        ]
+        res = calc.calculate_work_session(si, logs, base_policy())
+        assert res["need_review"] == 1
+        assert res["inverted_pair"] == 1
+        assert res["missing_checkin"] == 0
+        assert res["missing_checkout"] == 0
+
     def test_missing_checkout_need_review_and_zero_within(self):
         si = base_shift(self.PS, self.PE)
         logs = [log(_vn(2026, 6, 20, 8, 0), "IN")]  # no OUT
@@ -338,6 +352,108 @@ class TestCalculateWorkSession:
         ]  # approved 1h
         p = base_policy(require_overtime_approval=True)
         r = calc.calculate_work_session(si, logs, p, ot_requests=req)
+        assert r["approved_overtime_hours"] == 1.0
+
+
+# =========================================================================== #
+# match_overtime_request_detailed — per-request overlap (plan T3 / BUG-2)
+# =========================================================================== #
+def _win(start, end):
+    return {"start": start, "end": end}
+
+
+def _req(name, start, end):
+    return {"name": name, "from_datetime": start, "to_datetime": end}
+
+
+class TestMatchOvertimeRequestDetailed:
+    def test_actual_inside_request(self):
+        # TC-U-01: actual OT window fully inside the approved request.
+        out = calc.match_overtime_request_detailed(
+            [_win(_vn(2026, 6, 20, 8, 0), _vn(2026, 6, 20, 10, 0))],
+            [_req("OR-1", _vn(2026, 6, 20, 7, 0), _vn(2026, 6, 20, 11, 0))],
+        )
+        assert out == {"OR-1": 2.0}
+
+    def test_request_inside_actual(self):
+        # TC-U-02: request fully inside the actual OT window.
+        out = calc.match_overtime_request_detailed(
+            [_win(_vn(2026, 6, 20, 7, 0), _vn(2026, 6, 20, 11, 0))],
+            [_req("OR-1", _vn(2026, 6, 20, 8, 0), _vn(2026, 6, 20, 10, 0))],
+        )
+        assert out == {"OR-1": 2.0}
+
+    def test_partial_overlap(self):
+        # TC-U-03: only the intersection counts.
+        out = calc.match_overtime_request_detailed(
+            [_win(_vn(2026, 6, 20, 9, 0), _vn(2026, 6, 20, 12, 0))],
+            [_req("OR-1", _vn(2026, 6, 20, 8, 0), _vn(2026, 6, 20, 10, 0))],
+        )
+        assert out == {"OR-1": 1.0}
+
+    def test_disjoint_returns_empty(self):
+        # TC-U-04: no overlap → request absent from the breakdown (not 0).
+        out = calc.match_overtime_request_detailed(
+            [_win(_vn(2026, 6, 20, 8, 0), _vn(2026, 6, 20, 9, 0))],
+            [_req("OR-1", _vn(2026, 6, 20, 10, 0), _vn(2026, 6, 20, 11, 0))],
+        )
+        assert out == {}
+
+    def test_multiple_windows_requests_no_double_count(self):
+        # TC-U-05: pre-OT + post-OT, each matched to its own request.
+        windows = [
+            _win(_vn(2026, 6, 20, 6, 0), _vn(2026, 6, 20, 8, 0)),
+            _win(_vn(2026, 6, 20, 20, 0), _vn(2026, 6, 20, 22, 0)),
+        ]
+        reqs = [
+            _req("OR-PRE", _vn(2026, 6, 20, 6, 0), _vn(2026, 6, 20, 8, 0)),
+            _req("OR-POST", _vn(2026, 6, 20, 20, 0), _vn(2026, 6, 20, 22, 0)),
+        ]
+        assert calc.match_overtime_request_detailed(windows, reqs) == {
+            "OR-PRE": 2.0,
+            "OR-POST": 2.0,
+        }
+
+    def test_sum_equals_aggregate(self):
+        # TC-U-07: contract — Σ detailed == match_overtime_request (pre-cap).
+        windows = [
+            _win(_vn(2026, 6, 20, 6, 0), _vn(2026, 6, 20, 8, 0)),
+            _win(_vn(2026, 6, 20, 20, 0), _vn(2026, 6, 20, 22, 0)),
+        ]
+        reqs = [
+            _req("OR-PRE", _vn(2026, 6, 20, 6, 0), _vn(2026, 6, 20, 8, 0)),
+            _req("OR-POST", _vn(2026, 6, 20, 20, 0), _vn(2026, 6, 20, 22, 0)),
+        ]
+        total = calc.match_overtime_request(windows, reqs)
+        detailed = calc.match_overtime_request_detailed(windows, reqs)
+        assert round(sum(detailed.values()), 4) == total
+
+    def test_tz_same_instant_different_zone(self):
+        # TC-U-09: 20:00+07 == 13:00Z → overlap is the full hour (not 0, not 8).
+        out = calc.match_overtime_request_detailed(
+            [_win("2026-06-20 13:00:00+00:00", "2026-06-20 14:00:00+00:00")],
+            [_req("OR-1", _vn(2026, 6, 20, 20, 0), _vn(2026, 6, 20, 21, 0))],
+        )
+        assert out == {"OR-1": 1.0}
+
+    def test_fe_offset_string_matches_local_instant(self):
+        # The +07:00 string the FE now sends resolves to the same instant as the
+        # tz-aware local datetime (locks down EC-3 / plan T5).
+        assert calc._as_dt("2026-08-14 18:00:00+07:00") == calc._as_dt(_vn(2026, 8, 14, 18, 0))
+
+    def test_breakdown_stamped_on_work_session_result(self):
+        # The calc result now carries the per-request breakdown for write-back.
+        si = base_shift(
+            _vn(2026, 6, 20, 8, 0),
+            _vn(2026, 6, 20, 20, 0),
+            vn_allow_overtime_after_shift=True,
+        )
+        logs = [log(_vn(2026, 6, 20, 8, 0), "IN"), log(_vn(2026, 6, 20, 22, 0), "OUT")]
+        reqs = [_req("OR-1", _vn(2026, 6, 20, 20, 0), _vn(2026, 6, 20, 21, 0))]
+        r = calc.calculate_work_session(
+            si, logs, base_policy(require_overtime_approval=True), ot_requests=reqs
+        )
+        assert r["_ot_request_breakdown"] == {"OR-1": 1.0}
         assert r["approved_overtime_hours"] == 1.0
 
 
@@ -467,3 +583,197 @@ class TestCalculatePayableDay:
     def test_below_half_day_zero(self):
         ws = {"absent": 0, "actual_within_shift_hours": 1.0}
         assert calc.calculate_payable_day(ws, base_policy()) == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# _db_dt — Frappe Datetime DB serialization (root cause of empty /hr/attendance)
+# --------------------------------------------------------------------------- #
+class TestDbDt:
+    """``calculate_work_session`` emits ISO-Z strings (``2026-06-24T01:00:00Z``);
+    MariaDB rejects them for Datetime columns, silently killing every Work
+    Session insert. ``_db_dt`` must normalise to ``YYYY-MM-DD HH:MM:SS``."""
+
+    # PHASE-1 FRAME: true-UTC inputs (Z / offset / aware) are stored as naive
+    # PORTAL WALL (+7 on this portal) — the live DB storage frame.
+
+    def test_iso_z_normalized(self):
+        assert calc._db_dt("2026-06-24T01:00:00Z") == "2026-06-24 08:00:00"
+
+    def test_lowercase_z(self):
+        assert calc._db_dt("2026-06-24T01:00:00z") == "2026-06-24 08:00:00"
+
+    def test_offset_converted_to_utc(self):
+        # +07:00 wall input → same wall instant persisted unchanged
+        assert calc._db_dt("2026-06-24T08:00:00+07:00") == "2026-06-24 08:00:00"
+
+    def test_datetime_input(self):
+        dt = datetime(2026, 6, 24, 1, 0, 0, tzinfo=ZoneInfo("UTC"))
+        assert calc._db_dt(dt) == "2026-06-24 08:00:00"
+
+    def test_naive_datetime_passthrough(self):
+        dt = datetime(2026, 6, 24, 1, 0, 0)
+        assert calc._db_dt(dt) == "2026-06-24 01:00:00"
+
+    def test_none_returns_none(self):
+        assert calc._db_dt(None) is None
+
+    def test_output_is_db_safe(self):
+        # The exact failure trigger: no 'T' and no 'Z' in the result.
+        out = calc._db_dt("2026-06-24T01:00:00Z")
+        assert "T" not in out and "Z" not in out
+        assert out.count("-") == 2 and out.count(":") == 2
+
+
+# ── FIX 2026-10-05: đổi ca tối → sáng, lượt chấm của phiên ca liền kề ────────
+
+
+def _log(day, hm, kind):
+    return {"time": f"2026-10-{day:02d} {hm}:00", "log_type": kind}
+
+
+def test_filter_window_drops_previous_night_out_for_morning_shift():
+    # Ca sáng 05/10 8h-20h; OUT 08:00 đóng ca tối 04/10 không thuộc phiên này.
+    si = {"checkin_window_start": "2026-10-05 07:00:00", "max_checkout_time": "2026-10-06 02:00:00"}
+    logs = [_log(4, "19:55", "IN"), _log(5, "08:00", "OUT")]
+    assert calc._filter_logs_to_window(logs, "2026-10-05 08:00:00", "2026-10-05 20:00:00", si) == []
+
+
+def test_filter_window_keeps_morning_session_after_previous_night_out():
+    si = {"checkin_window_start": "2026-10-05 07:00:00", "max_checkout_time": "2026-10-06 02:00:00"}
+    logs = [_log(5, "08:00", "OUT"), _log(5, "08:05", "IN"), _log(5, "20:01", "OUT")]
+    kept = calc._filter_logs_to_window(logs, "2026-10-05 08:00:00", "2026-10-05 20:00:00", si)
+    assert [(lg["time"][11:16], lg["log_type"]) for lg in kept] == [("08:05", "IN"), ("20:01", "OUT")]
+
+
+def test_filter_window_drops_next_session_in_for_night_shift():
+    # Ca tối 04/10 20h-8h; IN 08:05 sáng 05/10 mở ca sáng mới, không thuộc ca tối.
+    si = {"checkin_window_start": "2026-10-04 19:00:00", "max_checkout_time": "2026-10-05 14:00:00"}
+    logs = [_log(4, "19:55", "IN"), _log(5, "08:00", "OUT"), _log(5, "08:05", "IN")]
+    kept = calc._filter_logs_to_window(logs, "2026-10-04 20:00:00", "2026-10-05 08:00:00", si)
+    assert [(lg["time"][11:16], lg["log_type"]) for lg in kept] == [("19:55", "IN"), ("08:00", "OUT")]
+
+
+def test_filter_window_keeps_late_out_and_early_in_of_own_session():
+    # OUT muộn (sau pe) và IN sớm (trước ps) của chính phiên vẫn được giữ.
+    si = {"checkin_window_start": "2026-10-05 07:00:00", "max_checkout_time": "2026-10-06 02:00:00"}
+    logs = [_log(5, "07:10", "IN"), _log(5, "21:30", "OUT")]
+    kept = calc._filter_logs_to_window(logs, "2026-10-05 08:00:00", "2026-10-05 20:00:00", si)
+    assert len(kept) == 2
+
+
+# ── Cách tính công theo ca (plans/plan-cach-tinh-cong-theo-ca.md) ─────────────
+
+
+def _policy_8_4(**over):
+    return base_policy(min_working_hours_full_day=8.0, min_working_hours_half_day=4.0, **over)
+
+
+class TestPayableThresholds:
+    def test_12h_shift_keeps_policy_thresholds(self):
+        assert calc.payable_thresholds(_policy_8_4(), 12.0) == (8.0, 4.0)
+
+    def test_8h_shift_full_day_shrinks_by_tolerance(self):
+        assert calc.payable_thresholds(_policy_8_4(), 8.0) == (7.5, 4.0)
+
+    def test_6h_shift(self):
+        assert calc.payable_thresholds(_policy_8_4(), 6.0) == (5.5, 3.0)
+
+    def test_zero_tolerance(self):
+        assert calc.payable_thresholds(_policy_8_4(full_day_shortage_tolerance_minutes=0), 8.0) == (8.0, 4.0)
+
+    def test_unknown_shift_length_uses_policy(self):
+        assert calc.payable_thresholds(_policy_8_4(), 0) == (8.0, 4.0)
+
+
+class TestPayableEightHourShift:
+    PS = _vn(2026, 9, 29, 9, 0)
+    PE = _vn(2026, 9, 29, 17, 0)
+
+    def _run(self, t_in, t_out, method=None, **pol):
+        si = base_shift(self.PS, self.PE)
+        if method:
+            si["vn_payable_day_method"] = method
+        logs = []
+        if t_in:
+            logs.append(log(t_in, "IN"))
+        if t_out:
+            logs.append(log(t_out, "OUT"))
+        return calc.calculate_work_session(si, logs, _policy_8_4(**pol))
+
+    def test_late_35_seconds_is_full_day(self):
+        # Kiệt 29/09: 09:00:35 → 17:00:54 từng bị 0.5 công vì thiếu 35 giây.
+        t_in = datetime(2026, 9, 29, 9, 0, 35, tzinfo=VN)
+        r = self._run(t_in, _vn(2026, 9, 29, 17, 0))
+        assert r["late_minutes"] == 0
+        assert r["payable_regular_hours"] == 8.0
+        assert r["payable_day"] == 1.0
+
+    def test_late_within_grace_fully_credited(self):
+        r = self._run(_vn(2026, 9, 29, 9, 3), _vn(2026, 9, 29, 17, 0))
+        assert r["late_minutes"] == 0
+        assert r["regular_hours"] == round(8 - 3 / 60, 4)
+        assert r["payable_regular_hours"] == 8.0
+
+    def test_late_beyond_grace_deducts_only_excess(self):
+        # Trễ 12', ân hạn 5' → chỉ trừ 7'.
+        r = self._run(_vn(2026, 9, 29, 9, 12), _vn(2026, 9, 29, 17, 0))
+        assert r["late_minutes"] == 7
+        assert r["grace_credit_minutes"] == 5
+        assert r["payable_regular_hours"] == round(8 - 7 / 60, 4)
+        assert r["payable_day"] == 1.0  # ≥ 7h30
+
+    def test_threshold_half_day_below_7h30(self):
+        # 09:00 → 16:03 = 7.05h < 7.5h → nửa công (theo ngưỡng).
+        r = self._run(_vn(2026, 9, 29, 9, 0), _vn(2026, 9, 29, 16, 3))
+        assert r["payable_day"] == 0.5
+
+    def test_per_minute_method(self):
+        r = self._run(_vn(2026, 9, 29, 9, 0), _vn(2026, 9, 29, 16, 3), method=calc.PAYABLE_METHOD_PER_MINUTE)
+        assert r["payable_day"] == round(7.05 / 8, 2)
+
+    def test_per_minute_late_beyond_grace(self):
+        r = self._run(_vn(2026, 9, 29, 9, 12), _vn(2026, 9, 29, 17, 0), method=calc.PAYABLE_METHOD_PER_MINUTE)
+        assert r["payable_day"] == round((8 - 7 / 60) / 8, 2)
+
+    def test_per_minute_capped_at_one(self):
+        r = self._run(_vn(2026, 9, 29, 8, 0), _vn(2026, 9, 29, 18, 0), method=calc.PAYABLE_METHOD_PER_MINUTE)
+        assert r["payable_day"] == 1.0
+
+    def test_missing_checkout_gets_no_grace_credit(self):
+        r = self._run(_vn(2026, 9, 29, 9, 3), None)
+        assert r["grace_credit_minutes"] == 0
+        assert r["payable_regular_hours"] == 0.0
+        assert r["payable_day"] == 0.0
+
+    def test_early_leave_has_no_grace(self):
+        r = self._run(_vn(2026, 9, 29, 9, 0), _vn(2026, 9, 29, 16, 57), method=calc.PAYABLE_METHOD_PER_MINUTE)
+        assert r["payable_regular_hours"] == round(8 - 3 / 60, 4)
+
+
+class TestPayableTwelveHourShiftUnchanged:
+    PS = _vn(2026, 9, 29, 8, 0)
+    PE = _vn(2026, 9, 29, 20, 0)
+
+    def test_eight_hours_is_full_day(self):
+        si = base_shift(self.PS, self.PE)
+        logs = [log(_vn(2026, 9, 29, 8, 0), "IN"), log(_vn(2026, 9, 29, 16, 0), "OUT")]
+        assert calc.calculate_work_session(si, logs, _policy_8_4())["payable_day"] == 1.0
+
+    def test_under_eight_hours_is_half_day(self):
+        si = base_shift(self.PS, self.PE)
+        logs = [log(_vn(2026, 9, 29, 8, 0), "IN"), log(_vn(2026, 9, 29, 15, 50), "OUT")]
+        assert calc.calculate_work_session(si, logs, _policy_8_4())["payable_day"] == 0.5
+
+
+class TestIsValidPayableDay:
+    def test_threshold_values(self):
+        assert all(calc.is_valid_payable_day(v) for v in (0, 0.5, 1.0))
+
+    def test_per_minute_fractions(self):
+        assert calc.is_valid_payable_day(0.88)
+        assert calc.is_valid_payable_day(0.12)
+
+    def test_out_of_range_or_garbage(self):
+        assert not calc.is_valid_payable_day(1.5)
+        assert not calc.is_valid_payable_day(-0.1)
+        assert not calc.is_valid_payable_day("x")

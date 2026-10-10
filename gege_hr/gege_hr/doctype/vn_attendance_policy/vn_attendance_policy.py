@@ -32,8 +32,9 @@ class VNAttendancePolicy(Document):
         if self.is_locked and not self.flags.ignore_locked_policy:
             if self.is_new():
                 return
-            # Only HR Manager may unlock; otherwise block writes.
-            if "HR Manager" not in frappe.get_roles():
+            # Only HR Manager / System Manager may unlock; otherwise block
+            # writes (F12: System Manager was wrongly rejected here).
+            if not ({"HR Manager", "System Manager"} & set(frappe.get_roles())):
                 frappe.throw(_("Policy đã bị khóa. Chỉ HR Manager mới được chỉnh sửa."))
 
     def _validate_penalty_rules(self):

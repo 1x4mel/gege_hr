@@ -15,14 +15,22 @@ from gege_hr.gege_hr.utils import audit
 # Vocabulary
 # --------------------------------------------------------------------------- #
 def test_audit_types_count():
-    # doctype-design §26 spec: 19 audit types (Leave Approve/Reject added
+    # doctype-design §26 spec: 19 base audit types (Leave Approve/Reject added
     # alongside Leave Submit/Cancel to surface the HR leave-approval flow,
-    # symmetric with OT Submit/Approve).
-    assert len(audit.AUDIT_TYPES) == 19
+    # symmetric with OT Submit/Approve) + 3 checkout-miss types (Explain/
+    # Resolve/Appeal — checkout-miss fix plan §audit + deskfree-complete C6)
+    # + 2 draft-edit types (OT/Correction Update Draft — deskfree plans; also
+    # backfills "OT Update Draft" which was silently dropped before the vocab
+    # existed).
+    assert len(audit.AUDIT_TYPES) == 24
+    assert "OT Update Draft" in audit.AUDIT_TYPES
+    assert "Correction Update Draft" in audit.AUDIT_TYPES
     assert "Manual Override" in audit.AUDIT_TYPES
     assert "Payroll Publish" in audit.AUDIT_TYPES
     assert "Leave Approve" in audit.AUDIT_TYPES
     assert "Leave Reject" in audit.AUDIT_TYPES
+    assert "Checkout Miss Explain" in audit.AUDIT_TYPES
+    assert "Checkout Miss Resolve" in audit.AUDIT_TYPES
 
 
 def test_is_valid_audit_type():

@@ -17,6 +17,26 @@ app_email = "dev@gege.local"
 app_license = "MIT"
 
 # --------------------------------------------------------------------------- #
+# Doctype permission hooks (inbox-centric migration): the gege_hr approval
+# matrix authorises HR Manager / HR User to act on ANY pending request of these
+# doctypes (regardless of which employee filed it). Frappe's default per-employee
+# User Permission / permission_query_conditions would block the unified inbox
+# (approve_request / reject_request load via get_doc + persist via doc.save — both
+# permission-checked). These hooks grant the matrix-authorised roles
+# access-to-all so the inbox runs through the PROPER Frappe flow (validate +
+# on_update/on_submit → logs / ledger), with no ignore_permissions bypass.
+# The shared implementation lives in gege_hr.gege_hr.permissions.
+# --------------------------------------------------------------------------- #
+# F3: single source of truth — the doctype list lives in permissions.py.
+# A second hand-maintained copy here drifted silently out of sync.
+from gege_hr.gege_hr.permissions import MATRIX_DOCTYPES as _MATRIX_DOCTYPES  # noqa: E402
+
+has_permission = {dt: "gege_hr.gege_hr.permissions.has_permission" for dt in _MATRIX_DOCTYPES}
+permission_query_conditions = {
+    dt: "gege_hr.gege_hr.permissions.permission_query_conditions" for dt in _MATRIX_DOCTYPES
+}
+
+# --------------------------------------------------------------------------- #
 # Modules owned by this app (must match modules.txt).
 # --------------------------------------------------------------------------- #
 app_modules = [
@@ -71,6 +91,13 @@ app_doctypes = [
     {"doctype": "VN Leave Staffing Rule"},
     {"doctype": "VN Leave Blackout Period"},
     {"doctype": "VN Leave Handover Task"},
+    # Onboarding (FIX-2 / I-2) — custom gege_hr process + template + task child.
+    {"doctype": "VN Employee Onboarding"},
+    {"doctype": "VN Onboarding Template"},
+    {"doctype": "VN Onboarding Task"},
+    # Checkout-miss auto-close (Chính sách A) — ticket per forgotten checkout.
+    {"doctype": "VN Checkout Miss"},
+    {"doctype": "VN Payroll Adjustment"},
 ]
 
 # --------------------------------------------------------------------------- #
@@ -93,6 +120,108 @@ def sync_custom_fields():
     from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 
     create_custom_fields(_vn_custom_fields())
+    _seed_checkout_miss_defaults()
+
+
+def seed_advance_deduction_component():
+    """Ensure the default salary-advance deduction Salary Component exists.
+
+    ``utils.advance.DEFAULT_ADVANCE_DEDUCTION_COMPONENT`` ("Salary Advance")
+    is the component stamped onto every ``Additional Salary`` row a Paid VN
+    Salary Advance Request materialises. Without the component the HRMS
+    insert fails validation and the hook logs-and-skips — the advance never
+    reaches the Salary Slip. Idempotent; bench-guarded no-op otherwise.
+    """
+    import frappe
+
+    from gege_hr.gege_hr.utils.advance import DEFAULT_ADVANCE_DEDUCTION_COMPONENT
+
+    try:
+        if frappe.db.exists("Salary Component", DEFAULT_ADVANCE_DEDUCTION_COMPONENT):
+            return
+        doc = frappe.get_doc(
+            {
+                "doctype": "Salary Component",
+                "salary_component": DEFAULT_ADVANCE_DEDUCTION_COMPONENT,
+                "name": DEFAULT_ADVANCE_DEDUCTION_COMPONENT,
+                "type": "Deduction",
+                "description": "Khấu trừ ứng lương — trừ vào lương kỳ chứa ngày xin ứng",
+            }
+        )
+        doc.insert(ignore_permissions=True)
+    except Exception:
+        pass
+
+
+def normalize_advance_repayment_plans():
+    """Migrate legacy repayment plans to the single supported method.
+
+    Business rule (2026-08): only ``Next Month`` — an advance requested within
+    a payroll period is deducted from that period's salary (paid the next
+    month). Legacy ``Installment``/``Custom``/blank rows are rewritten.
+    Idempotent; best-effort no-op outside a bench or without the doctype.
+    """
+    import frappe
+
+    from gege_hr.gege_hr.utils.advance import REPAYMENT_PLAN_NEXT_MONTH
+
+    try:
+        rows = frappe.get_all(
+            "VN Salary Advance Request",
+            filters={"docstatus": ["<", 2]},
+            fields=["name", "repayment_plan"],
+        )
+        stale = [
+            r["name"] for r in (rows or []) if (r.get("repayment_plan") or "") != REPAYMENT_PLAN_NEXT_MONTH
+        ]
+        for name in stale:
+            frappe.db.set_value(
+                "VN Salary Advance Request",
+                name,
+                "repayment_plan",
+                REPAYMENT_PLAN_NEXT_MONTH,
+                update_modified=False,
+            )
+    except Exception:
+        pass
+
+
+def _seed_checkout_miss_defaults():
+    """Seed the checkout-miss config on VN HR Portal Setting if unset.
+
+    Custom-field defaults on a Single doctype are NOT auto-written to
+    ``tabSingles`` during migrate, so ``get_single_value`` returns 0 for unset
+    Check/Int fields (which would wrongly read as 'disabled'). This idempotent
+    step writes the documented defaults so a fresh install works out-of-box.
+    """
+    try:
+        import frappe
+
+        defaults = {
+            "vn_cm_enabled": "1",
+            "vn_cm_grace_hours": "24",
+            "vn_cm_free_first_n": "2",
+            "vn_cm_penalty_amount": "100000",
+            "vn_cm_window_days": "90",
+            "vn_cm_buffer_minutes": "360",
+        }
+        for field, value in defaults.items():
+            current = frappe.db.get_single_value("VN HR Portal Setting", field)
+            if current in (None, "", 0, "0"):
+                frappe.db.set_single_value("VN HR Portal Setting", field, value)
+        # Desk-free COMPLETE (B1/B6/C4) — for these a configured 0 is MEANINGFUL
+        # (email off, caps unlimited, auto-assign off), so seed only when the
+        # column is truly unset (None/"") — never "0"-means-default like above.
+        soft_defaults = {
+            "vn_cm_max_evidence_files": "5",
+            "vn_cm_max_evidence_mb": "10",
+        }
+        for field, value in soft_defaults.items():
+            current = frappe.db.get_single_value("VN HR Portal Setting", field)
+            if current in (None, ""):
+                frappe.db.set_single_value("VN HR Portal Setting", field, value)
+    except Exception:
+        pass
 
 
 def create_seed_data():
@@ -117,12 +246,39 @@ def create_seed_data():
 scheduler_events = {
     # Daily, just after midnight portal time: generate shift instances for the
     # configured horizon and auto-mark absentees from the previous day.
+    # Plan v2 (confirm-early & auto-lock): daily auto-confirm of overdue
+    # unacknowledged payslips (default 3 days — VN HR Portal Setting
+    # vn_payslip_autoconfirm_days; 0 disables).
     "daily": [
         "gege_hr.gege_hr.api.shift.generate_daily_shift_instances",
+        "gege_hr.gege_hr.api.payslip_ack.run_payslip_autoconfirm",
     ],
     "cron": {
         # 02:00 portal time → auto-mark absent (stubbed; full engine in M2).
         "0 2 * * *": ["gege_hr.gege_hr.api.attendance.auto_mark_absent_job"],
+        # Every hour: auto-close forgotten checkouts (employees who didn't
+        # return) + flip expired Pending tickets to Penalised. Chính sách A.
+        "0 * * * *": ["gege_hr.gege_hr.utils.checkout_miss.run_hourly"],
+        # Every 15 min: self-heal — tính lại session có lượt chấm mới hơn lần
+        # tính cuối (hook enqueue có thể fail hàng loạt khi queue lỗi; vụ
+        # 11/09 Minh Châu session thiếu giờ ra dù đã chấm Ra 20:12).
+        "*/15 * * * *": ["gege_hr.gege_hr.utils.calc.recalc_stale_sessions"],
+        # WP4: every 10 minutes — a dead engine must be VISIBLE (Notification
+        # to HR Managers + WARN Error Log) within ~2h, not after a week of
+        # payroll complaints.
+        "*/10 * * * *": ["gege_hr.gege_hr.utils.health.alert_if_unhealthy"],
+        # WP8: 07:00 daily — Error Log digest (top-10 titles, last 24h).
+        "0 7 * * *": ["gege_hr.gege_hr.utils.health.daily_error_digest"],
+        # WP5: 07:10 daily — nudge HR about Active employees missing SSA/bank.
+        "10 7 * * *": ["gege_hr.gege_hr.api.onboarding.notify_missing_payroll_profile"],
+        # WP6: 07:30 every day — auto-close LAST month's payroll (attempts on
+        # days 1-5, alerts daily afterwards while blocked; stops at Draft).
+        "30 7 * * *": ["gege_hr.gege_hr.api.payroll.auto_close_payroll"],
+        # Desk-free B3 (plans/approvals-deskfree-complete §3.6) — 08:00 daily:
+        # one digest mail per approver with pending requests (toggle on the
+        # VN HR Portal Setting); 09:00 daily: SLA reminders + HR escalation.
+        "0 8 * * *": ["gege_hr.gege_hr.api.approval_followup.send_pending_digests"],
+        "0 9 * * *": ["gege_hr.gege_hr.api.approval_followup.escalate_stale_requests"],
     },
 }
 
@@ -130,19 +286,65 @@ scheduler_events = {
 # DocType lifecycle hooks (wired progressively as backends ship).
 # --------------------------------------------------------------------------- #
 doc_events = {
+    # Mirror gege_hr custom check-in/out windows into Frappe-native Shift Type
+    # fields on every save, so native auto-attendance pairs overnight shifts
+    # the same way the Work-Session engine does (vn_max_checkout_after_end_minutes
+    # → allow_check_out_after_shift_end_time, etc.).
+    "Shift Type": {
+        "validate": [
+            "gege_hr.gege_hr.api.shift.sync_native_shift_windows",
+            # Keep the per-shift OT review threshold ≤ the policy's OT cap
+            # (the global ceiling) — "ca không vượt mức tổng" (plan §11.5).
+            "gege_hr.gege_hr.api.overtime_settings.validate_shift_ot_threshold",
+            # Keep the two "check-out after shift" knobs consistent: the normal
+            # check-out window must end before the late-checkout warning threshold.
+            "gege_hr.gege_hr.api.overtime_settings.validate_shift_checkout_window",
+        ],
+    },
     # Shift instance naming + recalc trigger.
     "VN Employee Shift Instance": {
-        "before_insert": "gege_hr.gege_hr.utils.naming.set_yymmdd_name",
         "on_submit": "gege_hr.gege_hr.api.shift.on_shift_instance_submit",
     },
     # Raw check-in arrival → enqueue work-session recalculation.
     "Employee Checkin": {
         "after_insert": "gege_hr.gege_hr.api.attendance.on_employee_checkin_create",
     },
+    # Realtime desk-free parity (plans/plan-blackout-desk-free.md §B8): broadcast
+    # a light event on every blackout-rule mutation so the SPA list shows the
+    # "N quy tắc thay đổi" refresh pill. FIX 2026-10-04: this used to sit in a
+    # SECOND top-level ``doc_events`` dict that this one overwrote — the hook
+    # never ran (the matching hourly ``run_hourly`` lives in "cron" above).
+    "VN Leave Blackout Period": {
+        "after_insert": "gege_hr.gege_hr.api.leave_blackout.on_doc_event",
+        "on_update": "gege_hr.gege_hr.api.leave_blackout.on_doc_event",
+        "on_trash": "gege_hr.gege_hr.api.leave_blackout.on_doc_event",
+    },
     # Leave workflow → refresh leave calendar cache + notify approver.
     "Leave Application": {
         "on_submit": "gege_hr.gege_hr.api.leave.on_leave_submit",
         "on_cancel": "gege_hr.gege_hr.api.leave.on_leave_cancel",
+    },
+    # FIX-1 (hr-gap-audit I-1): upsert a core ``Attendance`` row whenever a Work
+    # Session is saved, so Frappe HR's standard reports/dashboards stay in sync
+    # with the portal's Work Session (idempotent; submit only on Locked period).
+    "VN Attendance Work Session": {
+        "on_update": "gege_hr.gege_hr.api.attendance_sync.on_work_session_update",
+    },
+    # Desk-free COMPLETE (B1/C3) — email the employee when the engine (or HR)
+    # opens a ticket. doc_events rides the toggle-respecting _email_notify
+    # path (a standard Notification condition cannot read vn_cm_email_enabled
+    # — its safe_eval sandbox has no frappe.db).
+    "VN Checkout Miss": {
+        "after_insert": "gege_hr.gege_hr.api.checkout_miss.on_ticket_created",
+    },
+    # WP3 (F-LC17 prod-side): block hard-deleting an Employee that still has
+    # attendance data (dangling Shift Assignments once broke the whole
+    # company's materialisation) + handle Active → Left cleanly.
+    "Employee": {
+        "on_trash": "gege_hr.gege_hr.api.employee_lifecycle.guard_employee_delete",
+        "on_update": "gege_hr.gege_hr.api.employee_lifecycle.handle_employee_status_change",
+        # plan-employee-frontend-parity §2.5 — chặn chuỗi reports_to vòng lặp.
+        "validate": "gege_hr.gege_hr.api.employee_lifecycle.guard_reports_to_cycle",
     },
 }
 
@@ -178,12 +380,28 @@ boot_session = "gege_hr.gege_hr.api.auth.get_boot_data"
 # --------------------------------------------------------------------------- #
 after_migrate = [
     "gege_hr.hooks.sync_custom_fields",
+    # Self-heal: re-run the seed (idempotent — fills gaps only) so a site whose
+    # after_install was interrupted still gets Company/policy/matrices on the
+    # next `bench migrate`.
+    "gege_hr.hooks.create_seed_data",
+    "gege_hr.hooks.seed_advance_deduction_component",
+    "gege_hr.hooks.normalize_advance_repayment_plans",
     "gege_hr.gege_hr.api.setup_permissions.grant_hr_permissions",
+    # Desk-free COMPLETE (S4) — email templates / notifications / print format
+    # / auto email report / assignment rule / permissive checkout-miss
+    # workflow. Idempotent (creates missing records only) + bench-guarded.
+    "gege_hr.gege_hr.setup_checkout_miss_deskfree.seed",
+    # Payslips desk-free (plan payslips-deskfree-complete WP1) — "Phiếu lương
+    # VN" Print Format for Salary Slip (PDF download + email attachment).
+    "gege_hr.gege_hr.setup_payslips_deskfree.seed",
 ]
+
 after_install = [
     "gege_hr.hooks.sync_custom_fields",
     "gege_hr.hooks.create_seed_data",
     "gege_hr.gege_hr.api.setup_permissions.grant_hr_permissions",
+    "gege_hr.gege_hr.setup_checkout_miss_deskfree.seed",
+    "gege_hr.gege_hr.setup_payslips_deskfree.seed",
 ]
 
 # Expose whitelisted methods to the JS client (rpc / frappe.call).

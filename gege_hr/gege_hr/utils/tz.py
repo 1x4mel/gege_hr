@@ -65,6 +65,61 @@ def now_in_portal(tz: str | None = None) -> datetime:
     return datetime.now(get_tzinfo(tz))
 
 
+# --------------------------------------------------------------------------- #
+# PHASE-1 CANONICAL FRAME — naive PORTAL WALL CLOCK (plans/tz-frame-unification-plan.md §3)
+#
+# The live DB stores attendance datetimes as naive PORTAL wall-clock strings
+# (proven by E2E Group B: the UTC-bound readers absorbed yesterday's 23:30 log
+# into "today" and the engine computed late=565' by +7-ing a wall value).
+# Until the Phase-2 migration to true UTC, EVERY reader/writer must go through
+# ``wall`` / ``portal_now_str`` so the whole app lives in ONE frame.
+# --------------------------------------------------------------------------- #
+def wall(dt: datetime | None) -> datetime | None:
+    """Normalise any datetime to a NAIVE PORTAL-WALL datetime (Phase-1 frame).
+
+    * aware → converted to the portal timezone, tzinfo dropped
+    * naive → assumed ALREADY portal-wall (the DB storage frame) — returned
+      unchanged. This is the deliberate inversion of the old UTC assumption.
+    """
+    if dt is None:
+        return None
+    if getattr(dt, "tzinfo", None) is not None:
+        return dt.astimezone(get_tzinfo()).replace(tzinfo=None)
+    return dt
+
+
+def portal_now_str() -> str:
+    """DB-safe ``YYYY-MM-DD HH:MM:SS`` in the PORTAL WALL frame — the Phase-1
+    stamp for ``Employee Checkin.time`` and every attendance writer."""
+    return now_in_portal().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def utc_now() -> datetime:
+    """Current moment as an **aware UTC** datetime.
+
+    This deliberately avoids ``frappe.utils.now()``, which returns a *naive*
+    string in the site's **system timezone** — and when ``System Settings
+    .time_zone`` is unset Frappe falls back to its compiled default
+    (``Asia/Kolkata``, UTC+5:30). That silently shifts every stamp
+    ``frappe.utils.now()`` produces (see the attendance "5h future" bug).
+
+    Use this anywhere a true-UTC stamp is needed for an attendance record /
+    audit column. ``datetime.now(UTC)`` only trusts the OS clock (kept in sync
+    via NTP), which is the same source Frappe's storage convention expects.
+    """
+    return datetime.now(ZoneInfo("UTC"))
+
+
+def utc_now_str() -> str:
+    """MySQL/Frappe-safe ``YYYY-MM-DD HH:MM:SS`` string in true UTC.
+
+    Equivalent to the historical ``frappe.utils.now()`` contract (naive UTC
+    string) but immune to the misconfigured system timezone. Use this when
+    populating ``Datetime`` columns directly.
+    """
+    return utc_now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def to_portal(dt: datetime, tz: str | None = None) -> datetime:
     """Convert any aware/naive datetime to the portal timezone.
 
@@ -160,3 +215,85 @@ def utc_iso(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=ZoneInfo("UTC"))
     return dt.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_client_timestamp(value):
+    """Normalise a client-supplied timestamp to a MySQL-safe UTC string.
+
+    Browsers typically send ``new Date().toISOString()`` →
+    ``"2026-06-24T06:30:35.734Z"``. MySQL/Frappe ``Datetime`` columns reject
+    the ``T`` separator, fractional seconds, and any offset/``Z`` suffix,
+    raising ``pymysql.err.OperationalError(1292, "Incorrect datetime value")``.
+
+    This helper parses any common JS/client format and returns a plain
+    ``"YYYY-MM-DD HH:MM:SS"`` string in UTC (no microseconds, no offset) —
+    the exact form MySQL ``DATETIME`` accepts. ``None`` is returned for
+    empty/invalid input so the audit column is left blank instead of
+    crashing the whole check-in.
+
+    Accepted inputs:
+      * ``"2026-06-24T06:30:35.734Z"``   (JS toISOString)
+      * ``"2026-06-24T06:30:35Z"``        (ISO without ms)
+      * ``"2026-06-24T06:30:35+07:00"``   (ISO with offset)
+      * ``"2026-06-24 06:30:35"``         (Frappe/SQL naive → assumed UTC)
+      * an epoch-ms number (JS ``Date.now()``)
+      * a ``datetime`` object (converted to UTC)
+    """
+    dt = _coerce_client_datetime(value)
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+    else:
+        dt = dt.astimezone(ZoneInfo("UTC"))
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _coerce_client_datetime(value):
+    """Parse a client timestamp into an aware ``datetime`` or ``None``.
+
+    Pure parsing helper (no formatting); ``parse_client_timestamp`` wraps it
+    to emit the DB-safe string.
+    """
+    if value is None or value == "":
+        return None
+
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=ZoneInfo("UTC")) if value.tzinfo is None else value
+
+    if isinstance(value, (int, float)):
+        # Treat numbers as JS epoch milliseconds.
+        try:
+            return datetime.fromtimestamp(value / 1000.0, tz=ZoneInfo("UTC"))
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    if not isinstance(value, str):
+        return None
+
+    raw = value.strip()
+    if not raw:
+        return None
+
+    # 1) ISO-8601 with 'Z' suffix → replace with +00:00 for fromisoformat.
+    iso = raw
+    if iso.endswith(("Z", "z")):
+        iso = iso[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(iso)
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=ZoneInfo("UTC"))
+    except ValueError:
+        pass
+
+    # 2) Explicit JS toISOString() layout as a fallback.
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return datetime.strptime(raw, fmt).replace(tzinfo=ZoneInfo("UTC"))
+        except ValueError:
+            continue
+
+    # 3) Frappe/SQL naive layout "YYYY-MM-DD HH:MM:SS" → assumed UTC.
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
+    except ValueError:
+        return None

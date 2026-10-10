@@ -50,6 +50,9 @@ _TRANSACTION_TO_TYPE = {
     "Overtime Request": "OT",
     "Correction Request": "Correction",
     "Salary Advance Request": "Advance",
+    # services-deskfree P1c — inbox decisions trên 2 doctype này.
+    "Employee Grievance": "Alert",
+    "Travel Request": "Alert",
 }
 
 # Terminal/progress outcomes → (title template, message template).
@@ -66,6 +69,12 @@ _OUTCOME_TEMPLATES = {
     "submitted": (
         "{label} đang chờ duyệt",
         "Yêu cầu {label} của bạn đã gửi và đang chờ phê duyệt.",
+    ),
+    # Desk-free Phase B1 (plans/approvals-deskfree-complete §3.4) — approver
+    # bounced the request back to Draft for the employee to fix + resend.
+    "returned": (
+        "{label} bị trả lại để sửa",
+        "Yêu cầu {label} của bạn bị trả lại để chỉnh sửa rồi gửi lại.",
     ),
 }
 
@@ -278,6 +287,10 @@ def _tickle(employee: str | None, notification_name: str | None) -> None:
         return
     try:
         target_user = resolve_user_for_employee(employee)
+        if not target_user:
+            # user=None broadcasts to EVERY connected socket — an unlinked
+            # employee must not leak the event (and payload) site-wide.
+            return
         frappe.publish_realtime(
             event=f"hr-portal:{employee}",
             message={"employee": employee, "name": notification_name},

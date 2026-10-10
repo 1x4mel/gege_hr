@@ -12,8 +12,7 @@ from __future__ import annotations
 import frappe
 from frappe import _
 
-from gege_hr.gege_hr.utils import employee as emp_utils
-from gege_hr.gege_hr.utils import tz as tz_utils
+from gege_hr.gege_hr.utils import employee as emp_utils, tz as tz_utils
 
 
 @frappe.whitelist(allow_guest=True)
@@ -21,6 +20,19 @@ def get_csrf_token() -> dict:
     """Return a fresh CSRF token (and set the cookie) for the SPA bootstrap."""
     token = frappe.sessions.get_csrf_token()
     return {"csrf_token": token}
+
+
+@frappe.whitelist(allow_guest=True)
+def get_site_name() -> dict:
+    """Site name for the SPA's realtime socket namespace.
+
+    Frappe publishes site events (``publish_realtime`` without a room → room
+    ``all``) to the socket.io namespace ``/<sitename>``, and the node realtime
+    auto-joins every authenticated System User socket into room ``all``. The
+    SPA therefore must connect to ``/<sitename>`` — this endpoint lets it
+    resolve the name once at runtime (``VITE_FRAPPE_SITE`` short-circuits it).
+    """
+    return {"site": frappe.local.site}
 
 
 @frappe.whitelist(allow_guest=True)
@@ -88,9 +100,29 @@ def me() -> dict:
         "roles": roles,
         "role": portal_role,
         "employee": employee,
-        "portal_timezone": tz_utils.get_portal_timezone(),
+        # Per-user override (plan-profile-desk-free §2.2 P1): the user's own
+        # User.time_zone wins; the portal-wide default stays the fallback.
+        "portal_timezone": getattr(user_doc, "time_zone", None) or tz_utils.get_portal_timezone(),
         "home_page": _home_page_for_role(portal_role),
+        # Cờ tính năng cho khung app (menu tài khoản): "Quét QR" vào ca / đăng nhập console.
+        "features": _features(),
     }
+
+
+def _features() -> dict:
+    try:
+        setting = frappe.get_cached_doc("VN HR Portal Setting", "VN HR Portal Setting")
+        # Mục "Quét QR": vào ca / đăng nhập console (seat), đăng nhập Gege Forum, đăng nhập Gege HR trên máy tính
+        # — bật một trong các công tắc là hiện.
+        return {
+            "seat_qr": bool(
+                setting.get("enable_seat_qr_login")
+                or setting.get("enable_forum_qr_login")
+                or setting.get("enable_hr_qr_login")
+            )
+        }
+    except Exception:
+        return {"seat_qr": False}
 
 
 def _home_page_for_role(role: str) -> str:

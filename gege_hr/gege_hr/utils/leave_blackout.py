@@ -153,6 +153,8 @@ BLACKOUT_ROW_FIELDS = (
     "action",
     "reason",
     "modified",
+    "modified_by",
+    "owner",
 )
 
 
@@ -172,6 +174,105 @@ def blackout_row(row: Any) -> dict:
                 else value.date().isoformat()
             )
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Overlap guard (plan blackout desk-free §B7) — warn before minting a rule
+# that duplicates an existing active restriction window.
+# --------------------------------------------------------------------------- #
+def overlapping_rules(
+    rules: Iterable[dict],
+    *,
+    from_date: Any,
+    to_date: Any,
+    branch: str | None = None,
+    department: str | None = None,
+    leave_type: str | None = None,
+    exclude: str | None = None,
+) -> list[dict]:
+    """Active same-scope rules whose window overlaps ``[from_date, to_date]``.
+
+    Scope-match mirrors the runtime precedence in :func:`_rule_matches`: a rule
+    with a blank ``branch`` / ``department`` / ``applies_to_leave_type`` is the
+    *generic* one and covers every value, so it overlaps any same-window
+    request; a rule scoped narrower only overlaps an equal-or-broader request.
+    ``exclude`` drops the rule currently being edited so it never flags
+    itself. Pure / bench-free.
+    """
+    out: list[dict] = []
+    for rule in rules or ():
+        if not isinstance(rule, dict):
+            continue
+        if not rule.get("is_active", True):
+            continue
+        if exclude and rule.get("name") == exclude:
+            continue
+        rule_branch = str(rule.get("branch") or "").strip()
+        rule_department = str(rule.get("department") or "").strip()
+        rule_leave_type = str(rule.get("applies_to_leave_type") or "").strip()
+        if rule_branch and branch and rule_branch != str(branch).strip():
+            continue
+        if rule_department and department and rule_department != str(department).strip():
+            continue
+        if rule_leave_type and leave_type and rule_leave_type != str(leave_type).strip():
+            continue
+        if not date_overlaps(rule.get("from_date"), rule.get("to_date"), from_date, to_date):
+            continue
+        out.append(blackout_row(rule))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# CSV export serialiser (plan blackout desk-free §B6) — Excel-safe UTF-8 BOM.
+# --------------------------------------------------------------------------- #
+BLACKOUT_CSV_HEADERS = (
+    "Tên kỳ cấm",
+    "Công ty",
+    "Chi nhánh",
+    "Phòng ban",
+    "Từ ngày",
+    "Đến ngày",
+    "Loại nghỉ",
+    "Hành động",
+    "Đang áp dụng",
+    "Lý do",
+    "Người tạo",
+    "Sửa lần cuối",
+)
+
+
+def build_blackout_csv(rows: Iterable[dict]) -> str:
+    """Serialise normalised blackout rows to CSV with a UTF-8 BOM.
+
+    Parity ``utils/audit.build_audit_csv`` — the BOM keeps Excel from mangling
+    the Vietnamese headers. Pure / bench-free.
+    """
+    import csv
+    import io
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(BLACKOUT_CSV_HEADERS)
+    for row in rows or ():
+        if not isinstance(row, dict):
+            continue
+        writer.writerow(
+            [
+                row.get("blackout_name"),
+                row.get("company"),
+                row.get("branch"),
+                row.get("department"),
+                row.get("from_date"),
+                row.get("to_date"),
+                row.get("applies_to_leave_type"),
+                row.get("action"),
+                "Có" if row.get("is_active") else "Không",
+                row.get("reason"),
+                row.get("owner"),
+                row.get("modified_by"),
+            ]
+        )
+    return "\ufeff" + buf.getvalue()
 
 
 # --------------------------------------------------------------------------- #

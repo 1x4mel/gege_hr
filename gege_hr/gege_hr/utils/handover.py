@@ -46,10 +46,26 @@ ALLOWED_TRANSITIONS: dict[str, tuple[str, ...]] = {
 # --------------------------------------------------------------------------- #
 # Pure helpers
 # --------------------------------------------------------------------------- #
-def can_transition(current: str | None, target: str | None) -> bool:
-    """Whether a handover may move from ``current`` → ``target`` status."""
+def can_transition(current: str | None, target: str | None, docstatus: int | None = None) -> bool:
+    """Whether a handover may move from ``current`` → ``target`` status.
+
+    ``docstatus`` (optional — plan-handover-deskfree H1) tightens the table
+    for the submittable lifecycle:
+
+    * ``docstatus == 1`` (submitted / Completed): only the idempotent
+      same-state transition or a move to ``Cancelled`` (``doc.cancel()``).
+    * ``docstatus == 2`` (cancelled): only the idempotent same-state no-op —
+      a redo goes through "Tạo lại" (a brand-new doc), never a transition.
+    * ``docstatus in (0, None)``: the legacy permissive table below.
+
+    The two-argument form is unchanged (existing pins keep passing).
+    """
     if not target or target not in HANDOVER_STATUSES:
         return False
+    if docstatus == 1:
+        return target == current or target == "Cancelled"
+    if docstatus == 2:
+        return target == current
     if not current:
         # A brand-new handover can be created in any valid status.
         return True

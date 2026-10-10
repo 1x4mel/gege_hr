@@ -8,7 +8,7 @@
   {"fieldname": "info_break", "fieldtype": "Section Break", "label": "Info"},
   {"fieldname": "matrix_name", "fieldtype": "Data", "in_list_view": 1, "label": "Matrix Name", "reqd": 1, "unique": 1},
   {"fieldname": "company", "fieldtype": "Link", "in_list_view": 1, "label": "Company", "options": "Company", "reqd": 1},
-  {"fieldname": "transaction_type", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Transaction Type", "options": "Leave Application\nOvertime Request\nCorrection Request\nSalary Advance Request", "reqd": 1},
+  {"fieldname": "transaction_type", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Transaction Type", "options": "Leave Application\nOvertime Request\nCorrection Request\nSalary Advance Request\nExpense Claim\nEmployee Grievance\nTravel Request\nEmployee Onboarding", "reqd": 1},
   {"fieldname": "col1", "fieldtype": "Column Break"},
   {"fieldname": "apply_to", "default": "All", "fieldtype": "Select", "label": "Apply To", "options": "All\nBranch\nDepartment\nEmployee Grade"},
   {"fieldname": "branch", "fieldtype": "Link", "label": "Branch", "options": "Branch", "depends_on": "eval:doc.apply_to=='Branch'"},

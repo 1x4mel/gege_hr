@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install ruff pytest
+      # Gate 1: lint — 0 findings (config: pyproject.toml).
+      - run: ruff check .
+      # Gate 2: formatting baseline — every file "already formatted".
+      - run: ruff format --check .
+      # Gate 3: unit tests — bench-free suite (conftest.py stubs frappe).
+      - run: pytest -q

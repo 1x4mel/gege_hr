@@ -6,11 +6,15 @@ Fronts Frappe HR's ``Leave Application`` + ``Leave Allocation`` so the SPA
 
   * ``leave_type_options``    → active leave types + paid-flag
   * ``my_leave_balance``      → allocated / taken / pending / remaining per type
-  * ``my_applications``       → the caller's applications (optional date window)
+  * ``my_applications``       → the caller's applications (server-side
+                               q/status/leave_type + pagination — desk-free v2)
   * ``preview_leave``         → leave-day/hour math + balance impact + warnings
   * ``apply``                 → create (and submit) a Leave Application
   * ``cancel_draft_or_pending``  → cancel an Open/Draft application outright
   * ``request_cancellation``  → flag an Approved application for HR cancellation
+  * ``update_draft``          → edit an Open/Rejected draft (resubmit rejected)
+  * ``delete_draft``          → hard-delete an own docstatus-0 draft
+  * ``get_leave_application`` → detail + attachments + can-matrix for the drawer
 
 Pure leave-day math lives in ``utils/leave.py`` (bench-free). Bench loaders
 here are guarded so a missing Frappe HR table degrades gracefully rather than
@@ -19,21 +23,34 @@ here are guarded so a missing Frappe HR table degrades gracefully rather than
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import frappe
 from frappe import _
-from frappe.utils import cint, getdate
-from frappe.utils import today as frappe_today
+from frappe.utils import cint, getdate, today as frappe_today
 
 from gege_hr.gege_hr.api import audit as audit_api
-from gege_hr.gege_hr.utils import employee as emp_utils
-from gege_hr.gege_hr.utils import leave as leave_utils
-from gege_hr.gege_hr.utils import notify
+from gege_hr.gege_hr.utils import employee as emp_utils, leave as leave_utils, notify
 from gege_hr.gege_hr.utils.request_workflow import send_for_approval
 
 
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+def _as_employee_id(value) -> str:
+    """Coerce a leave-payload ``employee`` field to the Employee ID string.
+
+    The SPA employee store may pass the *whole* Employee doc (a dict) instead
+    of the bare ID, e.g. ``{"name": "HR-EMP-001", ...}``. Extract the id and
+    strip it so downstream ``.strip()`` calls never raise ``AttributeError``.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("employee") or value.get("employee_id") or ""
+    return str(value).strip()
+
+
 def _resolve(employee: str | None) -> str:
     if employee:
         return emp_utils.emp_name(employee)
@@ -96,9 +113,13 @@ def leave_type_options(employee: str | None = None) -> list[dict]:
     Returns ``[{ leave_type, leave_type_name, is_paid, description }]`` to
     match the ``useLeave``/``SearchableSelect`` contract.
     """
+    # NOTE: Frappe HRMS `Leave Type` has no `disabled`/`is_active` column, so we
+    # must not filter on one — doing so throws OperationalError (1054) which the
+    # bare except below used to swallow, silently returning [] (empty dropdown).
     try:
-        rows = frappe.db.get_all("Leave Type", filters={"disabled": 0}, fields=["name"], order_by="name")
-    except Exception:
+        rows = frappe.db.get_all("Leave Type", fields=["name"], order_by="name")
+    except Exception:  # bench-safe: keep the view alive if HR is absent
+        frappe.log_error(frappe.get_traceback(), "leave_type_options")
         rows = []
     out = []
     for r in rows:
@@ -120,14 +141,19 @@ def my_leave_balance(employee: str | None = None) -> list[dict]:
 
     Returns ``[{ leave_type, leave_type_name, total_leaves, leaves_taken,
     leaves_pending_approval, balance_leaves }]`` (FE contract 1:1).
+    LV15 (plan-leave-deskfree): gate ``_assert_own`` — parity ``my_applications``
+    (a plain employee must not read a colleague's balances).
     """
     emp = _resolve(employee)
+    _assert_own(emp)
     out = []
     as_of = getdate(frappe_today())
     try:
-        leave_types = frappe.db.get_all(
-            "Leave Type", filters={"disabled": 0}, fields=["name"], order_by="name"
-        )
+        # G0 (plan-leave-deskfree §3.5): Leave Type has NO stock ``disabled``
+        # column — filtering on it throws OperationalError 1054 which the
+        # except below swallowed into an EMPTY balance list. Fetch all types,
+        # parity with ``leave_type_options``.
+        leave_types = frappe.db.get_all("Leave Type", fields=["name"], order_by="name")
     except Exception:
         leave_types = []
 
@@ -209,25 +235,68 @@ def my_applications(
     employee: str | None = None,
     from_date: str | None = None,
     to_date: str | None = None,
-) -> list[dict]:
-    """Plan §10.5 — the employee's leave applications (optional date window)."""
+    q: str = "",
+    status: str = "",
+    leave_type: str = "",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """plan-leave-deskfree §3.4 — the employee's applications, server-side filter.
+
+    Returns ``{ data: [...], total: int }``. ``status="Cancelled"`` maps to
+    ``docstatus=2``; every other status filters on ``status`` + ``docstatus<2``.
+    ``q`` is a broad like-search over leave_type / description / name.
+    Without the new params the filters are identical to the legacy shape (only
+    the return envelope changed — FE synced in the same PR, D4).
+    """
     emp = _resolve(employee)
     _assert_own(emp)
 
     filters = {"employee": emp}
     if from_date or to_date:
         filters["from_date"] = ["between", [from_date or to_date, to_date or from_date]]
+    status = (status or "").strip()
+    if status == "Cancelled":
+        filters["docstatus"] = 2
+    elif status:
+        filters["status"] = status
+        filters["docstatus"] = ["<", 2]
+    if leave_type:
+        filters["leave_type"] = leave_type
+
+    q = (q or "").strip()
+    or_filters = None
+    if q:
+        like = f"%{q}%"
+        or_filters = [
+            ["Leave Application", "leave_type", "like", like],
+            ["Leave Application", "description", "like", like],
+            ["Leave Application", "name", "like", like],
+        ]
+
+    limit = min(max(cint(limit) or 50, 1), 200)
+    offset = max(cint(offset), 0)
 
     try:
-        return frappe.db.get_all(
+        data = frappe.db.get_all(
             "Leave Application",
             filters=filters,
+            or_filters=or_filters,
             fields=_application_fields(),
             order_by="posting_date desc, creation desc",
-            limit_page_length=200,
+            limit=limit,
+            start=offset,
         )
+        total_rows = frappe.db.get_all(
+            "Leave Application",
+            filters=filters,
+            or_filters=or_filters,
+            fields=["name"],
+            limit_page_length=0,
+        )
+        return {"data": data, "total": len(total_rows)}
     except Exception:
-        return []
+        return {"data": [], "total": 0}
 
 
 # --------------------------------------------------------------------------- #
@@ -243,7 +312,7 @@ def preview_leave(**kwargs) -> dict:
     Returns ``{ leave_hours, leave_days, balance_before, balance_after,
     balance_impact, warnings: [], is_blocker }``.
     """
-    employee = (kwargs.get("employee") or "").strip()
+    employee = _as_employee_id(kwargs.get("employee"))
     if employee:
         _assert_own(employee)
     emp = _resolve(employee)
@@ -321,19 +390,27 @@ def _hours_per_day(emp: str) -> float:
 # --------------------------------------------------------------------------- #
 @frappe.whitelist()
 def apply(**kwargs) -> dict:
-    """Plan §10.5 — create (and submit) a Leave Application.
+    """Plan §10.5 — create a Leave Application as a **Draft** (pending approval).
 
     Accepts: ``employee``, ``leave_type``, ``from_date``, ``to_date``,
     ``half_day``, ``half_day_date``, ``description`` (optional ``follow_up``
     / ``attach``). Validation (date sanity, balance) runs in Frappe's Leave
     Application ``validate``.
 
+    The application is created as a Draft (``docstatus=0``, ``status='Open'``)
+    so it sits in the approval pipeline PENDING. Approval is then the proper
+    HRMS action ``doc.submit()`` (see :func:`_approve_one`), which runs
+    ``on_submit`` → creates the **Leave Ledger Entry** (balance deducted) +
+    sets ``status='Approved'`` + fires the audit hooks. (Previously this
+    submitted on apply, leaving submitted+Open docs that Frappe cannot
+    re-save/submit — making proper approval impossible.)
+
     Returns ``{ name, status, message }``.
     """
     if not kwargs:
         frappe.throw(_("Thiếu dữ liệu yêu cầu nghỉ phép."))
 
-    employee = (kwargs.get("employee") or "").strip()
+    employee = _as_employee_id(kwargs.get("employee"))
     if employee:
         _assert_own(employee)
     emp = _resolve(employee)
@@ -363,19 +440,26 @@ def apply(**kwargs) -> dict:
     if kwargs.get("attach"):
         doc.attach = kwargs["attach"]
 
+    # Designate the approver so HRMS shares the doc with them on insert (HRMS
+    # ``share_doc_with_approver`` runs on save) — the approver can then submit
+    # (approve) via the proper Frappe flow without any ignore_permissions bypass.
+    try:
+        from hrms.hr.doctype.leave_application.leave_application import get_leave_approver
+
+        doc.leave_approver = get_leave_approver(emp)
+    except Exception:
+        doc.leave_approver = frappe.db.get_value("Employee", emp, "leave_approver") or None
+
     doc.insert()
     _stamp_blackout_decision(doc, leave_type=leave_type, from_date=from_date, to_date=to_date, employee=emp)
-    status = doc.status
-    # Submit so the application enters the approval pipeline (status "Open").
-    # Best-effort: stay as Draft if the site disallows self-submit.
-    try:
-        doc.submit()
-        status = doc.status or "Open"
-    except Exception:
-        frappe.log_error(title="Leave Application submit failed")
-        status = doc.status or "Open"
+    # Keep the application as a Draft (docstatus=0, status 'Open') so it is
+    # PENDING approval. Approval = doc.submit() in _approve_one (proper HRMS:
+    # on_submit creates the Leave Ledger Entry + sets Approved + audit logs).
+    status = doc.status or "Open"
 
     audit_api.log("Leave Submit", doc=doc.as_dict(), description=f"status → {status}")
+    # The draft now shows on the desk-free calendar (Open chip) — refresh cache.
+    _touch_calendar(doc)
 
     return {
         "name": doc.name,
@@ -403,13 +487,310 @@ def cancel_draft_or_pending(name: str | None = None) -> dict:
         )
     if doc.docstatus == 0:
         snapshot = doc.as_dict()
-        doc.delete()
+        # plan-leave-deskfree D2: the gege permission matrix intentionally strips
+        # ``delete`` from Employee (F6) — elevate ONLY this delete after the
+        # ``_assert_own`` gate, mirroring the scoped bypass in ``_save_or_submit``.
+        _flags = getattr(doc, "flags", None)
+        if _flags is not None:
+            _flags.ignore_permissions = True
+        try:
+            doc.delete()
+        finally:
+            if _flags is not None:
+                _flags.ignore_permissions = False
         audit_api.log("Leave Cancel", doc=snapshot, description="Draft deleted by owner")
+        # Draft deletion fires no doc_events hook — refresh the calendar cache
+        # so the Open chip disappears (the docstatus-1 cancel path is covered
+        # by on_leave_cancel).
+        _touch_calendar(snapshot)
         return {"name": name, "status": "Cancelled"}
     # docstatus 1 (Open) → cancel.
     doc.cancel()
     audit_api.log("Leave Cancel", doc=doc.as_dict(), description="Open application cancelled by owner")
     return {"name": name, "status": doc.status or "Cancelled"}
+
+
+@frappe.whitelist()
+def update_draft(name: str | None = None, **kwargs) -> dict:
+    """plan-leave-deskfree §3.1 — sửa một đơn chưa duyệt (owner hoặc HR hộ).
+
+    Chấp nhận payload như ``apply`` (``leave_type / from_date / to_date /
+    half_day / half_day_date / description``). Hai nhánh:
+
+    * ``status == "Open"``     → ``doc.save()`` proper flow (Employee có write
+      perm theo permission matrix — validate HRMS chạy đủ, không bypass).
+    * ``status == "Rejected"`` → set fields + reset ``status="Open"`` rồi save
+      với scoped ``ignore_permissions`` — status là field permlevel-1 của HRMS
+      (chỉ Leave Approver ghi được), cùng precedent ``_save_or_submit``.
+
+    Returns ``{ name, status, message }``.
+    """
+    if not name:
+        frappe.throw(_("Thiếu mã đơn nghỉ phép."))
+    doc = frappe.get_doc("Leave Application", name)
+    _assert_own(doc.employee)
+
+    if getattr(doc, "docstatus", 0) != 0:
+        frappe.throw(_("Chỉ sửa được đơn chưa duyệt (Nháp)."), frappe.ValidationError)
+    if doc.status not in ("Open", "Rejected"):
+        frappe.throw(_("Đơn ở trạng thái hiện tại không thể sửa."), frappe.ValidationError)
+    was_rejected = doc.status == "Rejected"
+
+    if kwargs.get("leave_type"):
+        doc.leave_type = kwargs["leave_type"]
+    if kwargs.get("from_date"):
+        doc.from_date = getdate(kwargs["from_date"])
+    if kwargs.get("to_date"):
+        doc.to_date = getdate(kwargs["to_date"])
+    doc.half_day = 1 if leave_utils.to_bool(kwargs.get("half_day")) else 0
+    if doc.half_day:
+        doc.half_day_date = leave_utils.coerce_date(kwargs.get("half_day_date")) or getattr(
+            doc, "from_date", None
+        )
+    if "description" in kwargs:
+        doc.description = kwargs.get("description") or ""
+
+    # BUG #1 pattern (plan-leave-calendar): reload() re-reads DB truth and wipes
+    # the in-memory edits — preserve them across the reload, and catch the race
+    # where HR decided while the owner was editing.
+    wanted = {
+        key: getattr(doc, key, None)
+        for key in ("leave_type", "from_date", "to_date", "half_day", "half_day_date", "description")
+    }
+    doc.reload()
+    if getattr(doc, "docstatus", 0) != 0:
+        frappe.throw(_("Đơn nghỉ đã được duyệt bởi người khác — không thể sửa."), frappe.ValidationError)
+    for key, value in wanted.items():
+        if value is not None:
+            setattr(doc, key, value)
+
+    if was_rejected:
+        doc.status = "Open"  # the edited request re-enters the approval pipeline
+
+    _flags = getattr(doc, "flags", None)
+    if was_rejected and _flags is not None:
+        _flags.ignore_permissions = True
+    try:
+        doc.save()
+    finally:
+        if was_rejected and _flags is not None:
+            _flags.ignore_permissions = False
+
+    _stamp_blackout_decision(
+        doc,
+        leave_type=getattr(doc, "leave_type", None),
+        from_date=getattr(doc, "from_date", None),
+        to_date=getattr(doc, "to_date", None),
+        employee=getattr(doc, "employee", None),
+    )
+    audit_api.log(
+        "Leave Update Draft",
+        doc=doc.as_dict(),
+        description=("gửi lại đơn sau khi bị từ chối: " if was_rejected else "sửa đơn nháp: ")
+        + str(doc.name),
+    )
+    _touch_calendar(doc)
+    return {
+        "name": doc.name,
+        "status": doc.status or "Open",
+        "message": _("Đã cập nhật đơn nghỉ phép {0}.").format(doc.name),
+    }
+
+
+@frappe.whitelist()
+def delete_draft(name: str | None = None) -> dict:
+    """plan-leave-deskfree §3.2 — xoá hẳn một đơn docstatus-0 (Open/Rejected).
+
+    Chủ yếu phục vụ đơn **Rejected** (owner dọn đơn bị từ chối không muốn sửa
+    lại — ``cancel_draft_or_pending`` đang chặn status Rejected). Employee role
+    không có delete perm trong permission matrix (F6) nên scoped bypass SAU
+    gate ``_assert_own`` + guard docstatus (draft chưa có Leave Ledger Entry
+    nên xoá an toàn — không ảnh hưởng số dư).
+    """
+    if not name:
+        frappe.throw(_("Thiếu mã đơn nghỉ phép."))
+    doc = frappe.get_doc("Leave Application", name)
+    _assert_own(doc.employee)
+
+    if getattr(doc, "docstatus", 0) != 0:
+        frappe.throw(_("Chỉ xoá được đơn chưa duyệt (Nháp)."), frappe.ValidationError)
+    if doc.status not in ("Open", "Rejected"):
+        frappe.throw(_("Đơn ở trạng thái hiện tại không thể xoá."), frappe.ValidationError)
+
+    snapshot = doc.as_dict()
+    _flags = getattr(doc, "flags", None)
+    if _flags is not None:
+        _flags.ignore_permissions = True
+    try:
+        doc.delete()
+    finally:
+        if _flags is not None:
+            _flags.ignore_permissions = False
+    audit_api.log("Leave Delete Draft", doc=snapshot, description="draft deleted by owner")
+    # Draft deletion fires no doc_events hook — refresh the calendar cache so
+    # the chip disappears (mirror cancel_draft_or_pending).
+    _touch_calendar(snapshot)
+    return {"name": name}
+
+
+@frappe.whitelist()
+def get_leave_application(name: str | None = None) -> dict:
+    """plan-leave-deskfree §3.3 — chi tiết một đơn cho drawer self-service.
+
+    Returns ``{ name, doc, attachments, cancellation, can }`` với ``can`` là
+    action-matrix suy ra từ ``(docstatus, status)`` — FE hiển thị nút đúng flow
+    (parity docstatus matrix của các trang desk-free khác).
+    """
+    if not name:
+        frappe.throw(_("Thiếu mã đơn nghỉ phép."))
+    doc = frappe.get_doc("Leave Application", name)
+    _assert_own(doc.employee)
+
+    docstatus = getattr(doc, "docstatus", 0)
+    status = getattr(doc, "status", None) or ""
+    open_cancellation = _open_cancellation_request(name)
+
+    fields = list(
+        dict.fromkeys(_application_fields() + ["posting_date", "owner", "leave_approver", "company"])
+    )
+    detail = {f: getattr(doc, f, None) for f in fields}
+
+    attachments: list[dict] = []
+    try:
+        attachments = frappe.db.get_all(
+            "File",
+            filters={"attached_to_doctype": "Leave Application", "attached_to_name": name},
+            fields=["name", "file_name", "file_url", "is_private", "file_size"],
+        )
+    except Exception:
+        attachments = []
+
+    cancellation = None
+    try:
+        rows = frappe.db.get_all(
+            "VN Leave Cancellation Request",
+            filters={"leave_application": name},
+            fields=["name", "status", "reason", "rejection_reason"],
+            order_by="creation desc",
+            limit_page_length=1,
+        )
+        cancellation = rows[0] if rows else None
+    except Exception:
+        cancellation = None
+
+    # Activity timeline (plan-leave-deskfree §3.3 — audit-only, P1): the VN
+    # Audit Event rows referencing this application (Leave Submit/Approve/
+    # Reject/Cancel + the desk-free Update/Delete audits).
+    activity: list[dict] = []
+    try:
+        activity = frappe.db.get_all(
+            "VN Audit Event",
+            filters={"reference_doctype": "Leave Application", "reference_name": name},
+            fields=["name", "audit_type", "employee", "work_date", "description", "creation"],
+            order_by="creation desc",
+            limit_page_length=20,
+        )
+    except Exception:
+        activity = []
+
+    can = {
+        "edit": docstatus == 0 and status in ("Open", "Rejected"),
+        "delete": docstatus == 0 and status in ("Open", "Rejected"),
+        "resubmit": docstatus == 0 and status == "Rejected",
+        "cancel_draft": docstatus == 0 and status == "Open",
+        "request_cancel": docstatus == 1 and not open_cancellation,
+    }
+    return {
+        "name": name,
+        "doc": detail,
+        "attachments": attachments,
+        "cancellation": cancellation,
+        "activity": activity,
+        "can": can,
+    }
+
+
+@frappe.whitelist()
+def my_leave_allocations(employee: str | None = None, leave_type: str = "") -> list[dict]:
+    """plan-leave-deskfree §3.6 (P1) — phân tích số dư theo Leave Allocation.
+
+    Minh bạch parity Desk: mỗi lần cấp phép (kỳ, cấp mới / chuyển tiếp / tổng)
+    cho một leave type — modal "Chi tiết phép" từ thẻ balance.
+    """
+    emp = _resolve(employee)
+    _assert_own(emp)
+
+    filters = {"employee": emp, "docstatus": 1}
+    if (leave_type or "").strip():
+        filters["leave_type"] = leave_type.strip()
+
+    try:
+        return frappe.db.get_all(
+            "Leave Allocation",
+            filters=filters,
+            fields=[
+                "name",
+                "leave_type",
+                "from_date",
+                "to_date",
+                "new_leaves_allocated",
+                "carry_forwarded_leaves_sum",
+                "total_leaves_allocated",
+                "leave_policy_assignment",
+            ],
+            order_by="from_date desc",
+            limit_page_length=50,
+        )
+    except Exception:
+        return []
+
+
+@frappe.whitelist()
+def my_leave_ledger(
+    employee: str | None = None,
+    leave_type: str = "",
+    from_date: str | None = None,
+    to_date: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """plan-leave-deskfree §3.6 (P1) — Leave Ledger Entry timeline của caller.
+
+    Source of truth của số dư: mỗi dòng cấp (+) / trừ (−) / hết hạn, kèm
+    ``transaction_type`` (Leave Allocation / Leave Application / Leave
+    Encashment) + ``transaction_name`` để truy vết.
+    """
+    emp = _resolve(employee)
+    _assert_own(emp)
+
+    filters = {"employee": emp}
+    if (leave_type or "").strip():
+        filters["leave_type"] = leave_type.strip()
+    if from_date or to_date:
+        filters["from_date"] = ["between", [from_date or to_date, to_date or from_date]]
+
+    limit = min(max(cint(limit) or 50, 1), 200)
+    try:
+        return frappe.db.get_all(
+            "Leave Ledger Entry",
+            filters=filters,
+            fields=[
+                "name",
+                "employee",
+                "leave_type",
+                "transaction_type",
+                "transaction_name",
+                "leaves",
+                "is_carry_forward",
+                "is_expired",
+                "from_date",
+                "to_date",
+                "creation",
+            ],
+            order_by="creation desc",
+            limit=limit,
+        )
+    except Exception:
+        return []
 
 
 @frappe.whitelist()
@@ -456,6 +837,31 @@ def request_cancellation(name: str | None = None, reason: str | None = None) -> 
     cr.insert()
     send_for_approval(cr)
     cancellation_request = cr.name
+
+    # Share the cancellation request with the employee's approver so they can act
+    # on it via the unified inbox (proper Frappe DocShare — the owner shares; the
+    # approver then has read/write). Mirrors HRMS ``share_doc_with_approver`` and
+    # avoids the doc-level permission gap (HR Manager role grant alone is not
+    # sufficient at doc level for this doctype).
+    try:
+        from hrms.hr.doctype.leave_application.leave_application import get_leave_approver
+
+        approver = get_leave_approver(cr.employee)
+        if approver and not frappe.db.exists(
+            "DocShare",
+            {"share_doctype": "VN Leave Cancellation Request", "share_name": cr.name, "user": approver},
+        ):
+            frappe.share.add_docshare(
+                "VN Leave Cancellation Request",
+                cr.name,
+                approver,
+                read=1,
+                write=1,
+                submit=1,
+                share=1,
+            )
+    except Exception:
+        frappe.log_error(title="share cancellation request with approver failed")
 
     # Back-link + flag on the Leave Application when the custom fields exist.
     _stamp_cancellation_link(name, cancellation_request, reason)
@@ -620,6 +1026,11 @@ def _approve_cancellation_one(name: str) -> dict:
         )
     except Exception:
         pass
+
+    # The linked leave just got cancelled — refresh the desk-free calendar
+    # cache for its scope (approve-cancellation runs no Leave Application
+    # doc_events hook itself).
+    _touch_calendar_by_name(cr.leave_application)
 
     return {
         "name": name,
@@ -810,12 +1221,24 @@ def _approve_one(name: str) -> dict:
 
     doc.status = "Approved"
     try:
+        # The approver is the session user; ``leave.apply`` already designated +
+        # HRMS-shared the doc with the approver at creation, so the submit's
+        # permission check passes (proper Frappe — no ignore_permissions).
         doc.leave_approver = frappe.session.user
     except Exception:
         pass
     _save_or_submit(doc)
 
     _after_leave_decision(doc, approved=True)
+    # plan-handover-deskfree P1 (H9): a policy with require_handover=1 mints a
+    # Pending handover task for the approved leave (best-effort, never fails
+    # the approval itself).
+    try:
+        from gege_hr.gege_hr.api.handover import _maybe_mint_handover
+
+        _maybe_mint_handover(doc)
+    except Exception:
+        frappe.log_error(title="handover._maybe_mint_handover wiring failed")
     return {
         "name": name,
         "status": "Approved",
@@ -997,22 +1420,87 @@ def cancellation_options() -> dict:
 
 
 def _save_or_submit(doc) -> None:
-    """Persist a leave decision: submit a Draft, otherwise save.
+    """Persist a leave decision through the **proper Frappe flow** (no bypass).
 
-    Wrapped so a Frappe HR version that disallows re-submit / has stricter
-    validation still records the status change rather than aborting the inbox
-    action; any failure is re-raised so the endpoint surfaces a clear error.
+    * ``docstatus=0`` (Draft) → ``doc.submit()`` — runs ``validate`` + ``on_submit``:
+      HRMS creates the **Leave Ledger Entry** (balance deducted) AND fires the
+      hooks that write the audit trail (Activity/VN Audit Event). ``submit`` also
+      derives ``status='Approved'`` correctly.
+    * ``docstatus>=1`` (already submitted) → ``doc.save()`` — runs ``validate``.
+
+    We deliberately do NOT use ``ignore_permissions`` or raw ``db.set_value``:
+    those skip ``validate``/``on_submit`` so the ledger + audit logs would never
+    be written, and the action would not be recorded against a properly
+    permission-checked approver. If a 403 occurs the correct fix is to grant the
+    approver's role the write/submit permission on Leave Application (Role
+    Permissions Manager) — that keeps the permission audit trail intact. Any
+    failure is re-raised so the endpoint surfaces the real error.
+
+    Concurrency: two approvers clicking at the same moment both read the OLD
+    balance (the other's ledger entry not yet committed) and both submit →
+    balance goes negative. Serialize per-employee by taking a row lock on the
+    employee's Leave Allocation rows (SELECT ... FOR UPDATE) for the duration
+    of the submit: the second request blocks until the first commits, then
+    HRMS validate() sees the fresh balance and throws the insufficient-balance
+    error instead of letting both through.
     """
-    if getattr(doc, "docstatus", 0) == 0:
-        try:
-            doc.submit()
+    with _employee_leave_lock(doc.employee):
+        if getattr(doc, "docstatus", 0) == 0:
+            # reload() re-reads DB truth — which reverts the in-memory decision
+            # (status back to Open) that HRMS forbids submitting. Preserve the
+            # decision fields across the reload, then submit.
+            wanted_status = getattr(doc, "status", None)
+            wanted_description = getattr(doc, "description", None)
+            wanted_approver = getattr(doc, "leave_approver", None)
+            doc.reload()
+            if getattr(doc, "docstatus", 0) != 0:
+                frappe.throw(
+                    _("Đơn nghỉ đã được duyệt bởi người khác — không duyệt 2 lần."),
+                    frappe.ValidationError,
+                )
+            if wanted_status:
+                doc.status = wanted_status
+            if wanted_description is not None:
+                doc.description = wanted_description
+            if wanted_approver:
+                doc.leave_approver = wanted_approver
+            # HRMS guards ``status`` at permlevel 1 (approver-only field).
+            # validate_higher_perm_levels() silently reverts a permlevel-1
+            # change back to the DB value for users whose grants live in the
+            # gege Custom DocPerm matrix (permlevel 0) — so our Approved /
+            # Rejected decision would be wiped before on_submit, which then
+            # throws ("Only ... 'Approved' and 'Rejected' can be submitted").
+            # This endpoint already runs the server-side HR-manager gate, so
+            # elevate ONLY this save: every validate, the Leave Ledger Entry
+            # and the audit hooks still execute (Frappe's own approve flow
+            # uses the same flag).
+            _flags = getattr(doc, "flags", None)  # bench-free stub docs may omit flags
+            if _flags is not None:
+                _flags.ignore_permissions = True
+            try:
+                doc.submit()
+            finally:
+                if _flags is not None:
+                    _flags.ignore_permissions = False
             return
-        except Exception:
-            # Fall through to a plain save — some sites configure leave approval
-            # without the submit flow; the status flag is what the inbox reads.
-            doc.db_update()
-            return
-    doc.save()
+        doc.save()
+
+
+@contextmanager
+def _employee_leave_lock(employee: str):
+    """Row-lock the employee's leave allocations (FOR UPDATE) inside the open
+    transaction. Locks are held until COMMIT/ROLLBACK — i.e. until the request
+    finishes — so concurrent approve/submit for the SAME employee serialize
+    here, while different employees never block each other. Uses the shared
+    db.sql transaction of the request (no autocommit)."""
+    if employee:
+        frappe.db.sql(
+            "SELECT name FROM `tabLeave Allocation`"
+            " WHERE employee = %(employee)s AND docstatus < 2"
+            " FOR UPDATE",
+            {"employee": employee},
+        )
+    yield
 
 
 def _after_leave_decision(doc, *, approved: bool, reason: str = "") -> None:
@@ -1055,6 +1543,11 @@ def _after_leave_decision(doc, *, approved: bool, reason: str = "") -> None:
         )
     except Exception:
         pass
+
+    # Reject (status flip on a docstatus-0 draft) fires no doc_events hook —
+    # refresh the calendar cache for both approve and reject so the chip
+    # recolors immediately (approve is also covered by on_leave_submit).
+    _touch_calendar(doc)
 
 
 # --------------------------------------------------------------------------- #
@@ -1250,13 +1743,38 @@ def _stamp_blackout_decision(doc, leave_type, from_date, to_date, employee) -> N
 
 
 # --------------------------------------------------------------------------- #
-# Hooks (stubs — full VN leave ledger ships Post-MVP)
+# Hooks — desk-free leave calendar cache refresh (plan leave-calendar C3)
 # --------------------------------------------------------------------------- #
+def _touch_calendar(doc) -> None:
+    """Best-effort calendar cache refresh + realtime ping for a leave doc/row
+    carrying ``employee`` / ``from_date`` / ``to_date`` (never raises)."""
+    try:
+        from gege_hr.gege_hr.api.leave_calendar import touch_leave_calendar
+
+        touch_leave_calendar(doc)
+    except Exception:
+        frappe.log_error(title="leave._touch_calendar failed")
+
+
+def _touch_calendar_by_name(name: str | None) -> None:
+    """``_touch_calendar`` for a Leave Application name (one light lookup)."""
+    if not name:
+        return
+    try:
+        row = frappe.db.get_value(
+            "Leave Application", name, ["employee", "from_date", "to_date"], as_dict=True
+        )
+        if row:
+            _touch_calendar(row)
+    except Exception:
+        frappe.log_error(title="leave._touch_calendar_by_name failed")
+
+
 def on_leave_submit(doc, method: str | None = None) -> None:
     """Leave Application on_submit → refresh leave calendar cache + notify."""
-    return None
+    _touch_calendar(doc)
 
 
 def on_leave_cancel(doc, method: str | None = None) -> None:
     """Leave Application on_cancel → refresh leave calendar cache."""
-    return None
+    _touch_calendar(doc)

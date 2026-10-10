@@ -79,7 +79,10 @@ def get_attendance_policy_name(employee: str | None = None) -> str | None:
     if frappe is None:
         return None
     if employee:
-        emp_policy = frappe.db.get_value("Employee", employee, "vn_attendance_policy")
+        # F15: the custom field on Employee is ``default_attendance_policy``
+        # (custom_fields.py §A.2) — the old name hit a non-existent column
+        # (ProgrammingError 1054) the moment this helper gained a caller.
+        emp_policy = frappe.db.get_value("Employee", employee, "default_attendance_policy")
         if emp_policy:
             return emp_policy
     return frappe.db.get_single_value("VN HR Portal Setting", "default_attendance_policy") or None

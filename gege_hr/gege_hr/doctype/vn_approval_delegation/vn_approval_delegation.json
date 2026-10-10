@@ -1,0 +1,42 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-09-05 11:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "parties_break", "fieldtype": "Section Break", "label": "Ủy quyền"},
+  {"fieldname": "from_user", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Người ủy quyền", "options": "User", "reqd": 1},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "to_user", "fieldtype": "Link", "in_list_view": 1, "in_standard_filter": 1, "label": "Người nhận ủy quyền", "options": "User", "reqd": 1},
+  {"fieldname": "scope_break", "fieldtype": "Section Break", "label": "Phạm vi"},
+  {"fieldname": "transaction_type", "default": "All", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Loại yêu cầu", "options": "All\nLeave Application\nLeave Cancellation Request\nOvertime Request\nCorrection Request\nSalary Advance Request\nExpense Claim\nLeave Encashment\nCompensatory Leave Request\nEmployee Grievance\nTravel Request", "reqd": 1},
+  {"fieldname": "col2", "fieldtype": "Column Break"},
+  {"fieldname": "request_name", "fieldtype": "Data", "label": "Riêng yêu cầu (mã)", "description": "Để trống = áp dụng cho toàn bộ loại yêu cầu"},
+  {"fieldname": "window_break", "fieldtype": "Section Break", "label": "Thời hạn"},
+  {"fieldname": "from_date", "fieldtype": "Date", "label": "Từ ngày", "reqd": 1},
+  {"fieldname": "col3", "fieldtype": "Column Break"},
+  {"fieldname": "to_date", "fieldtype": "Date", "label": "Đến ngày", "reqd": 1},
+  {"fieldname": "meta_break", "fieldtype": "Section Break", "label": "Ghi chú"},
+  {"fieldname": "reason", "fieldtype": "Small Text", "label": "Lý do"},
+  {"fieldname": "col4", "fieldtype": "Column Break"},
+  {"fieldname": "is_active", "default": "1", "fieldtype": "Check", "in_list_view": 1, "in_standard_filter": 1, "label": "Đang hiệu lực"}
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-05 11:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "gege_hr",
+ "name": "VN Approval Delegation",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "HR Manager", "write": 1},
+  {"create": 1, "read": 1, "role": "HR User", "write": 1},
+  {"read": 1, "role": "Employee"},
+  {"read": 1, "role": "Line Manager"}
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

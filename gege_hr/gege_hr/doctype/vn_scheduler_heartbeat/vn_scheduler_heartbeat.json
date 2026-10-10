@@ -1,0 +1,33 @@
+{
+ "actions": [],
+ "autoname": "format:HB-{YYYY}-{MM}-{job_key}",
+ "creation": "2026-08-18 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "fields": [
+  {"fieldname": "job_key", "fieldtype": "Data", "in_list_view": 1, "in_standard_filter": 1, "label": "Job Key", "reqd": 1, "unique": 0},
+  {"fieldname": "job_label", "fieldtype": "Data", "label": "Job Label"},
+  {"fieldname": "col1", "fieldtype": "Column Break"},
+  {"fieldname": "last_run", "fieldtype": "Datetime", "in_list_view": 1, "label": "Last Run", "read_only": 1},
+  {"fieldname": "run_count", "default": "0", "fieldtype": "Int", "in_list_view": 1, "label": "Run Count", "read_only": 1},
+  {"fieldname": "duration_ms", "default": "0", "fieldtype": "Int", "label": "Duration (ms)", "read_only": 1},
+  {"fieldname": "status", "default": "Ok", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Status", "options": "Ok\nAcked\nStale", "read_only": 1},
+  {"fieldname": "ack_section", "fieldtype": "Section Break", "label": "Ack"},
+  {"fieldname": "acknowledged_by", "fieldtype": "Data", "label": "Acknowledged By", "read_only": 1},
+  {"fieldname": "acknowledged_at", "fieldtype": "Datetime", "label": "Acknowledged At", "read_only": 1},
+  {"fieldname": "col2", "fieldtype": "Column Break"},
+  {"fieldname": "last_summary", "fieldtype": "Small Text", "label": "Last Summary (JSON)", "read_only": 1}
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "module": "gege_hr",
+ "name": "VN Scheduler Heartbeat",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1},
+  {"create": 1, "read": 1, "role": "HR Manager", "write": 1}
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 1
+}

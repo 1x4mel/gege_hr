@@ -19,8 +19,11 @@ class VNEmployeeShiftInstance(Document):
     but derived from portal-local ``planned_window``.
     """
 
-    def before_insert(self):
-        set_yymmdd_name(self, "before_insert")
+    def autoname(self):
+        # Frappe calls this from set_new_name (naming.py step 4) — the
+        # before_insert variant never ran because ``doc.name = None`` +
+        # the JSON ``format:`` option always overwrote it first.
+        set_yymmdd_name(self, "autoname")
 
     def validate(self):
         self._normalize_employee_name()
@@ -56,9 +59,9 @@ class VNEmployeeShiftInstance(Document):
             return
 
         planned_start, planned_end = tz_utils.planned_window(self.work_date, start_time, end_time)
-        utc = tz_utils.ZoneInfo("UTC")
-        self.planned_start = planned_start.astimezone(utc).strftime("%Y-%m-%d %H:%M:%S")
-        self.planned_end = planned_end.astimezone(utc).strftime("%Y-%m-%d %H:%M:%S")
+        # PHASE-1 FRAME: persist planned windows as naive PORTAL WALL.
+        self.planned_start = tz_utils.wall(planned_start).strftime("%Y-%m-%d %H:%M:%S")
+        self.planned_end = tz_utils.wall(planned_end).strftime("%Y-%m-%d %H:%M:%S")
         self.is_overnight = 1 if tz_utils.is_overnight(start_time, end_time) else 0
 
         # Half-day boundary at the midpoint of the shift.
@@ -91,6 +94,10 @@ class VNEmployeeShiftInstance(Document):
                 "employee": self.employee,
                 "name": ["!=", self.name or "___"],
                 "docstatus": ["!=", 2],
+                # FIX 2026-09-16: instance đã Cancelled/Skipped không còn hiệu
+                # lực — không được chặn instance mới (đổi ca giữa kỳ: hủy ca cũ
+                # rồi gán ca mới cùng ngày phải thành công).
+                "status": ["not in", ["Cancelled", "Skipped"]],
                 "planned_start": ["<", self.planned_end],
                 "planned_end": [">", self.planned_start],
             },
@@ -103,4 +110,5 @@ class VNEmployeeShiftInstance(Document):
 
 
 def _fmt(dt):
-    return dt.astimezone(tz_utils.ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    """PHASE-1 FRAME: naive PORTAL WALL storage string."""
+    return tz_utils.wall(dt).strftime("%Y-%m-%d %H:%M:%S")

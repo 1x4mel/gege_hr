@@ -35,8 +35,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from gege_hr.gege_hr.utils import employee as emp_utils
-from gege_hr.gege_hr.utils import tz as tz_utils
+from gege_hr.gege_hr.utils import employee as emp_utils, pagination, tz as tz_utils
 
 
 # --------------------------------------------------------------------------- #
@@ -147,7 +146,8 @@ def parse_log_time(value: Any, tz: str | None = None) -> datetime | None:
 def to_utc_storage_str(portal_dt: datetime) -> str:
     """Format a portal-local aware datetime as the UTC string stored in
     ``Employee Checkin.time`` (``YYYY-MM-DD HH:MM:SS``)."""
-    return portal_dt.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    # PHASE-1 FRAME: store naive PORTAL WALL (matches the live DB frame).
+    return portal_dt.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def derive_device_status(
@@ -176,12 +176,17 @@ def _coerce_dt(value: Any) -> datetime | None:
     if value is None or value == "":
         return None
     if isinstance(value, datetime):
+        # PHASE-1 FRAME: a naive DB datetime is already PORTAL WALL — attach the
+        # portal tz (``to_portal`` read it as UTC: +7h, so a device silent for
+        # up to 31h still showed "Synced"). Aware values fold as before.
+        if value.tzinfo is None:
+            return value.replace(tzinfo=tz_utils.get_tzinfo())
         return tz_utils.to_portal(value)
     return parse_log_time(value)
 
 
 def normalize_upload_log(
-    raw: dict | None, default_device_code: str | None = None
+    raw: dict | None, default_device_code: str | None = None, default_tz: str | None = None
 ) -> tuple[dict | None, str | None]:
     """Validate + normalize one uploaded punch row.
 
@@ -194,7 +199,7 @@ def normalize_upload_log(
     if not isinstance(raw, dict) or not raw:
         return None, "Dòng log trống."
 
-    log_time = parse_log_time(raw.get("log_time") or raw.get("time") or raw.get("timestamp"))
+    log_time = parse_log_time(raw.get("log_time") or raw.get("time") or raw.get("timestamp"), tz=default_tz)
     if log_time is None:
         return None, "Thiếu/th sai định dạng thời gian chấm công (log_time)."
 
@@ -306,17 +311,18 @@ def _enrich(devices: list[dict]) -> list[dict]:
         return []
     names = [d["name"] for d in devices]
 
-    # Latest punch per device (one query, group in Python).
+    # Latest punch per device — aggregated in SQL (MAX per device). The old
+    # "ORDER BY log_time DESC LIMIT 500 + first-per-device in Python" missed
+    # quiet devices whenever 500 recent logs all belonged to a few hot ones.
     last_log_map: dict[str, str] = {}
     for row in frappe.db.get_all(
         "VN Attendance Raw Log",
         filters={"device": ["in", names], "log_time": ["is", "set"]},
-        fields=["device", "log_time"],
-        order_by="log_time desc",
-        limit_page_length=500,
+        fields=["device", "max(log_time) as log_time"],
+        group_by="device",
     ):
         dev = row.get("device")
-        if dev and dev not in last_log_map:
+        if dev:
             last_log_map[dev] = row.get("log_time")
 
     # Active employee-mapping count per device.
@@ -342,14 +348,91 @@ def _enrich(devices: list[dict]) -> list[dict]:
     return out
 
 
+# Broad-search fields for the device list (DNA §6.6 D — OR-combined free text).
+_DEVICE_SEARCH_FIELDS = (
+    "name",
+    "device_name",
+    "device_code",
+    "device_type",
+    "work_location",
+    "company",
+    "ip_address",
+)
+
+
+def _device_search_or_filters(search: str | None) -> list | None:
+    """Frappe ``or_filters`` (list form) for a free-text device search, or None."""
+    q = (search or "").strip()
+    if not q:
+        return None
+    like = f"%{pagination.escape_like(q)}%"
+    return [[field, "like", like] for field in _DEVICE_SEARCH_FIELDS]
+
+
+_DEVICE_SUMMARY_FIELDS = ["name", "is_active"]
+
+
+def _device_summary(light_rows) -> dict:
+    """Aggregate counts over the full filtered set (SPA summary tiles)."""
+    active = sum(1 for r in light_rows or [] if int(r.get("is_active") or 0) == 1)
+    return {"total": len(light_rows or []), "active": active}
+
+
 @frappe_whitelist()
-def list_devices() -> list[dict]:
-    """GET device.list_devices — device directory + last-sync status (HR-only)."""
+def list_devices(
+    search: str | None = None,
+    page: int = 1,
+    page_size: int = 0,
+) -> list[dict] | dict:
+    """GET device.list_devices — device directory + last-sync status (HR-only).
+
+    ``search`` performs a server-side broad LIKE across the device's text fields
+    (DNA §6.6 D, HR-BL device) so the SPA broad-search box no longer re-filters
+    an already-loaded list client-side.
+
+    Pagination is **opt-in** (DNA §6.6 A): pass ``page`` + a positive
+    ``page_size`` to receive ``{"data": [...], "total": int, "summary": {...}}``
+    where ``total`` is counted via ``get_all().len`` (``db.count`` ignores
+    ``or_filters``) and ``summary`` aggregates the *full* filtered set so the SPA
+    summary tiles stay correct under pagination. Without ``page_size`` the legacy
+    bare-list return is preserved.
+    """
     import frappe
 
     _assert_hr_manager()
+    or_filters = _device_search_or_filters(search)
+
+    if page_size:
+        summary = _device_summary(
+            pagination.all_rows(
+                "VN Attendance Device",
+                fields=_DEVICE_SUMMARY_FIELDS,
+                or_filters=or_filters,
+            )
+        )
+        page = max(1, pagination.as_int(page, 1))
+        page_size = max(1, pagination.as_int(page_size, 20))
+        start = (page - 1) * page_size
+        try:
+            rows = (
+                frappe.db.get_all(
+                    "VN Attendance Device",
+                    or_filters=or_filters,
+                    fields=_device_fields(),
+                    order_by="is_active desc, modified desc",
+                    limit_start=start,
+                    limit_page_length=page_size,
+                )
+                or []
+            )
+        except Exception:
+            frappe.log_error(title="device.list_devices failed")
+            return {"data": [], "total": summary["total"], "summary": summary}
+        return {"data": _enrich(rows), "total": summary["total"], "summary": summary}
+
     devices = frappe.db.get_all(
         "VN Attendance Device",
+        or_filters=or_filters,
         fields=_device_fields(),
         order_by="is_active desc, modified desc",
     )
@@ -420,23 +503,32 @@ def _process_pending_logs(device_name: str) -> int:
     """
     import frappe
 
-    pending = frappe.db.get_all(
-        "VN Attendance Raw Log",
-        filters={"device": device_name, "processing_status": "Pending"},
-        fields=["name"],
-        limit_page_length=500,
-    )
     count = 0
-    for row in pending:
-        try:
-            _process_raw_log(row["name"])
-            count += 1
-        except Exception as exc:  # noqa: BLE001 - log + continue, don't abort the batch
-            frappe.db.set_value(
-                "VN Attendance Raw Log",
-                row["name"],
-                {"processing_status": "Error", "validation_message": str(exc)[:300]},
-            )
+    # Page through the backlog instead of taking one 500-row slice: without the
+    # loop, anything past 500 pending rows stayed stuck until the next sync.
+    while True:
+        pending = frappe.db.get_all(
+            "VN Attendance Raw Log",
+            filters={"device": device_name, "processing_status": "Pending"},
+            fields=["name"],
+            limit_start=count,
+            limit_page_length=500,
+        )
+        if not pending:
+            break
+        for row in pending:
+            try:
+                _process_raw_log(row["name"])
+                count += 1
+            except Exception as exc:  # noqa: BLE001 - log + continue, don't abort the batch
+                frappe.db.set_value(
+                    "VN Attendance Raw Log",
+                    row["name"],
+                    {"processing_status": "Error", "validation_message": str(exc)[:300]},
+                )
+                count += 1  # errored rows also leave the Pending set
+        if len(pending) < 500:
+            break
     return count
 
 
@@ -454,6 +546,9 @@ def upload_logs(logs: list | None = None) -> dict:
     _assert_hr_manager()
     if not isinstance(logs, list) or not logs:
         frappe.throw(_("Chưa có dữ liệu để tải lên."), frappe.ValidationError)
+    # Cap the batch — an unbounded list DoSes the request handler.
+    if len(logs) > 500:
+        frappe.throw(_("Tối đa 500 dòng mỗi lần tải lên."), frappe.ValidationError)
 
     accepted = 0
     rejected = 0
@@ -625,6 +720,35 @@ def _process_raw_log(raw_log_name: str) -> str | None:
     if not raw or not raw.get("employee") or not raw.get("is_valid"):
         return None
 
+    # Lock guard: a punch inside a Locked monthly period must not create a new
+    # checkin — the closed attendance would silently drift away from its locked
+    # lines. Mark the raw log Skipped so HR can see (and re-process after an
+    # unlock) instead of failing the whole sync batch.
+    try:
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        from gege_hr.gege_hr.api.attendance import _is_date_locked
+
+        _portal_date = (
+            _dt.strptime(str(raw["log_time"])[:19], "%Y-%m-%d %H:%M:%S")
+            .replace(tzinfo=ZoneInfo("UTC"))
+            .astimezone(ZoneInfo("Asia/Ho_Chi_Minh"))
+            .date()
+        )
+        if _is_date_locked(_portal_date.isoformat()):
+            frappe.db.set_value(
+                "VN Attendance Raw Log",
+                raw_log_name,
+                {
+                    "processing_status": "Skipped",
+                    "validation_message": f"Ngày {_portal_date.isoformat()} thuộc kỳ công đã khoá.",
+                },
+            )
+            return None
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "device lock guard")
+
     device_code = None
     if raw.get("device"):
         device_code = frappe.db.get_value("VN Attendance Device", raw["device"], "device_code")
@@ -673,3 +797,122 @@ def _process_raw_log(raw_log_name: str) -> str | None:
         {"processing_status": "Processed", "employee_checkin": checkin.name},
     )
     return checkin.name
+
+
+# --------------------------------------------------------------------------- #
+# WP10 (prod-readiness-plan) — machine-to-machine push endpoint
+# --------------------------------------------------------------------------- #
+try:  # real guest-whitelisted decorator inside a bench
+    import frappe as _frappe_mod
+
+    _WHITELIST_GUEST = _frappe_mod.whitelist(allow_guest=True)
+except Exception:  # pragma: no cover - bench-free import
+
+    def _WHITELIST_GUEST(fn):
+        fn.whitelisted = True  # same marker as frappe_whitelist()'s shim
+        return fn
+
+
+# WP10 knobs: a push batch is capped and rate-limited so a chatty device can
+# never flood the ingest pipeline (plan WP10 "giới hạn rate").
+DEVICE_IMPORT_MAX_BATCH = 500
+DEVICE_IMPORT_RATE = (12, 60)  # max 12 batches / 60s per device
+
+
+@_WHITELIST_GUEST
+def device_import(payload: dict | None = None, device_secret: str | None = None) -> dict:
+    """Machine push: batch IN/OUT punches from a physical attendance device.
+
+    Auth: ``device_id`` + ``device_secret`` must match an ACTIVE
+    ``VN Attendance Device`` (secret is a Password field — compared in
+    constant-time). Dedup is inherited from the raw-log pipeline on
+    (device, time, log_type); a re-sent batch is idempotent (counted as
+    duplicates). Unknown badges surface in ``invalid`` with the reason (DV3)
+    instead of failing the batch. Hours live in the device's own timezone
+    (DV4) — ``parse_log_time`` converts via the device's ``timezone`` field.
+
+    Payload::
+
+        {"device_id": "CAM-01", "logs": [{"badge": "0123", "time": "2026-08-18 08:00:30", "type": "IN"}, ...]}
+
+    Returns ``{device, received, imported, duplicates, invalid:[{badge,reason}]}``.
+    """
+    import frappe
+
+    from gege_hr.gege_hr.utils.ratelimit import rate_limit
+
+    payload = payload or {}
+    device_code = str(payload.get("device_id") or payload.get("device_code") or "").strip()
+    if not device_code:
+        frappe.throw(_("Thiếu device_id."), frappe.ValidationError)
+    rate_limit(f"device_import:{device_code}", *DEVICE_IMPORT_RATE)
+
+    device = frappe.db.get_value(
+        "VN Attendance Device",
+        {"device_code": device_code, "is_active": 1},
+        ["name", "device_secret", "timezone"],
+        as_dict=True,
+    )
+    secret_ok = False
+    if device and device.get("device_secret"):
+        import hmac
+
+        secret_ok = hmac.compare_digest(str(device.get("device_secret")), str(device_secret or ""))
+    if not secret_ok:
+        # Deliberately vague: never confirm which part was wrong.
+        frappe.throw(_("Thiết bị hoặc secret không hợp lệ."), frappe.PermissionError)
+
+    logs = payload.get("logs") or []
+    if not isinstance(logs, list):
+        frappe.throw(_("logs phải là danh sách."), frappe.ValidationError)
+    if len(logs) > DEVICE_IMPORT_MAX_BATCH:
+        frappe.throw(
+            _("Batch quá lớn ({0} > {1}) — chia nhỏ rồi gửi lại.").format(len(logs), DEVICE_IMPORT_MAX_BATCH),
+            frappe.ValidationError,
+        )
+
+    device_tz = device.get("timezone") or None
+    imported = 0
+    duplicates = 0
+    invalid: list[dict] = []
+    for raw in logs:
+        # Machine payload shape: ``badge`` is the vocabulary normalize_upload_log
+        # knows as ``code`` (raw_employee_code → VN Device Employee Mapping).
+        raw = dict(raw or {})
+        if not (raw.get("raw_employee_code") or raw.get("code")) and raw.get("badge") is not None:
+            raw["code"] = raw["badge"]
+        normalized, reason = normalize_upload_log(raw, default_device_code=device_code, default_tz=device_tz)
+        if normalized is None:
+            invalid.append({"badge": raw.get("badge") or raw.get("code"), "reason": reason})
+            continue
+        try:
+            _create_raw_log(normalized, source_type="Device Push")
+            imported += 1
+        except frappe.DuplicateEntryError:
+            duplicates += 1  # DV2/DV5: same (device,time,type) already stored — no-op
+        except Exception:
+            frappe.log_error(
+                title=f"device_import row failed {device_code}",
+                message=frappe.get_traceback(),
+            )
+            invalid.append({"badge": normalized.get("raw_employee_code"), "reason": "Lỗi xử lý dòng."})
+
+    try:
+        frappe.db.set_value(
+            "VN Attendance Device",
+            device.get("name"),
+            "last_sync_at",
+            frappe.utils.now(),
+            update_modified=True,
+        )
+        frappe.db.commit()
+    except Exception:
+        pass
+
+    return {
+        "device": device_code,
+        "received": len(logs),
+        "imported": imported,
+        "duplicates": duplicates,
+        "invalid": invalid,
+    }

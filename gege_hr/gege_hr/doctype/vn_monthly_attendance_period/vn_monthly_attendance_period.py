@@ -28,11 +28,16 @@ class VNMonthlyAttendancePeriod(Document):
         STATUS_DRAFT: {STATUS_GENERATED},
         STATUS_GENERATED: {STATUS_LOCKED, STATUS_DRAFT},
         STATUS_LOCKED: {STATUS_UNLOCKED},
-        STATUS_UNLOCKED: {STATUS_LOCKED},
+        # Unlocked may re-lock directly, or go back to Generated to refresh
+        # its aggregated lines (``generate_lines`` after an unlock).
+        STATUS_UNLOCKED: {STATUS_LOCKED, STATUS_GENERATED},
     }
 
-    def before_insert(self):
-        set_yymmdd_name(self, "before_insert")
+    def autoname(self):
+        # Frappe calls this from set_new_name (naming.py step 4) — the
+        # before_insert variant never ran because ``doc.name = None`` +
+        # the JSON ``format:`` option always overwrote it first.
+        set_yymmdd_name(self, "autoname")
 
     def validate(self):
         self._normalize_dates()

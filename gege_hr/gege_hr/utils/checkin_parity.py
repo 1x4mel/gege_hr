@@ -1,0 +1,267 @@
+"""Pure check-in parity helpers — bench-free, stdlib-only (DNA §6.6 A style).
+
+Extracted from ``api/attendance.py`` so the IN/OUT decision logic that guards
+payroll integrity is unit-testable without a bench:
+
+  - :func:`parse_log_dt`     — normalise raw ``Employee Checkin.time`` values
+                               (naive-UTC datetime | ISO/SQL string | aware dt)
+                               to comparable naive-UTC datetimes.
+  - :func:`decide_log_type`  — overnight-safe session parity: what log type
+                               (IN/OUT) the employee's next tap must create.
+  - :func:`is_duplicate_intent` — at-least-once guard against lost-response
+                               re-taps that would emit OUT-seconds-after-IN.
+  - :func:`has_in_only` / :func:`has_out_only` — day-shape detectors (open
+                               session / orphan OUT).
+  - :func:`pick_shift_instance` — which Shift Instance a punch belongs to
+                               (drives the Employee Checkin after_insert recalc).
+  - :func:`pick_existing_punch` — which existing punch an admin time edit must
+                               update (same type + SAME shift, not same day).
+
+Fixes two payroll-corrupting scenarios (see tests/test_mobile_checkin_parity.py
+for the full matrix):
+
+  R1 Overnight parity — the day-only parity ``"OUT" if has_in_only(today) else
+     "IN"`` made today's first tap after a 23:30 IN yesterday become IN, so the
+     overnight shift lost its checkout (auto-closed at planned end + a bogus
+     ticket). Session parity scans the NEWEST log across yesterday+today: newest
+     IN → this tap is its OUT; newest OUT → new session IN.
+
+  R2 Duplicate intent — a request may persist its log yet lose the HTTP
+     response; the seconds-later re-tap used to create an OUT right after the
+     IN (a 0-hour "completed" day). The guard skips taps whose intent timestamp
+     is within ``gap_minutes`` of the last persisted log; offline replay passes
+     because its intent timestamp is far in the past.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+__all__ = [
+    "parse_log_dt",
+    "decide_log_type",
+    "is_duplicate_intent",
+    "has_in_only",
+    "has_out_only",
+    "pick_shift_instance",
+    "shift_of_punch",
+    "pick_existing_punch",
+]
+
+_IN_TOKENS = ("IN", "CLOCK IN")
+_OUT_TOKENS = ("OUT", "CLOCK OUT")
+
+
+def parse_log_dt(value) -> datetime | None:
+    """Normalise a raw checkin ``time`` to a NAIVE UTC datetime (or ``None``).
+
+    Frappe stores datetimes as naive UTC; the mobile client may hand an aware
+    ISO string; seeded rows sometimes carry SQL strings. All are converted to
+    naive-UTC so mixed sources stay comparable. Unparseable → ``None``.
+    """
+    if value is None:
+        return None
+    dt = value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                dt = datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+    if not isinstance(dt, datetime):
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def has_in_only(checkins: list[dict]) -> bool:
+    """Day shape: at least one IN and no OUT → the session is still open."""
+    has_in = any(str(c.get("log_type") or "").upper() in _IN_TOKENS for c in checkins)
+    has_out = any(str(c.get("log_type") or "").upper() in _OUT_TOKENS for c in checkins)
+    return has_in and not has_out
+
+
+def has_out_only(checkins: list[dict]) -> bool:
+    """Day shape: an OUT with no IN — orphan OUT (external device / sync
+    artefact). The next tap self-heals as IN, but its timestamp is the tap
+    time, so the day still needs a human correction to be payable."""
+    has_in = any(str(c.get("log_type") or "").upper() in _IN_TOKENS for c in checkins)
+    has_out = any(str(c.get("log_type") or "").upper() in _OUT_TOKENS for c in checkins)
+    return has_out and not has_in
+
+
+def decide_log_type(logs: list[dict]) -> str:
+    """Session-based IN/OUT parity (overnight-safe) — pure function.
+
+    ``logs`` carries the check-in rows of YESTERDAY + TODAY (any order, any
+    mix of datetimes/strings). Looking at the NEWEST parseable log:
+
+      - newest is an (unpaired) IN → return ``"OUT"`` — this tap closes the
+        open session. The overnight case: IN 23:30 yesterday, tap 00:30 today
+        → OUT (the old day-only parity wrongly returned IN).
+      - newest is an OUT (or no logs at all / nothing parseable) → return
+        ``"IN"`` — a new session begins. Covers the empty day, the completed
+        day, the auto-closed overnight session (its synthetic OUT is newest),
+        and the orphan-OUT self-heal.
+    """
+    if not logs:
+        return "IN"
+    parsed = []
+    for row in logs:
+        t = parse_log_dt(row.get("time"))
+        if t is not None:
+            parsed.append((t, str(row.get("log_type") or "").upper()))
+    if not parsed:
+        return "IN"
+    newest_type = max(parsed, key=lambda p: p[0])[1]
+    if newest_type in _IN_TOKENS:
+        return "OUT"
+    return "IN"
+
+
+def is_duplicate_intent(last_log_time, intent_time, gap_minutes: int = 2) -> bool:
+    """True when this tap is a RETRY of the immediately preceding log.
+
+    Rule: ``0 <= intent_time - last_log_time < gap_minutes`` (both normalised
+    via :func:`parse_log_dt`; ``None`` on either side → not a duplicate).
+
+    - Live re-tap after a lost HTTP response: intent ≈ last log (seconds) →
+      duplicate → the caller must SKIP creating a new log.
+    - Offline replay: the queued punch's intent timestamp is far OLDER than
+      the last persisted log (negative delta) → not a duplicate → replay
+      proceeds, preserving the FIFO offline queue semantics.
+    - A genuinely new tap minutes later (>= gap) → not a duplicate.
+    """
+    last = parse_log_dt(last_log_time)
+    intent = parse_log_dt(intent_time)
+    if last is None or intent is None:
+        return False
+    delta = (intent - last).total_seconds()
+    return 0 <= delta < int(gap_minutes) * 60
+
+
+# utils.calc default ``vn_max_total_work_hours`` — the engine credits a log to a
+# shift only inside [planned_end - cap, planned_start + cap] (_filter_logs_to_window).
+_ENGINE_CAP_HOURS = 20.0
+
+
+def _engine_window(c: dict, ps: datetime, pe: datetime) -> tuple[datetime, datetime]:
+    """The engine's own log window for one Shift Instance (utils.calc
+    ``_filter_logs_to_window``): ``[pe - cap, ps + cap]`` widened — never
+    narrowed — by the instance check-in / check-out window."""
+    try:
+        cap = timedelta(hours=float(c.get("vn_max_total_work_hours") or _ENGINE_CAP_HOURS))
+    except (TypeError, ValueError):
+        cap = timedelta(hours=_ENGINE_CAP_HOURS)
+    lo, hi = pe - cap, ps + cap
+    cws, mco = parse_log_dt(c.get("checkin_window_start")), parse_log_dt(c.get("max_checkout_time"))
+    if cws is not None and cws < lo:
+        lo = cws
+    if mco is not None and mco > hi:
+        hi = mco
+    return lo, hi
+
+
+def pick_shift_instance(candidates: list[dict], punch_time, log_type: str | None = None) -> str | None:
+    """Name of the Shift Instance a punch belongs to (``None`` if no candidate).
+
+    ``candidates``: the employee's instances of the punch day AND the day before
+    (an overnight shift started yesterday), each with ``planned_start`` /
+    ``planned_end`` (+ optional ``checkin_window_start`` / ``max_checkout_time``).
+    PHASE-1 FRAME — every value is naive PORTAL WALL; compare as-is.
+    Instances whose ENGINE log window (:func:`_engine_window`) holds the punch
+    win — so the recalc hook targets the session the engine will actually
+    credit it to; among them an IN goes to the closest ``planned_start``, an
+    OUT to the closest ``planned_end``, an unknown type to the closest window.
+    No instance qualifies → the closest window (never drop a punch while there
+    are candidates — same as the old resolver).
+
+    FIX 2026-10-04: the old resolver read the punch as UTC (+7h), so a day
+    shift's 20:xx OUT and a night shift's 08:xx OUT resolved to the WRONG
+    instance — 164 of 234 punches 28/09–04/10 recalculated the wrong session.
+    """
+    t = parse_log_dt(punch_time)
+    if t is None:
+        return None
+    kind = str(log_type or "").strip().upper()
+    best = None
+    for c in candidates or []:
+        ps, pe = parse_log_dt(c.get("planned_start")), parse_log_dt(c.get("planned_end"))
+        if ps is None or pe is None:
+            continue
+        outside = max(ps - t, t - pe, timedelta(0))
+        lo, hi = _engine_window(c, ps, pe)
+        if lo <= t <= hi:
+            if kind in _IN_TOKENS:
+                gap = abs(t - ps)
+            elif kind in _OUT_TOKENS:
+                gap = abs(t - pe)
+            else:
+                gap = outside
+            key = (0, gap)
+        else:
+            key = (1, outside)
+        if best is None or key < best[0]:
+            best = (key, c.get("name"))
+    return best[1] if best else None
+
+
+def _as_day(value):
+    """``date`` / ``datetime`` / 'YYYY-MM-DD…' → ``date`` (``None`` if unparseable)."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if hasattr(value, "year") and hasattr(value, "month"):
+        return value
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def shift_of_punch(shifts: list[dict], punch_time, log_type: str | None = None) -> str | None:
+    """:func:`pick_shift_instance` over the instances of the punch's own day and
+    the day before — exactly the candidate set the after_insert resolver uses.
+    ``shifts`` may span more days (each needs ``work_date``)."""
+    t = parse_log_dt(punch_time)
+    if t is None:
+        return None
+    day, day_before = t.date(), t.date() - timedelta(days=1)
+    cands = [
+        s for s in shifts or [] if (wd := _as_day(s.get("work_date"))) is not None and day_before <= wd <= day
+    ]
+    return pick_shift_instance(cands, t, log_type)
+
+
+def pick_existing_punch(punches: list[dict], shifts: list[dict], when, log_type: str) -> str | None:
+    """The existing punch an admin edit to ``when`` must UPDATE: same
+    ``log_type`` AND the same shift (both via :func:`shift_of_punch`). IN → the
+    earliest such IN, OUT → the latest such OUT. ``None`` → insert a new punch.
+
+    FIX 2026-10-04: matching by CALENDAR DAY made editing one night shift move
+    the OTHER shift's punch on that day — Trọng Tiền 13/09 + 14/09 night
+    shifts both have an IN on 14/09 (04:45, 22:54): the one row ping-ponged 8
+    times on 16/09 and the 13/09 shift lost its IN.
+    """
+    kind = str(log_type or "").strip().upper()
+    target = shift_of_punch(shifts, when, kind)
+    if target is None:
+        return None
+    same = []
+    for p in punches or []:
+        pt = parse_log_dt(p.get("time"))
+        if pt is None or str(p.get("log_type") or "").strip().upper() != kind:
+            continue
+        if shift_of_punch(shifts, pt, kind) == target:
+            same.append((pt, p.get("name")))
+    if not same:
+        return None
+    same.sort()
+    return (same[0] if kind in _IN_TOKENS else same[-1])[1]
