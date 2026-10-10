@@ -1,6 +1,6 @@
 # Cách tính công theo ca (ca 8h + ca 12h)
 
-Ngày: 2026-10-08 · Owner chốt: 2026-10-08
+Ngày: 2026-10-08 · Owner chốt: 2026-10-08 · **Trạng thái: ĐÃ TRIỂN KHAI ĐỦ (08/10/2026)** — xem mục cuối
 
 ## Bối cảnh
 
@@ -69,3 +69,25 @@ Cần đối chiếu bảng lương tháng 10 trước/sau khi bật.
 2. Đặt `Ca 9h-17h.vn_payable_day_method = "Theo phút"`.
 3. Tính lại phiên chấm công của Kiệt (HR-EMP-00067) từ 26/09. Các ca 12h không đổi ngưỡng
    (min(8, 11.5) = 8) — chỉ tính lại khi có lượt chấm mới/“Tính lại kỳ”.
+
+## Trạng thái triển khai (08/10/2026)
+
+| Hạng mục | PR | Ghi chú |
+|---|---|---|
+| Cách tính công theo ca + ân hạn trễ + Monthly đọc `payable_day` | gege_hr #48 | có `bench migrate` |
+| Phiên chấm công nhận công lẻ 0–1 | gege_hr #49 | sót của #48: validate cũ chỉ nhận 0 / 0.5 / 1 → ca "Theo phút" không lưu được |
+| Ô "Cách tính công" (form ca) + "Được thiếu tối đa" (chính sách) | trader-ui #31 | |
+| Hourly đọc phiên chấm công (PR2) | gege_hr #50 | owner chốt: **OT chỉ trả khi có đơn OT được duyệt** |
+
+- `Ca 9h-17h` (tạo 07/10, 09:00–17:00, 8h) đặt **Theo phút**; các ca 12h giữ **Theo ngưỡng giờ** (8h / 4h không đổi).
+- Kiều Nguyễn Tuấn Kiệt (HR-EMP-00067) chuyển toàn bộ lịch sử sang `Ca 9h-17h` từ 26/09 và tính lại: 28/09 0.5 → **0.88**,
+  29/09 (trễ 35 giây) 0.5 → **1.0**, 02/10 → 0.13.
+- Tính lại toàn bộ 176 phiên 01–08/10 của cả công ty (0 lỗi) để các phiên trễ trong ân hạn được cộng lại phút ân hạn.
+- **So sánh Hourly 01–07/10 (23 NV, đơn giá mặc định 20.000đ/h): 1802,5h → 1467,2h.** Chênh gồm ~266h ca ngoài khoảng tính
+  (lỗi của cách ghép cặp cũ: nới truy vấn ±1 ngày mà không lọc lại — ngày giáp ranh trả 2 lần giữa 2 kỳ), 54h làm quá giờ hết
+  ca chưa duyệt OT (lúc đó hệ thống có 0 đơn OT), 17,6h ngày cần xem lại, 5h đến sớm trước ca, +7,1h ân hạn trễ.
+- Việc của vận hành: thông báo nhân viên làm quá giờ phải gửi đơn tăng ca (ma trận duyệt `Default Overtime Approval
+  Matrix` + workflow `VN Overtime Request Workflow` đã bật; duyệt đơn → phiên tự tính lại).
+- Lưu ý kỹ thuật: `Shift Type.vn_hours_per_day` mà `payroll._employee_hours_per_day` đọc **không tồn tại** (luôn 8h) — chỉ
+  còn ảnh hưởng dòng không có `payable_day`; tính lại một ngày ĐÃ QUA không có lượt chấm sẽ sinh bản nháp Attendance
+  "Present" (hành vi sẵn có của `attendance_sync`, lương không đọc).

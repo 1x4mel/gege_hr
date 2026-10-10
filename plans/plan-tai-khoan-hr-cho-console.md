@@ -1,6 +1,6 @@
 # Tài khoản HR cho console gege (đồng bộ tài khoản · QR vào ca · mật khẩu HR)
 
-Ngày: 2026-10-10 · Owner chốt: 2026-10-10
+Ngày: 2026-10-10 · Owner chốt: 2026-10-10 · **Trạng thái: ĐÃ CHUYỂN CHÍNH THỨC 10/10/2026 14:10** — xem mục cuối
 
 ## Mục tiêu
 
@@ -10,10 +10,12 @@ Console gege (.90) đang có tài khoản riêng. Owner muốn dùng tài khoả
 |---|---|---|
 | HR là nguồn quyết định **ai có tài khoản** console (tạo / khoá); vai trò + quyền máy chia ở console | có | **đợt 1** |
 | Màn hình vào ca (gege-seat): **quét QR bằng app HR** | có | **đợt 1** |
-| Quên điện thoại: nhập **email + mật khẩu HR** ở màn hình vào ca | có | **đợt 2** (code xong, bật theo máy `hr_auth`) |
-| Trang web console: đăng nhập bằng email + mật khẩu HR | có | **đợt 2** (code xong, `auth` 0/2 thử/1 chính thức) |
+| Quên điện thoại: nhập **email + mật khẩu HR** ở màn hình vào ca | có | **xong** — bật theo máy (`hr_auth`), hiện: b6 |
+| Trang web console: đăng nhập bằng email + mật khẩu HR | có | **xong** — `auth = 1` (chính thức) |
 | HTTPS cho console | có | **xong 10/10** — `https://console.gegeteam.xyz` (chỉ LAN) |
-| Mật khẩu console cũ của nhân viên | **tắt hẳn** khi chuyển (giữ tài khoản nội bộ không phải email) | đợt 2 |
+| Mật khẩu console cũ của nhân viên | **tắt hẳn** khi chuyển (giữ tài khoản nội bộ không phải email) | **xong** — đã xoá băm của 23 tài khoản email ("mức 2") |
+| Trang web console: đăng nhập bằng **QR** quét bằng app HR | có (thêm 10/10) | **xong** |
+| Mục "Quét QR" ở menu tài khoản của app HR (cùng chỗ Đổi mật khẩu / Đăng xuất) | có (thêm 10/10) | **xong** |
 
 Đợt 1 không gửi mật khẩu nào qua mạng nên không phụ thuộc HTTPS.
 
@@ -63,3 +65,38 @@ Thay vì console nhận mật khẩu rồi hỏi HR, người dùng gửi mật 
 
 `_issue_assertion`: User bật + mật khẩu đúng (`check_password`, không tạo phiên HR) + nhân viên Active → giấy
 `token_urlsafe(24)` lưu Redis 60 s kèm `aud`. Sai 5 lần / email / 10 phút → khoá tạm. Cấu hình: `seat_console_web_url`.
+
+## Đăng nhập trang web console bằng QR + mục "Quét QR" trong app
+
+- Trang `/hr/seat-login` dùng chung cho hai loại mã: mã của **màn hình vào ca** và mã của **trang đăng nhập console**
+  (`seat_qr_info` trả `kind = "web"` + `ip` của trình duyệt đang xin đăng nhập → app hiện "Trang web console · máy <ip>" để
+  nhân viên đối chiếu, nút "Đăng nhập console").
+- Lối vào trong app: **menu tài khoản** (bấm tên ở cuối sidebar) → **📷 Quét QR** — hiện khi `auth.me().features.seat_qr`
+  (`enable_seat_qr_login`); nút ở trang Chấm công vẫn còn.
+- Phía console: `/api/login-qr/new` (mã 150 s + *poll token* chỉ trình duyệt xin mã giữ) → `qr-approve` ghi nhận người xác
+  nhận → `/api/login-qr/poll` trả phiên cho đúng trình duyệt đó.
+
+## Trạng thái triển khai (10/10/2026)
+
+| Hạng mục | PR / commit |
+|---|---|
+| `seat_bridge`: `list_accounts`, `seat_qr_info`, `seat_qr_approve`, `enable_seat_qr_login` | gege_hr #53 (migrate) |
+| Giấy xác nhận: `console_login`, `login_assertion`, `verify_assertion`, `seat_console_web_url` | gege_hr #54 (migrate) |
+| `auth.me().features`, `kind` / `ip` cho mã đăng nhập console | gege_hr #55 |
+| App HR: `/hr/seat-login`, nút ở trang Chấm công, công tắc Dữ liệu nền | trader-ui #37 |
+| App HR: mục "Quét QR" ở menu tài khoản, đăng nhập console bằng QR | trader-ui #38 |
+| App HR: mục "Đổi mật khẩu" ở menu tài khoản (tính năng đổi mật khẩu vốn đã có ở Hồ sơ → Bảo mật) | trader-ui #36 |
+| Console, dịch vụ gege-seat, HTTPS, màn đăng nhập mới | repo `Gege-Cyber-System-Localdisk`, `docs/tai-khoan-hr.md` |
+
+- **Chuyển chính thức 14:10**: console `auth = 1`, xoá mật khẩu console của 23 tài khoản email; tài khoản nội bộ không có
+  `@` (`admin`, `claude-test`, `gege`) vẫn mật khẩu console. Trước khi chuyển đã có người thật dùng đủ 4 đường (web bằng mật
+  khẩu HR, web bằng QR, vào ca b6 bằng QR, vào ca b6 bằng mật khẩu HR); 23/23 tài khoản email đều `eligible`.
+- Đồng bộ tài khoản đang bật (10 phút/lần): lượt đầu tạo 2 tài khoản (nhân viên HR chưa có trên console), không khoá ai.
+- Cài đặt đang đặt: `enable_pc_checkin = 1`, `enable_seat_qr_login = 1`, `seat_console_url = http://192.168.2.90:8080`,
+  `seat_console_web_url = https://console.gegeteam.xyz`, `seat_console_key` = khoá ghép nối (Password).
+- **Bẫy:** (1) trường mới của Single DocType không tự nhận `default` — `seat_console_web_url` rỗng làm `console_login` trả
+  417 cho tới khi ghi giá trị; (2) module API có `@frappe.whitelist` không import được trong bộ test (conftest ép `import
+  frappe` lỗi) → helper thuần đặt ở `utils/seat_checkin.py`; (3) các endpoint `allow_guest` của `seat_bridge` là mặt tiếp xúc
+  internet (qua Cloudflare Tunnel) — `list_accounts` / `verify_assertion` bắt buộc `_require_console` (IP + khoá),
+  `login_assertion` / `console_login` có khoá tạm theo email; đừng bỏ các lớp này.
+- **Còn lại:** rollout gege-seat cả dàn rồi bật `hr_auth` cho mọi máy; giao diện console cho đổi chế độ / đồng bộ tay.
