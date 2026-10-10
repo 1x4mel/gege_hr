@@ -3,9 +3,11 @@
 Ngày: 2026-10-10 · Yêu cầu của owner: "thay đổi giao diện https://hr.gegeteam.xyz/login giống
 https://console.gegeteam.xyz và cũng có thể đăng nhập bằng mã QR".
 
-**Trạng thái:** gege_hr nhánh `feat/hr-login-qr` + trader-ui nhánh `feat/hr-login-console-qr` — đã qua ruff / pytest /
-eslint / vitest / build và thử trọn luồng trên máy làm việc (mã `api/web_qr.py` thật chạy trên Frappe giả + bản build
-trader-ui + Chrome headless). **Chưa deploy .116.** Công tắc `enable_hr_qr_login` mặc định TẮT.
+**Trạng thái (10/10 17:20):** ĐÃ deploy .116 — gege_hr #61 (c48d47b, đã `bench migrate`) + trader-ui #42 (07ef217, đã
+build). Trang `/login` thật đã là giao diện mới; đã kiểm từ ngoài bằng Chrome headless (đăng nhập sai → báo lỗi trên
+trang, không lỗi JS) và gọi API thật (`start` app=hr → `{"ok": false}` vì công tắc tắt; QR của forum vẫn cấp mã).
+Công tắc **`enable_hr_qr_login` đang TẮT** (mặc định) — chờ owner bật ở Dữ liệu nền rồi quét thử bằng điện thoại
+(chưa ai thử trọn vòng trên máy thật). Trước khi deploy đã thử trọn luồng trên máy làm việc (mục cuối file).
 
 ## Phạm vi
 
