@@ -159,3 +159,53 @@ def parse_qr_code(code: str | None) -> str:
     if 8 <= len(c) <= 64 and all(ch.isalnum() or ch in "-_" for ch in c):
         return c
     return ""
+
+
+# --------------------------------------------------------------------------- #
+# Đăng nhập console bằng mật khẩu HR — giấy xác nhận dùng một lần (helper thuần)
+# --------------------------------------------------------------------------- #
+ASSERTION_TTL_S = 60
+PW_FAIL_LIMIT = 5
+PW_FAIL_WINDOW_S = 600
+AUD_CONSOLE_WEB = "console-web"
+
+
+def valid_audience(aud: str | None) -> str:
+    """``console-web`` (trang web console) hoặc ``seat:<máy>`` (màn hình vào ca). Sai → ``""``."""
+    a = str(aud or "").strip()
+    if a == AUD_CONSOLE_WEB:
+        return a
+    if a.startswith("seat:"):
+        host = a[5:]
+        if 1 <= len(host) <= 32 and all(ch.isalnum() or ch in "-_." for ch in host):
+            return a
+    return ""
+
+
+def assertion_valid(record: dict | None, aud: str | None, now_ts: float) -> bool:
+    """Giấy xác nhận còn hạn (≤ 60 giây) và đúng nơi dùng (``aud``)."""
+    if not record or not record.get("email"):
+        return False
+    if str(record.get("aud") or "") != str(aud or ""):
+        return False
+    try:
+        age = float(now_ts) - float(record.get("ts") or 0)
+    except (TypeError, ValueError):
+        return False
+    return 0 <= age <= ASSERTION_TTL_S
+
+
+def console_redirect(web_url: str | None, assertion: str | None = None, error: str | None = None) -> str:
+    """Địa chỉ chuyển hướng về trang web console — CHỈ dựa trên cấu hình (không nhận URL từ người gọi).
+
+    Thành công → ``<web>/api/sso?a=<giấy>``; lỗi → ``<web>/?login_err=<thông báo>``. Cấu hình trống / không
+    phải http(s) → ``""`` (người gọi báo lỗi thay vì chuyển hướng lung tung).
+    """
+    from urllib.parse import quote
+
+    base = (web_url or "").strip().rstrip("/")
+    if not base.lower().startswith(("https://", "http://")) or not urlparse(base).hostname:
+        return ""
+    if assertion:
+        return f"{base}/api/sso?a={quote(str(assertion), safe='')}"
+    return f"{base}/?login_err={quote(str(error or 'Đăng nhập thất bại'), safe='')}"

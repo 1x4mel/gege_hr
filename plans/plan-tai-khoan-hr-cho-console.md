@@ -10,9 +10,9 @@ Console gege (.90) đang có tài khoản riêng. Owner muốn dùng tài khoả
 |---|---|---|
 | HR là nguồn quyết định **ai có tài khoản** console (tạo / khoá); vai trò + quyền máy chia ở console | có | **đợt 1** |
 | Màn hình vào ca (gege-seat): **quét QR bằng app HR** | có | **đợt 1** |
-| Quên điện thoại: nhập **email + mật khẩu HR** ở màn hình vào ca | có | đợt 2 |
-| Trang web console: đăng nhập bằng email + mật khẩu HR | có | đợt 2 |
-| HTTPS cho console trước khi mật khẩu HR đi qua console | có | đợt 2 (điều kiện) |
+| Quên điện thoại: nhập **email + mật khẩu HR** ở màn hình vào ca | có | **đợt 2** (code xong, bật theo máy `hr_auth`) |
+| Trang web console: đăng nhập bằng email + mật khẩu HR | có | **đợt 2** (code xong, `auth` 0/2 thử/1 chính thức) |
+| HTTPS cho console | có | **xong 10/10** — `https://console.gegeteam.xyz` (chỉ LAN) |
 | Mật khẩu console cũ của nhân viên | **tắt hẳn** khi chuyển (giữ tài khoản nội bộ không phải email) | đợt 2 |
 
 Đợt 1 không gửi mật khẩu nào qua mạng nên không phụ thuộc HTTPS.
@@ -51,3 +51,15 @@ Cài đặt: `enable_seat_qr_login` (mặc định 0). Chỉ nhân viên `Active
 
 - Ai thấy màn hình qua Moonlight cũng quét được mã (tương đương vé Moonlight tự mở ca hiện có).
 - Quét bằng camera của máy khi chưa đăng nhập HR: phải đăng nhập rồi quét lại (mã sống 150 s).
+
+## Đợt 2 — mật khẩu HR không đi qua console (giấy xác nhận dùng một lần)
+
+Thay vì console nhận mật khẩu rồi hỏi HR, người dùng gửi mật khẩu **thẳng tới HR** qua HTTPS:
+
+- `seat_bridge.console_login(usr, pwd)` — form đăng nhập của trang web console POST tới đây; HR chuyển hướng về
+  `<seat_console_web_url>/api/sso?a=<giấy>` (lỗi → `/?login_err=…`). Đích chỉ lấy từ cấu hình (`console_redirect`).
+- `seat_bridge.login_assertion(usr, pwd, aud="seat:<máy>")` — dịch vụ gege-seat của máy gọi (JSON).
+- `seat_bridge.verify_assertion(assertion, aud)` — chỉ console gọi được (`_require_console`); giấy dùng một lần.
+
+`_issue_assertion`: User bật + mật khẩu đúng (`check_password`, không tạo phiên HR) + nhân viên Active → giấy
+`token_urlsafe(24)` lưu Redis 60 s kèm `aud`. Sai 5 lần / email / 10 phút → khoá tạm. Cấu hình: `seat_console_web_url`.

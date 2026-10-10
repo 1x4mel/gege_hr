@@ -62,6 +62,13 @@
    "label": "gege-seat Console URL"
   },
   {
+   "default": "https://console.gegeteam.xyz",
+   "description": "\u0110\u1ecba ch\u1ec9 trang web console (HTTPS) \u2014 HR ch\u1ec9 chuy\u1ec3n h\u01b0\u1edbng gi\u1ea5y x\u00e1c nh\u1eadn \u0111\u0103ng nh\u1eadp v\u1ec1 \u0111\u00fang \u0111\u1ecba ch\u1ec9 n\u00e0y.",
+   "fieldname": "seat_console_web_url",
+   "fieldtype": "Data",
+   "label": "gege Console Web URL"
+  },
+  {
    "fieldname": "seat_console_key",
    "fieldtype": "Password",
    "label": "gege-seat Console Key"

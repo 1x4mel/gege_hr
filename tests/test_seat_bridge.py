@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from gege_hr.gege_hr.utils.seat_checkin import build_accounts, caller_allowed, console_host, parse_qr_code
+from gege_hr.gege_hr.utils.seat_checkin import (
+    assertion_valid,
+    build_accounts,
+    caller_allowed,
+    console_host,
+    console_redirect,
+    parse_qr_code,
+    valid_audience,
+)
 
 URL = "http://192.168.2.90:8080"
 
@@ -85,3 +93,37 @@ def test_parse_qr_code():
     assert parse_qr_code("a" * 65) == ""
     assert parse_qr_code("abc/../../etc") == ""
     assert parse_qr_code(None) == ""
+
+
+# ── Đăng nhập console bằng mật khẩu HR: giấy xác nhận dùng một lần ──────────────
+def test_valid_audience():
+    assert valid_audience("console-web") == "console-web"
+    assert valid_audience("seat:b6") == "seat:b6"
+    assert valid_audience("seat:pilot-33") == "seat:pilot-33"
+    assert valid_audience("seat:") == ""
+    assert valid_audience("seat:../x") == ""
+    assert valid_audience("khac") == ""
+    assert valid_audience(None) == ""
+
+
+def test_assertion_valid_ttl_and_audience():
+    rec = {"email": "an@gegeteam.net", "aud": "console-web", "ts": 1000.0}
+    assert assertion_valid(rec, "console-web", 1030.0) is True
+    assert assertion_valid(rec, "console-web", 1061.0) is False  # quá 60 giây
+    assert assertion_valid(rec, "seat:b6", 1030.0) is False  # sai nơi dùng
+    assert assertion_valid(rec, "console-web", 999.0) is False  # đồng hồ lùi
+    assert assertion_valid(None, "console-web", 1030.0) is False
+    assert assertion_valid({"aud": "console-web", "ts": 1000.0}, "console-web", 1030.0) is False
+
+
+def test_console_redirect_only_to_configured_site():
+    web = "https://console.gegeteam.xyz/"
+    assert console_redirect(web, assertion="A_b-1") == "https://console.gegeteam.xyz/api/sso?a=A_b-1"
+    err = console_redirect(web, error="Sai email hoặc mật khẩu.")
+    assert err.startswith("https://console.gegeteam.xyz/?login_err=Sai%20email")
+    assert console_redirect("", assertion="A") == ""
+    assert console_redirect("javascript:alert(1)", assertion="A") == ""
+    # ký tự lạ trong giấy xác nhận không thoát ra ngoài tham số
+    assert (
+        console_redirect(web, assertion="a&x=1#y") == "https://console.gegeteam.xyz/api/sso?a=a%26x%3D1%23y"
+    )
