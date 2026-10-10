@@ -1,7 +1,7 @@
-"""Đăng nhập trang web khác (Gege Forum) bằng mã QR quét từ app HR — helper thuần.
+"""Đăng nhập trang web (Gege Forum, và chính trang đăng nhập Gege HR) bằng mã QR quét từ app HR — helper thuần.
 
-Thiết kế: ``plans/plan-forum-qr-login.md``. Không import frappe ở đây (bộ test chạy không cần bench);
-phần gọi Redis / tạo phiên nằm ở ``api/web_qr.py``.
+Thiết kế: ``plans/plan-forum-qr-login.md``, ``plans/plan-hr-login-qr.md``. Không import frappe ở đây (bộ test chạy
+không cần bench); phần gọi Redis / tạo phiên nằm ở ``api/web_qr.py``.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ CODE_TTL_S = 150  # mã QR sống (trang đăng nhập tự xin mã mới trư�
 APPROVED_GRACE_S = 30  # đã xác nhận ở giây cuối → trình duyệt vẫn kịp hỏi kết quả
 FINISH_TTL_S = 60  # vé hoàn tất: trình duyệt phải đổi ngay sau khi được xác nhận
 APP_FORUM = "forum"
+APP_HR = "hr"  # chính trang đăng nhập của Gege HR (cùng origin)
 DEFAULT_FORUM_URL = "https://forum.gegeteam.xyz"
 STATE_WAIT, STATE_OK, STATE_GONE = "wait", "ok", "gone"
 
@@ -28,18 +29,46 @@ def normalize_origin(url: str | None) -> str:
     return f"{p.scheme}://{p.netloc}".lower()
 
 
-def app_config(app: str | None, forum_url: str | None = None) -> dict | None:
-    """Trang web được phép xin mã. Đích chuyển hướng CHỈ lấy từ đây — không nhận URL từ người gọi."""
-    if str(app or "") != APP_FORUM:
+def app_config(app: str | None, forum_url: str | None = None, hr_base: str | None = None) -> dict | None:
+    """Trang web được phép xin mã. Đích chuyển hướng CHỈ lấy từ đây — không nhận URL từ người gọi.
+
+    ``flag_qr`` / ``flag_password`` = tên công tắc ở ``VN HR Portal Setting`` cho từng cách đăng nhập (``None`` = trang
+    đó không có cách này). ``hr_base`` = địa chỉ công khai của chính HR (:func:`public_base`), chỉ cần cho ``app="hr"``.
+    """
+    name = str(app or "")
+    if name == APP_FORUM:
+        base = normalize_origin(forum_url) or DEFAULT_FORUM_URL
+        return {
+            "app": APP_FORUM,
+            "title": "Gege Forum",
+            "origin": base,
+            "done": f"{base}/login?gege_qr=1",
+            "fail": f"{base}/login?gege_qr=err",
+            "flag_qr": "enable_forum_qr_login",
+            "flag_password": "enable_forum_password_login",
+        }
+    if name == APP_HR:
+        base = normalize_origin(hr_base)
+        if not base:
+            return None
+        return {
+            "app": APP_HR,
+            "title": "Gege HR",
+            "origin": base,
+            "done": f"{base}/hr/attendance",
+            "fail": f"{base}/login?qr=err",
+            "flag_qr": "enable_hr_qr_login",
+            # mật khẩu: trang đăng nhập HR dùng thẳng /api/method/login của Frappe, không đi đường vé
+            "flag_password": None,
+        }
+    return None
+
+
+def flag_for(cfg: dict | None, via: str | None) -> str | None:
+    """Tên công tắc phải bật cho cách đăng nhập ``via`` (``qr`` / ``password``) của trang ``cfg``."""
+    if not cfg:
         return None
-    base = normalize_origin(forum_url) or DEFAULT_FORUM_URL
-    return {
-        "app": APP_FORUM,
-        "title": "Gege Forum",
-        "origin": base,
-        "done": f"{base}/login?gege_qr=1",
-        "fail": f"{base}/login?gege_qr=err",
-    }
+    return cfg.get("flag_password") if via == VIA_PASSWORD else cfg.get("flag_qr")
 
 
 def public_base(host: str | None) -> str:
@@ -183,6 +212,28 @@ def finish_valid(record: dict | None, app: str | None, now_ts: float) -> bool:
     if not record or not record.get("user") or str(record.get("app") or "") != str(app or ""):
         return False
     return record_age_ok(record, now_ts, FINISH_TTL_S)
+
+
+def finish_request_ok(
+    cfg: dict,
+    as_json: bool,
+    origin: str | None,
+    sec_fetch_site: str | None,
+    sec_fetch_mode: str | None = None,
+) -> bool:
+    """Yêu cầu đổi vé lấy phiên có đến từ đúng chỗ không (sai → từ chối, KHÔNG tiêu vé).
+
+    * Trang khác origin (forum): mở cả trang thì luôn nhận (đích chuyển hướng lấy từ cấu hình); ``fmt=json`` thì phải
+      đúng ``Origin`` của trang đó.
+    * ``app="hr"``: chỉ nhận ``fmt=json`` do ``fetch`` từ chính trang đăng nhập HR gửi — trình duyệt tự gắn
+      ``Sec-Fetch-Site: same-origin`` (trang khác không giả được) và ``Sec-Fetch-Mode`` khác ``navigate``. Không nhận
+      mở link: xem ghi chú ở ``api.web_qr.finish``.
+    """
+    if cfg.get("app") == APP_HR:
+        if not as_json or str(sec_fetch_site or "") != "same-origin":
+            return False
+        return str(sec_fetch_mode or "") != "navigate" and (not origin or origin == cfg.get("origin"))
+    return not as_json or origin == cfg.get("origin")
 
 
 # --------------------------------------------------------------------------- #

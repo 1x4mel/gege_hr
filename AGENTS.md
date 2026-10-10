@@ -58,6 +58,9 @@ ruff format --check <file1> <file2> ...
   - Chỉ `finish?fmt=json` trả `Access-Control-Allow-Credentials` (phải nhận cookie phiên); nó chỉ trả `{"ok": bool}`.
   - Đích chuyển hướng luôn lấy từ cấu hình (`forum_url`, `seat_console_web_url`), không nhận từ người gọi.
   - Kiểm mật khẩu đi qua một hàm duy nhất `web_qr.check_hr_password` (khoá tạm 5 lần / 10 phút theo email).
+- **Trang đăng nhập Gege HR có đăng nhập bằng QR (10/10/2026)**: cùng `api/web_qr.py`, `app="hr"`, công tắc
+  `enable_hr_qr_login` (mặc định tắt) — `plans/plan-hr-login-qr.md`. `finish` cho `app="hr"` CHỈ nhận `fetch` cùng origin
+  (`utils/web_qr.finish_request_ok`: `fmt=json` + `Sec-Fetch-Site: same-origin`), không nhận mở link — đừng nới.
   Tài liệu: `plans/plan-forum-qr-login.md`; phía forum: repo `Gege-discourse` `docs/08-dang-nhap-qr.md`.
 - Cách tính công theo ca (ngưỡng co theo độ dài ca / theo phút, ân hạn trễ, Hourly đọc phiên chấm công):
   `plans/plan-cach-tinh-cong-theo-ca.md`.
