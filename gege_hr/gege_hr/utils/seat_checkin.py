@@ -10,6 +10,8 @@ và ca có phải từ xa (Moonlight) không; :func:`evaluate` quyết định c
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 try:  # bench-free import guard (unit tests exercise ``evaluate`` only)
     import frappe
 except Exception:  # pragma: no cover
@@ -51,10 +53,10 @@ def evaluate(result: dict | None, user_email: str | None) -> tuple[bool, str, st
     return True, "", host
 
 
-def verify_ticket(ticket: str, log_type: str | None = None) -> dict:
-    """Hỏi console kiểm vé (dùng một lần). Không ném lỗi — trả ``{"ok": False, "msg": …}``."""
+def console_config() -> tuple[str, str | None]:
+    """``(địa chỉ console, khoá bí mật)`` từ VN HR Portal Setting — ``("", None)`` khi chưa cấu hình."""
     if frappe is None:
-        return {"ok": False, "msg": "Không có môi trường bench."}
+        return "", None
     try:
         from frappe.utils.password import get_decrypted_password
 
@@ -63,25 +65,97 @@ def verify_ticket(ticket: str, log_type: str | None = None) -> dict:
         key = get_decrypted_password(
             "VN HR Portal Setting", "VN HR Portal Setting", "seat_console_key", raise_exception=False
         )
+        return base, key
     except Exception:
-        base, key = "", None
+        return "", None
+
+
+def console_post(path: str, payload: dict) -> dict:
+    """POST tới console gege-seat (kèm ``X-Seat-Key``). Không ném lỗi — trả ``{"ok": False, "msg": …}``."""
+    base, key = console_config()
     if not base or not key:
         return {"ok": False, "msg": "Chưa cấu hình kết nối gege-seat (địa chỉ console / khoá)."}
     try:
         import requests
 
-        resp = requests.post(
-            base + VERIFY_PATH,
-            json={"ticket": str(ticket or "")[:64], "log_type": log_type or ""},
-            headers={"X-Seat-Key": key},
-            timeout=TIMEOUT_S,
-        )
+        resp = requests.post(base + path, json=payload, headers={"X-Seat-Key": key}, timeout=TIMEOUT_S)
         if resp.status_code != 200:
-            return {"ok": False, "msg": f"Console từ chối kiểm vé (HTTP {resp.status_code})."}
+            return {"ok": False, "msg": f"Console từ chối yêu cầu (HTTP {resp.status_code})."}
         data = resp.json()
         return data if isinstance(data, dict) else {"ok": False, "msg": "Console trả dữ liệu lạ."}
     except Exception:
-        return {
-            "ok": False,
-            "msg": "Không liên lạc được console gege-seat — thử lại hoặc chấm bằng điện thoại.",
-        }
+        return {"ok": False, "msg": "Không liên lạc được console gege-seat — thử lại sau."}
+
+
+def verify_ticket(ticket: str, log_type: str | None = None) -> dict:
+    """Hỏi console kiểm vé (dùng một lần). Không ném lỗi — trả ``{"ok": False, "msg": …}``."""
+    return console_post(VERIFY_PATH, {"ticket": str(ticket or "")[:64], "log_type": log_type or ""})
+
+
+# --------------------------------------------------------------------------- #
+# Cầu nối HR ↔ console (api/seat_bridge.py) — helper thuần
+# --------------------------------------------------------------------------- #
+def console_host(url: str | None) -> str:
+    """Tên máy / IP trong địa chỉ console (``http://192.168.2.90:8080`` → ``192.168.2.90``)."""
+    try:
+        return (urlparse((url or "").strip()).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def caller_allowed(
+    request_ip: str | None, header_key: str | None, console_url: str | None, key: str | None
+) -> bool:
+    """Chỉ console thật mới gọi được: đúng IP trong ``seat_console_url`` VÀ đúng khoá."""
+    import hmac
+
+    host = console_host(console_url)
+    if not host or not key or not header_key:
+        return False
+    if (request_ip or "").strip().lower() != host:
+        return False
+    return hmac.compare_digest(str(header_key), str(key))
+
+
+def build_accounts(users: list[dict], employees: list[dict]) -> list[dict]:
+    """Ghép User + Employee → dòng đồng bộ cho console.
+
+    ``eligible`` = User đang bật VÀ có hồ sơ nhân viên ``Active``. User không có
+    hồ sơ nhân viên (tài khoản quản trị…) trả ``employee_status = None`` để
+    console biết KHÔNG được tự khoá. Một email nhiều hồ sơ → ưu tiên ``Active``.
+    """
+    by_email: dict[str, dict] = {}
+    for e in employees or []:
+        email = str(e.get("user_id") or "").strip().lower()
+        if not email:
+            continue
+        cur = by_email.get(email)
+        if cur is None or (e.get("status") == "Active" and cur.get("status") != "Active"):
+            by_email[email] = e
+    out = []
+    for u in users or []:
+        email = str(u.get("name") or "").strip().lower()
+        if not email or "@" not in email:
+            continue
+        emp = by_email.get(email)
+        enabled = bool(int(u.get("enabled") or 0))
+        status = emp.get("status") if emp else None
+        out.append(
+            {
+                "email": email,
+                "full_name": u.get("full_name") or (emp or {}).get("employee_name") or "",
+                "user_enabled": enabled,
+                "employee_status": status,
+                "department": (emp or {}).get("department") or "",
+                "eligible": bool(enabled and status == "Active"),
+            }
+        )
+    return sorted(out, key=lambda r: r["email"])
+
+
+def parse_qr_code(code: str | None) -> str:
+    """Mã QR hợp lệ: 8–64 ký tự chữ/số/``-``/``_`` (token urlsafe của console)."""
+    c = str(code or "").strip()
+    if 8 <= len(c) <= 64 and all(ch.isalnum() or ch in "-_" for ch in c):
+        return c
+    return ""

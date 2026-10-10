@@ -1,0 +1,104 @@
+"""Cầu nối HR ↔ console gege-seat (plans/plan-tai-khoan-hr-cho-console.md).
+
+Hai chiều, cùng một khoá bí mật ``VN HR Portal Setting.seat_console_key``:
+
+* **console → HR** (không có phiên đăng nhập; chỉ nhận đúng IP console + header
+  ``X-Seat-Key``): :func:`list_accounts` — danh sách tài khoản để console đồng
+  bộ (HR là nguồn quyết định AI có tài khoản; vai trò / quyền máy chia ở console).
+* **app HR → console** (nhân viên đã đăng nhập HR): :func:`seat_qr_info` /
+  :func:`seat_qr_approve` — quét mã QR trên màn hình vào ca để bắt đầu / tiếp
+  tục ca. Console tự kiểm quyền máy; HR chỉ khẳng định danh tính.
+
+Helper thuần (test không cần bench) nằm ở ``utils/seat_checkin.py``.
+"""
+
+from __future__ import annotations
+
+import frappe
+from frappe import _
+
+from gege_hr.gege_hr.utils import seat_checkin
+from gege_hr.gege_hr.utils.seat_checkin import build_accounts, caller_allowed, parse_qr_code
+
+QR_INFO_PATH = "/api/seat/hr/qr-info"
+QR_APPROVE_PATH = "/api/seat/hr/qr-approve"
+
+
+# --------------------------------------------------------------------------- #
+# console → HR
+# --------------------------------------------------------------------------- #
+def _require_console() -> None:
+    base, key = seat_checkin.console_config()
+    ok = caller_allowed(
+        getattr(frappe.local, "request_ip", None),
+        frappe.get_request_header("X-Seat-Key"),
+        base,
+        key,
+    )
+    if not ok:
+        frappe.throw(_("Không phải console gege-seat."), frappe.PermissionError)
+
+
+@frappe.whitelist(allow_guest=True)
+def list_accounts() -> dict:
+    """Danh sách tài khoản HR cho console đồng bộ (chỉ console gọi được)."""
+    _require_console()
+    users = frappe.get_all(
+        "User",
+        filters={"user_type": "System User", "name": ["not in", ["Administrator", "Guest"]]},
+        fields=["name", "full_name", "enabled"],
+        limit_page_length=0,
+    )
+    employees = frappe.get_all(
+        "Employee",
+        filters={"user_id": ["is", "set"]},
+        fields=["user_id", "status", "employee_name", "department"],
+        limit_page_length=0,
+    )
+    return {"ok": True, "accounts": build_accounts(users, employees)}
+
+
+# --------------------------------------------------------------------------- #
+# app HR → console (quét QR vào ca)
+# --------------------------------------------------------------------------- #
+def _qr_guard() -> str:
+    """Tính năng phải bật + người gọi là nhân viên đang làm → trả email đăng nhập."""
+    setting = frappe.get_cached_doc("VN HR Portal Setting", "VN HR Portal Setting")
+    if not setting.get("enable_seat_qr_login"):
+        frappe.throw(_("Vào ca bằng QR chưa được bật."), frappe.ValidationError)
+    user = frappe.session.user
+    if not user or user in ("Guest", "Administrator"):
+        frappe.throw(_("Vui lòng đăng nhập bằng tài khoản nhân viên."), frappe.PermissionError)
+    if not frappe.db.exists("Employee", {"user_id": user, "status": "Active"}):
+        frappe.throw(_("Tài khoản chưa được liên kết nhân viên đang làm việc."), frappe.ValidationError)
+    return user
+
+
+def _code_or_throw(code: str | None) -> str:
+    c = parse_qr_code(code)
+    if not c:
+        frappe.throw(_("Mã QR không hợp lệ."), frappe.ValidationError)
+    return c
+
+
+@frappe.whitelist()
+def seat_qr_info(code: str | None = None) -> dict:
+    """Mã QR này của máy nào, máy đang trống hay có ca của ai (chưa tiêu mã)."""
+    _qr_guard()
+    res = seat_checkin.console_post(QR_INFO_PATH, {"code": _code_or_throw(code)})
+    if not res.get("ok"):
+        frappe.throw(_(res.get("msg") or "Mã QR không hợp lệ hoặc đã hết hạn."), frappe.ValidationError)
+    return {k: res.get(k) for k in ("host", "state", "user", "group")}
+
+
+@frappe.whitelist()
+def seat_qr_approve(code: str | None = None) -> dict:
+    """Xác nhận vào ca / tiếp tục ca trên máy đã quét. Console kiểm quyền máy và mở ca."""
+    from gege_hr.gege_hr.utils.ratelimit import rate_limit
+
+    user = _qr_guard()
+    rate_limit(f"seatqr:{user}", max_requests=6, window_seconds=60)
+    res = seat_checkin.console_post(QR_APPROVE_PATH, {"code": _code_or_throw(code), "username": user})
+    if not res.get("ok"):
+        frappe.throw(_(res.get("msg") or "Không vào ca được."), frappe.ValidationError)
+    return {k: res.get(k) for k in ("host", "action", "msg")}

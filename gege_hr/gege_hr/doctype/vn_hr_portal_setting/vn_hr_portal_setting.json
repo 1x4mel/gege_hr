@@ -49,6 +49,13 @@
    "label": "Enable PC Check-in (gege-seat)"
   },
   {
+   "default": "0",
+   "description": "Cho ph\u00e9p nh\u00e2n vi\u00ean qu\u00e9t m\u00e3 QR tr\u00ean m\u00e0n h\u00ecnh v\u00e0o ca (gege-seat) b\u1eb1ng app HR \u0111\u1ec3 b\u1eaft \u0111\u1ea7u / ti\u1ebfp t\u1ee5c ca.",
+   "fieldname": "enable_seat_qr_login",
+   "fieldtype": "Check",
+   "label": "Enable Seat QR Login (gege-seat)"
+  },
+  {
    "default": "http://192.168.2.90:8080",
    "fieldname": "seat_console_url",
    "fieldtype": "Data",
