@@ -1,6 +1,6 @@
 # Chấm công trên máy công ty qua gege-seat
 
-Ngày: 2026-10-10 · Owner chốt: 2026-10-10 (thử trên **b6** trước, ổn mới cài cả dàn)
+Ngày: 2026-10-10 · Owner chốt: 2026-10-10 (thử trên **b6** trước, ổn mới cài cả dàn) · **Trạng thái: ĐÃ TRIỂN KHAI, đang bật** — xem mục cuối
 
 ## Bài toán
 
@@ -53,3 +53,17 @@ Console: `seat_settings` scope `hr` (`enabled`, `ip` = IP máy chủ HR, `key`) 
 - Phiên Moonlight lấy từ log Sunshine (`GEGE-SESSION` start/end theo `id`, mode play). Người ở ngoài vào được một máy
   trong mạng bằng công cụ khác Moonlight, hoặc VPN cấp IP `192.168.2.x` chưa khai trong `lan_exclude`, sẽ được coi là
   trong mạng công ty.
+
+## Trạng thái triển khai (10/10/2026)
+
+- gege_hr #51 (backend, có migrate) + #52 (tài liệu Moonlight nội bộ); trader-ui #33 (giao diện) + #35 (xem dưới);
+  console + dịch vụ gege-seat: repo `Gege-Cyber-System-Localdisk` (`docs/ca-lam-viec-khoa-may.md` mục 11).
+- Đã ghép nối khoá bí mật HR ↔ console; `enable_pc_checkin = 1` (owner tự bật). Máy dùng được: **b6** (máy duy nhất đã cài
+  gege-seat).
+- Công tắc: HR Admin → **Dữ liệu nền** (`/hr/settings`) → Cấu hình chung → "Check-in & Xác thực".
+- **Lỗi lộ ra khi thử (đã sửa, trader-ui #35):** `authedFetch` gửi lại MỌI yêu cầu bị HTTP 417 vì tưởng là CSRF — nhưng
+  Frappe trả 417 cho mọi `ValidationError` → lệnh chấm công bị từ chối chạy 2 lần, lần 2 dùng lại vé đã tiêu và báo "Vé
+  không hợp lệ hoặc đã hết hạn", che mất lý do thật ("Máy … đang được điều khiển từ xa"). Nay chỉ gửi lại khi nội dung đúng
+  là `CSRFTokenError`. **Bài học: mọi API có tác dụng phụ / vé dùng một lần phải chịu được việc client gửi lại.**
+- Cùng đợt (trader-ui #34): khung "Cấu hình portal" chỉ kiểm khoảng giá trị của trường vừa sửa (trước đó
+  `vn_approval_stale_hours = 0` chặn lưu mọi công tắc khác).

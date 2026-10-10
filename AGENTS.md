@@ -42,6 +42,15 @@ ruff format --check <file1> <file2> ...
 
 - Gán domain Cloudflare / expose máy nội bộ ra Internet: làm theo `docs/deploy-cloudflare-tunnel.md` (runbook từ lần deploy thành công 2026-08-24 — cloudflared 2026.8.2, tunnel 9637e533, verify từng bước). KHÔNG ghi token tunnel (`eyJ...`) vào repo/log.
 
+- **Console gege (.90) ↔ HR (10/10/2026)**: HR là nguồn tài khoản của console, nhân viên đăng nhập console / vào ca gege-seat
+  bằng tài khoản HR (QR hoặc mật khẩu qua *giấy xác nhận* dùng một lần), chấm công trên máy công ty bằng vé gege-seat. Code:
+  `api/seat_bridge.py`, `utils/seat_checkin.py`; tài liệu: `plans/plan-tai-khoan-hr-cho-console.md`,
+  `plans/plan-cham-cong-pc-gege-seat.md`; phía console: repo `Gege-Cyber-System-Localdisk` `docs/tai-khoan-hr.md`.
+  Khoá ghép nối (`seat_console_key`) KHÔNG ghi vào repo/log. Endpoint `allow_guest` của `seat_bridge` phải giữ
+  `_require_console` (đúng IP console + khoá) hoặc khoá tạm theo email.
+- Cách tính công theo ca (ngưỡng co theo độ dài ca / theo phút, ân hạn trễ, Hourly đọc phiên chấm công):
+  `plans/plan-cach-tinh-cong-theo-ca.md`.
+
 ## Quy ước code
 
 - Python ≥3.10, line-length 110, ngoặc kép đôi (ruff format, black-compatible).

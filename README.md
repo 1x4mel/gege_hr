@@ -55,6 +55,15 @@ bench --site <site> migrate
 Frontend calls these via `gege_hr.gege_hr.api.<domain>.<fn>`
 (see [`../hr-ui/src/api/index.js`](../hr-ui/src/api/index.js)).
 
+## Kế hoạch / tài liệu đợt 10/2026
+
+- [`plans/plan-cach-tinh-cong-theo-ca.md`](plans/plan-cach-tinh-cong-theo-ca.md) — cách tính công theo ca (ca 8h + 12h), ân
+  hạn trễ không bị trừ, lương Hourly đọc phiên chấm công (OT chỉ trả khi có đơn duyệt). Đã triển khai 08/10.
+- [`plans/plan-cham-cong-pc-gege-seat.md`](plans/plan-cham-cong-pc-gege-seat.md) — chấm công trên máy công ty bằng vé
+  gege-seat (không cần GPS; Moonlight từ ngoài mạng công ty bị từ chối). Đã triển khai 10/10, thử trên b6.
+- [`plans/plan-tai-khoan-hr-cho-console.md`](plans/plan-tai-khoan-hr-cho-console.md) — tài khoản HR cho console gege: đồng
+  bộ tài khoản, QR vào ca / đăng nhập console, mật khẩu HR qua giấy xác nhận dùng một lần. Đã chuyển chính thức 10/10.
+
 ## Desk-free `/hr/team/attendance` (plan-team-attendance-desk-free)
 
 The manager grid is fully operable without the Desk — every day-cell carries a
