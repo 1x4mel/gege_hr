@@ -198,6 +198,8 @@ PORTAL_SETTING_FIELDS = [
     "enable_forum_qr_login",
     "enable_forum_password_login",
     "forum_url",
+    # Đăng nhập chính Gege HR bằng QR ở trang đăng nhập (plans/plan-hr-login-qr.md).
+    "enable_hr_qr_login",
     "default_work_location",
     "default_attendance_policy",
     "payroll_cutoff_day",

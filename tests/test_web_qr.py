@@ -12,7 +12,9 @@ from gege_hr.gege_hr.utils.web_qr import (
     device_label,
     finish_log_subject,
     finish_record,
+    finish_request_ok,
     finish_valid,
+    flag_for,
     info_view,
     login_email,
     matrix_rows,
@@ -50,6 +52,54 @@ def test_app_config_only_forum_and_targets_come_from_config():
     assert app_config("console", None) is None
     assert app_config("https://evil.example", None) is None
     assert app_config(None, None) is None
+
+
+def test_app_config_hr_needs_its_own_public_base():
+    cfg = app_config("hr", None, "https://hr.gegeteam.xyz")
+    assert cfg["app"] == "hr" and cfg["title"] == "Gege HR"
+    assert cfg["origin"] == "https://hr.gegeteam.xyz"
+    assert cfg["done"] == "https://hr.gegeteam.xyz/hr/attendance"
+    assert cfg["fail"] == "https://hr.gegeteam.xyz/login?qr=err"
+    assert app_config("hr", None, "https://HR.gegeteam.xyz/login?x=1")["origin"] == "https://hr.gegeteam.xyz"
+    assert app_config("hr", None, None) is None  # không biết địa chỉ HR → không cấp mã
+    assert app_config("hr", None, "khong-phai-url") is None
+    # forum không bị ảnh hưởng bởi tham số mới
+    assert app_config("forum", None, "https://hr.gegeteam.xyz")["origin"] == "https://forum.gegeteam.xyz"
+
+
+def test_flag_for_each_app_and_login_method():
+    forum = app_config("forum", None)
+    hr = app_config("hr", None, "https://hr.gegeteam.xyz")
+    assert flag_for(forum, "qr") == "enable_forum_qr_login"
+    assert flag_for(forum, "password") == "enable_forum_password_login"
+    assert flag_for(hr, "qr") == "enable_hr_qr_login"
+    assert flag_for(hr, "password") is None  # mật khẩu HR đi thẳng /api/method/login, không qua vé
+    assert flag_for(None, "qr") is None
+
+
+def test_finish_request_ok_forum_keeps_old_rules():
+    forum = app_config("forum", None)
+    assert finish_request_ok(forum, False, None, None) is True  # mở cả trang: đích lấy từ cấu hình
+    assert finish_request_ok(forum, True, "https://forum.gegeteam.xyz", "same-site") is True
+    assert finish_request_ok(forum, True, "https://evil.example", "cross-site") is False
+    assert finish_request_ok(forum, True, None, None) is False
+
+
+def test_finish_request_ok_hr_only_same_origin_fetch():
+    hr = app_config("hr", None, "https://hr.gegeteam.xyz")
+    # fetch GET từ chính trang đăng nhập HR: không có Origin, trình duyệt gắn Sec-Fetch-Site: same-origin
+    assert finish_request_ok(hr, True, None, "same-origin", "cors") is True
+    assert finish_request_ok(hr, True, "https://hr.gegeteam.xyz", "same-origin", "cors") is True
+    # mở link cả trang (kẻ dụ gửi link kèm vé của họ) → từ chối
+    assert finish_request_ok(hr, False, None, "none", "navigate") is False
+    assert finish_request_ok(hr, False, None, "same-origin", "navigate") is False
+    assert finish_request_ok(hr, True, None, "same-origin", "navigate") is False
+    # trang khác gọi (forum cùng site, trang lạ) → từ chối
+    assert finish_request_ok(hr, True, "https://forum.gegeteam.xyz", "same-site", "cors") is False
+    assert finish_request_ok(hr, True, None, "cross-site", "no-cors") is False
+    # trình duyệt quá cũ không gửi Sec-Fetch-Site → từ chối (dùng mật khẩu)
+    assert finish_request_ok(hr, True, None, None, None) is False
+    assert finish_request_ok(hr, True, "https://evil.example", "same-origin", "cors") is False
 
 
 def test_public_base_forces_https_for_domain_names():

@@ -1,5 +1,6 @@
 """Đăng nhập trang web khác (Gege Forum) bằng tài khoản HR: mã QR quét từ app HR, hoặc email + mật khẩu HR nhập
-ngay trên trang đó (plans/plan-forum-qr-login.md).
+ngay trên trang đó (plans/plan-forum-qr-login.md). Trang đăng nhập của chính Gege HR cũng dùng phần QR ở đây
+(``app="hr"``, plans/plan-hr-login-qr.md) — xem ghi chú ở :func:`finish`.
 
 Forum đăng nhập qua OIDC của HR, nên "đăng nhập forum" = trình duyệt có phiên HR. Luồng:
 
@@ -13,7 +14,7 @@ Forum đăng nhập qua OIDC của HR, nên "đăng nhập forum" = trình duy�
 
 Kết quả giống hệt nhập mật khẩu HR ở bước OIDC (trình duyệt có phiên HR) — chỉ khác cách xác thực. Rủi ro riêng
 của QR: ai đó đưa mã của HỌ cho nhân viên quét; vì vậy màn xác nhận hiện IP + trình duyệt đang xin đăng nhập, mã
-sống 150 giây, dùng một lần, và tính năng mặc định TẮT (``enable_forum_qr_login``).
+sống 150 giây, dùng một lần, và tính năng mặc định TẮT (``enable_forum_qr_login``, ``enable_hr_qr_login``).
 
 Email + mật khẩu HR nhập ở form của forum đi cùng đường: :func:`password_start` (khác origin, không cookie) kiểm mật
 khẩu rồi trả luôn vé hoàn tất → :func:`finish`. KHÔNG dùng form POST thẳng tới HR: trình duyệt đang có phiên HR sẽ gửi
@@ -42,26 +43,47 @@ _ONCE = "gege_hr:webqr:once:"
 _FAIL_KEY = (
     "gege_seat_pwfail:"  # đếm lần sai mật khẩu theo email — chung với giấy xác nhận console / gege-seat
 )
-FLAG_QR = "enable_forum_qr_login"
-FLAG_PASSWORD = "enable_forum_password_login"
 
 
 def _setting():
     return frappe.get_cached_doc("VN HR Portal Setting", "VN HR Portal Setting")
 
 
-def enabled(flag: str = FLAG_QR) -> bool:
+def enabled(flag: str | None) -> bool:
     try:
-        return bool(_setting().get(flag))
+        return bool(flag) and bool(_setting().get(flag))
     except Exception:
         return False
 
 
-def _app(app: str | None, flag: str | None = FLAG_QR) -> dict | None:
-    """Cấu hình trang web được phép. ``flag`` = công tắc phải đang bật; ``None`` = chỉ kiểm tên trang."""
-    if flag and not enabled(flag):
+def _hr_base() -> str:
+    """Địa chỉ công khai của chính HR theo yêu cầu đang xử lý (cho ``app="hr"``)."""
+    try:
+        return web_qr.public_base(frappe.local.request.host)
+    except Exception:
+        return ""
+
+
+def _cfg(app: str | None) -> dict | None:
+    """Cấu hình trang web được phép (chỉ kiểm tên trang, chưa kiểm công tắc)."""
+    try:
+        forum_url = _setting().get("forum_url")
+    except Exception:
+        forum_url = None
+    return web_qr.app_config(app, forum_url, _hr_base())
+
+
+def _on(cfg: dict | None, via: str = web_qr.VIA_QR) -> bool:
+    """Công tắc cho cách đăng nhập ``via`` của trang ``cfg`` đang bật?"""
+    return enabled(web_qr.flag_for(cfg, via))
+
+
+def _app(app: str | None, via: str | None = web_qr.VIA_QR) -> dict | None:
+    """Cấu hình trang web được phép. ``via`` = cách đăng nhập phải đang bật; ``None`` = chỉ kiểm tên trang."""
+    cfg = _cfg(app)
+    if cfg and via and not _on(cfg, via):
         return None
-    return web_qr.app_config(app, _setting().get("forum_url"))
+    return cfg
 
 
 def _client_ip() -> str:
@@ -179,16 +201,27 @@ def finish(t: str | None = None, app: str | None = None, fmt: str | None = None)
     * mặc định: mở cả trang → chuyển hướng về trang web kia (đích lấy từ cấu hình, không nhận từ URL);
     * ``fmt=json``: trang kia gọi bằng ``fetch`` KÈM cookie (cùng site nên cookie phiên được nhận) → ``{"ok": bool}``,
       trang đó tự đi tiếp OIDC ngay — người dùng không phải thấy trang đăng nhập nạp lại lần nữa.
+
+    ``app="hr"`` (trang đăng nhập của chính HR): CHỈ nhận ``fmt=json`` gọi bằng ``fetch`` từ chính trang đó
+    (``Sec-Fetch-Site: same-origin``). Không nhận mở link cả trang: nếu nhận, ai đó có thể tự lấy vé cho tài khoản của
+    họ rồi dụ người khác bấm link để trình duyệt nạn nhân bị đăng nhập HR bằng tài khoản kẻ dụ. Bị từ chối kiểu này
+    thì vé KHÔNG bị tiêu.
     """
     from frappe.core.doctype.activity_log.activity_log import add_authentication_log
 
     cfg = _app(app, None)
-    if not cfg or not (enabled(FLAG_QR) or enabled(FLAG_PASSWORD)):
+    if not cfg or not (_on(cfg, web_qr.VIA_QR) or _on(cfg, web_qr.VIA_PASSWORD)):
         frappe.throw(_("Đăng nhập từ trang này chưa được bật."), frappe.ValidationError)
     as_json = str(fmt or "") == "json"
     origin = frappe.get_request_header("Origin")
-    if as_json and origin != cfg["origin"]:
-        return _json({"ok": False})  # trang lạ: không tiêu vé, không cho đọc
+    if not web_qr.finish_request_ok(
+        cfg,
+        as_json,
+        origin,
+        frappe.get_request_header("Sec-Fetch-Site"),
+        frappe.get_request_header("Sec-Fetch-Mode"),
+    ):
+        return _json({"ok": False})  # trang lạ / mở link: không tiêu vé, không cho đọc
     token = parse_qr_code(t)
     record = None
     if token and _once("f:" + token, web_qr.FINISH_TTL_S):
@@ -197,8 +230,8 @@ def finish(t: str | None = None, app: str | None = None, fmt: str | None = None)
         cache.delete_value(_FIN + token)
 
     target = cfg["fail"]
-    via_flag = FLAG_PASSWORD if (record or {}).get("via") == web_qr.VIA_PASSWORD else FLAG_QR
-    if web_qr.finish_valid(record, cfg["app"], time.time()) and enabled(via_flag):
+    via = web_qr.VIA_PASSWORD if (record or {}).get("via") == web_qr.VIA_PASSWORD else web_qr.VIA_QR
+    if web_qr.finish_valid(record, cfg["app"], time.time()) and _on(cfg, via):
         user = _employee_user(record["user"])
         if user:
             try:
@@ -210,7 +243,8 @@ def finish(t: str | None = None, app: str | None = None, fmt: str | None = None)
                 frappe.db.rollback()
                 frappe.log_error(title="web_qr.finish")
     if as_json:
-        return _json({"ok": target == cfg["done"]}, origin, with_cookies=True)
+        # gọi khác origin (forum) mới cần header CORS; cùng origin (app="hr") trả JSON trần
+        return _json({"ok": target == cfg["done"]}, origin, with_cookies=bool(origin))
     frappe.local.response["type"] = "redirect"
     frappe.local.response["location"] = target
 
@@ -261,7 +295,10 @@ def features(app: str | None = None):
     origin = frappe.get_request_header("Origin")
     if not cfg or origin != cfg["origin"]:
         return _json({})
-    return _json({"qr": enabled(FLAG_QR), "password": enabled(FLAG_PASSWORD), "title": cfg["title"]}, origin)
+    return _json(
+        {"qr": _on(cfg, web_qr.VIA_QR), "password": _on(cfg, web_qr.VIA_PASSWORD), "title": cfg["title"]},
+        origin,
+    )
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -269,7 +306,7 @@ def password_start(usr: str | None = None, pwd: str | None = None, app: str | No
     """Form đăng nhập của ``app`` gửi email + mật khẩu HR (khác origin, không cookie) → vé hoàn tất cho :func:`finish`."""
     from gege_hr.gege_hr.utils.ratelimit import rate_limit
 
-    cfg = _app(app, FLAG_PASSWORD)
+    cfg = _app(app, web_qr.VIA_PASSWORD)
     origin = frappe.get_request_header("Origin")
     if not cfg or origin != cfg["origin"]:
         return _json({"ok": False})
@@ -297,23 +334,19 @@ def password_start(usr: str | None = None, pwd: str | None = None, app: str | No
 # --------------------------------------------------------------------------- #
 def peek(code: str) -> dict | None:
     """Mã này có phải mã đăng nhập web do HR cấp không → thông tin cho màn xác nhận; không phải → None."""
-    if not enabled():
-        return None
     record = frappe.cache().get_value(_CODE + code)
-    cfg = web_qr.app_config(record.get("app"), _setting().get("forum_url")) if record else None
-    if not cfg or not web_qr.record_age_ok(record, time.time()):
+    cfg = _cfg(record.get("app")) if record else None
+    if not _on(cfg) or not web_qr.record_age_ok(record, time.time()):
         return None
     return web_qr.info_view(record, cfg["title"])
 
 
 def approve(code: str, user: str) -> dict | None:
     """Người quét xác nhận. ``None`` = không phải mã của HR (để seat_bridge hỏi console)."""
-    if not enabled():
-        return None
     cache = frappe.cache()
     record = cache.get_value(_CODE + code)
-    cfg = web_qr.app_config(record.get("app"), _setting().get("forum_url")) if record else None
-    if not cfg:
+    cfg = _cfg(record.get("app")) if record else None
+    if not _on(cfg):
         return None
     now = time.time()
     updated, msg = web_qr.approve(record, user, now)
