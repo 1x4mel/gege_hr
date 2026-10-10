@@ -192,6 +192,7 @@ PORTAL_SETTING_FIELDS = [
     # Chấm công trên máy công ty qua gege-seat (plans/plan-cham-cong-pc-gege-seat.md).
     # ``seat_console_key`` (Password) đi riêng — không echo/audit giá trị.
     "enable_pc_checkin",
+    "enable_seat_qr_login",
     "seat_console_url",
     "default_work_location",
     "default_attendance_policy",

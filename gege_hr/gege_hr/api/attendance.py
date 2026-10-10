@@ -453,6 +453,8 @@ def today_status(employee: str | None = None) -> dict:
         # Chấm công trên máy công ty (gege-seat): SPA chỉ dò dịch vụ gege-seat
         # của máy (127.0.0.1) khi tính năng đang bật.
         "pc_checkin": {"enabled": bool(setting.get("enable_pc_checkin"))},
+        # Vào ca gege-seat bằng QR: app HR hiện nút "Quét QR vào ca" khi bật.
+        "seat_qr": {"enabled": bool(setting.get("enable_seat_qr_login"))},
         "locked": _is_date_locked(day.isoformat()),
     }
 
@@ -1025,6 +1027,7 @@ def _portal_setting() -> dict:
             "require_selfie": bool(s.require_selfie),
             "enable_device_sync": bool(s.enable_device_sync),
             "enable_pc_checkin": bool(s.get("enable_pc_checkin")),
+            "enable_seat_qr_login": bool(s.get("enable_seat_qr_login")),
         }
     except Exception:
         return {
@@ -1033,6 +1036,7 @@ def _portal_setting() -> dict:
             "require_selfie": False,
             "enable_device_sync": False,
             "enable_pc_checkin": False,
+            "enable_seat_qr_login": False,
         }
 
 
