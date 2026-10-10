@@ -70,13 +70,19 @@ def _client_ip() -> str:
     )
 
 
-def _json(payload: dict, origin: str | None = None) -> Response:
-    """Trả JSON thô. ``origin`` = cho đúng trang đó đọc (CORS, không kèm cookie); bỏ trống = trang khác không đọc được."""
+def _json(payload: dict, origin: str | None = None, with_cookies: bool = False) -> Response:
+    """Trả JSON thô. ``origin`` = cho đúng trang đó đọc (CORS); bỏ trống = trang khác không đọc được.
+
+    ``with_cookies`` chỉ dùng cho :func:`finish` dạng JSON — nơi duy nhất trang kia gọi KÈM cookie (để nhận cookie
+    phiên). Mọi hàm khác trả lời không kèm ``Access-Control-Allow-Credentials``.
+    """
     res = Response(json.dumps(payload), mimetype="application/json")
     res.headers["Cache-Control"] = "no-store"
     if origin:
         res.headers["Access-Control-Allow-Origin"] = origin
         res.headers["Vary"] = "Origin"
+        if with_cookies:
+            res.headers["Access-Control-Allow-Credentials"] = "true"
     return res
 
 
@@ -167,13 +173,22 @@ def status(poll: str | None = None, app: str | None = None):
 
 
 @frappe.whitelist(allow_guest=True, methods=["GET"])
-def finish(t: str | None = None, app: str | None = None) -> None:
-    """Trình duyệt đổi vé hoàn tất lấy phiên HR rồi quay về trang web (đích lấy từ cấu hình, không nhận từ URL)."""
+def finish(t: str | None = None, app: str | None = None, fmt: str | None = None):
+    """Trình duyệt đổi vé hoàn tất lấy phiên HR.
+
+    * mặc định: mở cả trang → chuyển hướng về trang web kia (đích lấy từ cấu hình, không nhận từ URL);
+    * ``fmt=json``: trang kia gọi bằng ``fetch`` KÈM cookie (cùng site nên cookie phiên được nhận) → ``{"ok": bool}``,
+      trang đó tự đi tiếp OIDC ngay — người dùng không phải thấy trang đăng nhập nạp lại lần nữa.
+    """
     from frappe.core.doctype.activity_log.activity_log import add_authentication_log
 
     cfg = _app(app, None)
     if not cfg or not (enabled(FLAG_QR) or enabled(FLAG_PASSWORD)):
         frappe.throw(_("Đăng nhập từ trang này chưa được bật."), frappe.ValidationError)
+    as_json = str(fmt or "") == "json"
+    origin = frappe.get_request_header("Origin")
+    if as_json and origin != cfg["origin"]:
+        return _json({"ok": False})  # trang lạ: không tiêu vé, không cho đọc
     token = parse_qr_code(t)
     record = None
     if token and _once("f:" + token, web_qr.FINISH_TTL_S):
@@ -194,6 +209,8 @@ def finish(t: str | None = None, app: str | None = None) -> None:
             except Exception:
                 frappe.db.rollback()
                 frappe.log_error(title="web_qr.finish")
+    if as_json:
+        return _json({"ok": target == cfg["done"]}, origin, with_cookies=True)
     frappe.local.response["type"] = "redirect"
     frappe.local.response["location"] = target
 
