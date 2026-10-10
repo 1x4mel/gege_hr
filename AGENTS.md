@@ -48,6 +48,10 @@ ruff format --check <file1> <file2> ...
   `plans/plan-cham-cong-pc-gege-seat.md`; phía console: repo `Gege-Cyber-System-Localdisk` `docs/tai-khoan-hr.md`.
   Khoá ghép nối (`seat_console_key`) KHÔNG ghi vào repo/log. Endpoint `allow_guest` của `seat_bridge` phải giữ
   `_require_console` (đúng IP console + khoá) hoặc khoá tạm theo email.
+- **Gege Forum đăng nhập bằng QR (10/10/2026)**: `api/web_qr.py` + `utils/web_qr.py` — trang đăng nhập forum (khác origin)
+  xin mã, app HR quét và xác nhận, HR tạo phiên cho trình duyệt rồi forum đi tiếp OIDC. `start` / `status` tự gắn CORS cho
+  đúng origin forum — KHÔNG bật `allow_cors` toàn site. Mặc định tắt (`enable_forum_qr_login`).
+  Tài liệu: `plans/plan-forum-qr-login.md`.
 - Cách tính công theo ca (ngưỡng co theo độ dài ca / theo phút, ân hạn trễ, Hourly đọc phiên chấm công):
   `plans/plan-cach-tinh-cong-theo-ca.md`.
 

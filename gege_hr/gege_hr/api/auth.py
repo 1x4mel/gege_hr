@@ -112,7 +112,8 @@ def me() -> dict:
 def _features() -> dict:
     try:
         setting = frappe.get_cached_doc("VN HR Portal Setting", "VN HR Portal Setting")
-        return {"seat_qr": bool(setting.get("enable_seat_qr_login"))}
+        # Mục "Quét QR": vào ca / đăng nhập console (seat) hoặc đăng nhập Gege Forum — bật một trong hai là hiện.
+        return {"seat_qr": bool(setting.get("enable_seat_qr_login") or setting.get("enable_forum_qr_login"))}
     except Exception:
         return {"seat_qr": False}
 
