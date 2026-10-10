@@ -5,7 +5,8 @@ Ngày: 2026-10-10 · Owner chốt: 2026-10-10 (thử trên **b6** trước, ổn
 ## Bài toán
 
 Chấm công hiện chỉ bằng điện thoại + GPS. Nhân viên quên điện thoại / GPS yếu không chấm được.
-Yêu cầu: cho chấm trên PC nhưng **bắt buộc là máy công ty**; ca mở từ xa (Moonlight) **không** được chấm.
+Yêu cầu: cho chấm trên PC nhưng **bắt buộc là máy công ty**; máy bị điều khiển qua Moonlight **từ ngoài mạng công ty**
+**không** được chấm (Moonlight từ máy trong mạng công ty thì được — owner chốt thêm 10/10, xem mục Moonlight).
 
 Kiểm IP không dùng được: `hr.gegeteam.xyz` đi qua Cloudflare Tunnel (nginx .116 chỉ thấy `::1`), và IP
 không phân biệt ngồi tại chỗ với điều khiển từ xa. → dùng **gege-seat** (console .90,
@@ -26,6 +27,14 @@ không phân biệt ngồi tại chỗ với điều khiển từ xa. → dùng 
    `vn_source_type = PC`. Mọi luật khác của `mobile_checkin` giữ nguyên (cửa sổ giờ + lý do, chống bấm trùng,
    khoá kỳ, tự đóng phiên quên chấm ra).
 
+## Moonlight trong / ngoài mạng công ty
+
+Nhân viên thường ngồi một máy trong dàn rồi Moonlight sang máy khác (729/729 phiên console đã ghi đều từ
+`192.168.2.x`). Dịch vụ gege-seat gửi IP các phiên Moonlight điều khiển đang mở (`ml_ips`); **console** phân loại:
+trong mạng = khớp tiền tố `lan` (mặc định `192.168.2.`) và không thuộc `lan_exclude` (mặc định `192.168.2.1` — router).
+Console trả `moonlight = 1` khi có phiên từ ngoài, `remote = 1` khi ca mở bằng vé Moonlight mà không còn phiên nội bộ
+nào → `evaluate` (không đổi) từ chối đúng hai cờ đó. Đổi dải: console `POST /api/seat/hrcfg {lan, lan_exclude}`.
+
 ## Cấu hình (VN HR Portal Setting)
 
 | Field | Ý nghĩa |
@@ -41,5 +50,6 @@ Console: `seat_settings` scope `hr` (`enabled`, `ip` = IP máy chủ HR, `key`) 
 - Chỉ dùng được trên máy đã cài + bật gege-seat (hiện: b6).
 - Console sập / mở máy bằng mật khẩu khẩn cấp → không chấm trên PC được (còn điện thoại).
 - Ai biết mật khẩu console của người khác vẫn chấm hộ được (như mọi cách dùng mật khẩu) — giảm bằng gán máy riêng.
-- "Đang có phiên Moonlight" đếm theo log Sunshine (`GEGE-SESSION` start/end, mode play) — người ngồi tại chỗ
-  trong lúc có người khác đang stream điều khiển cũng bị từ chối (an toàn hơn là cho qua).
+- Phiên Moonlight lấy từ log Sunshine (`GEGE-SESSION` start/end theo `id`, mode play). Người ở ngoài vào được một máy
+  trong mạng bằng công cụ khác Moonlight, hoặc VPN cấp IP `192.168.2.x` chưa khai trong `lan_exclude`, sẽ được coi là
+  trong mạng công ty.
