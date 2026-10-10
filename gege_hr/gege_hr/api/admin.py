@@ -189,6 +189,10 @@ PORTAL_SETTING_FIELDS = [
     "require_selfie",
     "require_wifi_validation",
     "enable_device_sync",
+    # Chấm công trên máy công ty qua gege-seat (plans/plan-cham-cong-pc-gege-seat.md).
+    # ``seat_console_key`` (Password) đi riêng — không echo/audit giá trị.
+    "enable_pc_checkin",
+    "seat_console_url",
     "default_work_location",
     "default_attendance_policy",
     "payroll_cutoff_day",
@@ -230,6 +234,8 @@ def get_portal_setting() -> dict:
         # Expose the Select options verbatim (newline-separated in meta).
         tz_field = doc.meta.get_field("timezone")
         out["__options"]["timezone"] = (tz_field.options or "").split("\n") if tz_field else []
+    if doc.meta.has_field("seat_console_key"):
+        out["seat_console_key_set"] = bool(doc.get("seat_console_key"))
     return out
 
 
@@ -264,6 +270,12 @@ def save_portal_setting(**kwargs) -> dict:
             continue
         doc.set(field, new_val)
         changes.append(f"{field}: {old_val!r} → {new_val!r}")
+
+    # Khóa bí mật gege-seat: chỉ ghi khi có giá trị mới thật (bỏ qua mặt nạ "****"), không lộ ra audit.
+    seat_key = str(kwargs.get("seat_console_key") or "").strip()
+    if seat_key and set(seat_key) != {"*"} and doc.meta.has_field("seat_console_key"):
+        doc.set("seat_console_key", seat_key)
+        changes.append("seat_console_key: (đã đổi)")
 
     if not changes:
         return {"saved": False, "message": "Không có thay đổi."}

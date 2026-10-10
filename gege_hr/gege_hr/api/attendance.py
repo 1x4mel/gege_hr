@@ -450,6 +450,9 @@ def today_status(employee: str | None = None) -> dict:
             "require_geolocation": bool(setting.get("require_geolocation")),
             "work_location": work_location,
         },
+        # Chấm công trên máy công ty (gege-seat): SPA chỉ dò dịch vụ gege-seat
+        # của máy (127.0.0.1) khi tính năng đang bật.
+        "pc_checkin": {"enabled": bool(setting.get("enable_pc_checkin"))},
         "locked": _is_date_locked(day.isoformat()),
     }
 
@@ -614,9 +617,14 @@ def mobile_checkin(
     client_timestamp: str | None = None,
     device_id: str | None = None,
     reason: str | None = None,
+    seat_ticket: str | None = None,
     **kwargs,
 ) -> dict:
     """Plan §10.2 — GPS-aware check-in/out with idempotency + 1/3s rate limit.
+
+    ``seat_ticket`` (plans/plan-cham-cong-pc-gege-seat.md): chấm công trên MÁY
+    CÔNG TY — vé dùng một lần do dịch vụ gege-seat của máy cấp thay cho GPS;
+    console xác nhận nhân viên đang trong ca TẠI CHỖ trên máy đó.
 
     Determines IN vs OUT by parity of the day's existing logs, creates a
     ``VN Mobile Checkin Attempt`` audit record + an ``Employee Checkin``, then
@@ -686,7 +694,13 @@ def mobile_checkin(
     log_type = _decide_log_type(recent_logs)
 
     # Geofence server-side pre-check (best-effort; client already guards).
-    _enforce_geofence(emp, latitude, longitude)
+    # Chấm công trên máy công ty: vé gege-seat thay cho GPS (kiểm ngay trước
+    # khi ghi lượt chấm — vé dùng một lần, không đốt vé cho lần thử bị chặn).
+    seat_ticket = (seat_ticket or "").strip()
+    if not seat_ticket:
+        _enforce_geofence(emp, latitude, longitude)
+    elif not _portal_setting().get("enable_pc_checkin"):
+        frappe.throw(_("Chấm công trên máy công ty chưa được bật."), frappe.ValidationError)
 
     server_now = tz_utils.now_in_portal()
 
@@ -795,6 +809,12 @@ def mobile_checkin(
         except Exception:
             frappe.log_error(title="mobile_checkin: selfheal need_review failed")
 
+    # Máy công ty: console gege-seat xác nhận vé → tên máy (ném lỗi nếu không đạt).
+    pc_host = _verify_seat_ticket(emp, seat_ticket, log_type) if seat_ticket else None
+    if pc_host:
+        device_id = f"seat:{pc_host}"
+        latitude = longitude = None
+
     # Audit record (VN Mobile Checkin Attempt) — created before the checkin so a
     # failure leaves an audit trail.
     attempt = frappe.get_doc(
@@ -838,6 +858,8 @@ def mobile_checkin(
     )
     # Recalculated INLINE right after the commit below (_recalc_session_now) —
     # the after_insert hook must not race it with a background job.
+    if pc_host and _source_type_has("PC"):
+        checkin.vn_source_type = "PC"
     checkin.flags.vn_recalc_inline = True
     checkin.insert()
 
@@ -919,6 +941,27 @@ from gege_hr.gege_hr.utils.checkin_parity import (  # noqa: E402
 )
 
 
+def _verify_seat_ticket(employee: str, ticket: str, log_type: str | None) -> str:
+    """Vé gege-seat → tên máy công ty. Ném ``ValidationError`` kèm lý do khi không đạt
+    (vé sai/hết hạn, ca của người khác, máy đang bị điều khiển từ xa, console không trả lời)."""
+    from gege_hr.gege_hr.utils import seat_checkin
+
+    user_email = frappe.db.get_value("Employee", employee, "user_id") or ""
+    ok, msg, host = seat_checkin.evaluate(seat_checkin.verify_ticket(ticket, log_type), user_email)
+    if not ok:
+        frappe.throw(_(msg), frappe.ValidationError)
+    return host
+
+
+def _source_type_has(option: str) -> bool:
+    """True khi custom field ``Employee Checkin.vn_source_type`` đã có lựa chọn này (sau migrate)."""
+    try:
+        f = frappe.get_meta("Employee Checkin").get_field("vn_source_type")
+        return bool(f and option in (f.options or "").split("\n"))
+    except Exception:
+        return False
+
+
 def _enforce_geofence(employee: str, latitude, longitude) -> None:
     """Block check-in when GPS is required and the employee is outside the geofence."""
     setting = _portal_setting()
@@ -981,6 +1024,7 @@ def _portal_setting() -> dict:
             "require_geolocation": bool(s.require_geolocation),
             "require_selfie": bool(s.require_selfie),
             "enable_device_sync": bool(s.enable_device_sync),
+            "enable_pc_checkin": bool(s.get("enable_pc_checkin")),
         }
     except Exception:
         return {
@@ -988,6 +1032,7 @@ def _portal_setting() -> dict:
             "require_geolocation": True,
             "require_selfie": False,
             "enable_device_sync": False,
+            "enable_pc_checkin": False,
         }
 
 
