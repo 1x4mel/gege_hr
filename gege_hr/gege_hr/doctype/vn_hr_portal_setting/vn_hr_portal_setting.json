@@ -42,6 +42,24 @@
    "label": "Enable Device Sync"
   },
   {
+   "default": "0",
+   "description": "Cho ph\u00e9p ch\u1ea5m c\u00f4ng tr\u00ean m\u00e1y c\u00f4ng ty (kh\u00f4ng c\u1ea7n GPS) khi nh\u00e2n vi\u00ean \u0111ang trong ca gege-seat t\u1ea1i ch\u1ed7 tr\u00ean m\u00e1y \u0111\u00f3.",
+   "fieldname": "enable_pc_checkin",
+   "fieldtype": "Check",
+   "label": "Enable PC Check-in (gege-seat)"
+  },
+  {
+   "default": "http://192.168.2.90:8080",
+   "fieldname": "seat_console_url",
+   "fieldtype": "Data",
+   "label": "gege-seat Console URL"
+  },
+  {
+   "fieldname": "seat_console_key",
+   "fieldtype": "Password",
+   "label": "gege-seat Console Key"
+  },
+  {
    "fieldname": "timezone_break",
    "fieldtype": "Section Break",
    "label": "Time Zone"

@@ -151,7 +151,7 @@ employee_checkin_fields = [
         "fieldname": "vn_source_type",
         "fieldtype": "Select",
         "label": "Source Type",
-        "options": "\nMobile\nApp\nDevice\nManual\nImport\nAuto",
+        "options": "\nMobile\nApp\nDevice\nPC\nManual\nImport\nAuto",
     },
     {
         "fieldname": "vn_auto_generated",
