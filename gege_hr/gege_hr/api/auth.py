@@ -104,7 +104,17 @@ def me() -> dict:
         # User.time_zone wins; the portal-wide default stays the fallback.
         "portal_timezone": getattr(user_doc, "time_zone", None) or tz_utils.get_portal_timezone(),
         "home_page": _home_page_for_role(portal_role),
+        # Cờ tính năng cho khung app (menu tài khoản): "Quét QR" vào ca / đăng nhập console.
+        "features": _features(),
     }
+
+
+def _features() -> dict:
+    try:
+        setting = frappe.get_cached_doc("VN HR Portal Setting", "VN HR Portal Setting")
+        return {"seat_qr": bool(setting.get("enable_seat_qr_login"))}
+    except Exception:
+        return {"seat_qr": False}
 
 
 def _home_page_for_role(role: str) -> str:

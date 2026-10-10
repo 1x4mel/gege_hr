@@ -93,7 +93,8 @@ def seat_qr_info(code: str | None = None) -> dict:
     res = seat_checkin.console_post(QR_INFO_PATH, {"code": _code_or_throw(code)})
     if not res.get("ok"):
         frappe.throw(_(res.get("msg") or "Mã QR không hợp lệ hoặc đã hết hạn."), frappe.ValidationError)
-    return {k: res.get(k) for k in ("host", "state", "user", "group")}
+    # kind="web": mã của trang đăng nhập console (ip = trình duyệt đang xin đăng nhập); còn lại là màn hình vào ca.
+    return {k: res.get(k) for k in ("kind", "host", "state", "user", "group", "ip")}
 
 
 @frappe.whitelist()
