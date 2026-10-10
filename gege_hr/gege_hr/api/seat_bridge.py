@@ -132,7 +132,6 @@ def seat_qr_approve(code: str | None = None) -> dict:
 # Đăng nhập console bằng mật khẩu HR (giấy xác nhận dùng một lần)
 # --------------------------------------------------------------------------- #
 _ASSERT_KEY = "gege_seat_assert:"
-_FAIL_KEY = "gege_seat_pwfail:"
 _BAD_LOGIN = "Sai email hoặc mật khẩu."
 
 
@@ -141,35 +140,16 @@ def _issue_assertion(usr: str | None, pwd: str | None, aud: str | None) -> tuple
     import secrets
     import time
 
-    from frappe.utils.password import check_password
+    from gege_hr.gege_hr.utils.web_qr import pw_message
 
     audience = seat_checkin.valid_audience(aud)
-    email = str(usr or "").strip().lower()
-    if not audience or not email or "@" not in email or not pwd:
+    if not audience:
         return None, _BAD_LOGIN
-    cache = frappe.cache()
-    fail_key = _FAIL_KEY + email
-    fails = int(cache.get_value(fail_key) or 0)
-    if fails >= seat_checkin.PW_FAIL_LIMIT:
-        return None, "Sai quá nhiều lần — đợi 10 phút rồi thử lại."
-
-    user = frappe.db.get_value("User", {"name": email, "enabled": 1, "user_type": "System User"}, "name")
-    ok = False
-    if user:
-        try:
-            check_password(user, str(pwd))
-            ok = True
-        except Exception:
-            ok = False
-    if not ok:
-        cache.set_value(fail_key, fails + 1, expires_in_sec=seat_checkin.PW_FAIL_WINDOW_S)
-        return None, _BAD_LOGIN
-    if not frappe.db.exists("Employee", {"user_id": user, "status": "Active"}):
-        return None, "Tài khoản chưa được liên kết nhân viên đang làm việc."
-
-    cache.delete_value(fail_key)
+    user, code = web_qr.check_hr_password(usr, pwd)
+    if not user:
+        return None, pw_message(code)
     token = secrets.token_urlsafe(24)
-    cache.set_value(
+    frappe.cache().set_value(
         _ASSERT_KEY + token,
         {"email": user.lower(), "aud": audience, "ts": time.time()},
         expires_in_sec=seat_checkin.ASSERTION_TTL_S,
@@ -198,6 +178,27 @@ def console_login(usr: str | None = None, pwd: str | None = None) -> None:
         frappe.throw(_("Chưa cấu hình địa chỉ trang web console."), frappe.ValidationError)
     frappe.local.response["type"] = "redirect"
     frappe.local.response["location"] = target
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def console_assertion(usr: str | None = None, pwd: str | None = None):
+    """Trang web console lấy giấy xác nhận bằng ``fetch`` (khác origin, KHÔNG cookie) rồi tự mở ``go``.
+
+    Thay cho :func:`console_login` (form POST): trình duyệt đang có phiên HR gửi kèm cookie khi POST form sang HR
+    (console và HR cùng site) → Frappe từ chối vì thiếu CSRF token ("Invalid Request"). ``fetch`` không cookie thì
+    không dính. Chỉ trả lời cho đúng origin của ``seat_console_web_url``; ``go`` cũng dựng từ cấu hình đó.
+    """
+    from gege_hr.gege_hr.utils.web_qr import normalize_origin
+
+    setting = frappe.get_cached_doc("VN HR Portal Setting", "VN HR Portal Setting")
+    web = setting.get("seat_console_web_url")
+    origin = frappe.get_request_header("Origin")
+    if not origin or origin != normalize_origin(web):
+        return web_qr._json({"ok": False})
+    token, msg = _issue_assertion(usr, pwd, seat_checkin.AUD_CONSOLE_WEB)
+    if not token:
+        return web_qr._json({"ok": False, "msg": msg}, origin)
+    return web_qr._json({"ok": True, "go": seat_checkin.console_redirect(web, assertion=token)}, origin)
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])

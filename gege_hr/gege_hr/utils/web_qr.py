@@ -183,3 +183,38 @@ def finish_valid(record: dict | None, app: str | None, now_ts: float) -> bool:
     if not record or not record.get("user") or str(record.get("app") or "") != str(app or ""):
         return False
     return record_age_ok(record, now_ts, FINISH_TTL_S)
+
+
+# --------------------------------------------------------------------------- #
+# Đăng nhập bằng email + mật khẩu HR nhập ngay trên trang web đó (không qua QR)
+# --------------------------------------------------------------------------- #
+PW_OK, PW_BAD, PW_LOCK, PW_EMP = "", "bad", "lock", "emp"
+PW_MESSAGES = {
+    PW_BAD: "Sai email hoặc mật khẩu.",
+    PW_LOCK: "Sai quá nhiều lần — đợi 10 phút rồi thử lại.",
+    PW_EMP: "Tài khoản chưa được liên kết nhân viên đang làm việc.",
+}
+VIA_QR, VIA_PASSWORD = "qr", "password"
+
+
+def pw_message(code: str | None) -> str:
+    """Lý do từ chối cho người dùng đọc (mã lạ → câu chung, không lộ gì thêm)."""
+    return PW_MESSAGES.get(str(code or ""), PW_MESSAGES[PW_BAD])
+
+
+def login_email(usr: str | None) -> str:
+    """Email đăng nhập đã chuẩn hoá; không phải email → ``""`` (không tra cứu, không tính lần sai)."""
+    email = str(usr or "").strip().lower()
+    if not email or "@" not in email or len(email) > 140 or any(ch.isspace() for ch in email):
+        return ""
+    return email
+
+
+def finish_record(user: str, app: str, ip: str | None, via: str, now_ts: float) -> dict:
+    """Vé hoàn tất: ai, vào trang nào, xác thực bằng gì (``qr`` / ``password``) — để ghi nhật ký đúng."""
+    return {"user": user, "app": app, "ip": ip or "", "via": via, "ts": float(now_ts)}
+
+
+def finish_log_subject(record: dict, title: str) -> str:
+    how = "mật khẩu HR nhập trên trang đó" if record.get("via") == VIA_PASSWORD else "QR"
+    return f"Đăng nhập {title} bằng {how} (trình duyệt {record.get('ip') or '?'})"

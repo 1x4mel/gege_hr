@@ -10,13 +10,17 @@ from gege_hr.gege_hr.utils.web_qr import (
     approve,
     client_ip,
     device_label,
+    finish_log_subject,
+    finish_record,
     finish_valid,
     info_view,
+    login_email,
     matrix_rows,
     new_record,
     normalize_origin,
     poll_state,
     public_base,
+    pw_message,
     remaining_ttl,
     scan_url,
 )
@@ -148,3 +152,33 @@ def test_finish_valid():
     assert finish_valid(rec, "console", T0 + 1) is False  # vé của trang khác
     assert finish_valid({"user": "", "app": "forum", "ts": T0}, "forum", T0 + 1) is False
     assert finish_valid(None, "forum", T0) is False
+
+
+def test_login_email_normalises_and_rejects_non_emails():
+    assert login_email("  An@GegeTeam.net ") == "an@gegeteam.net"
+    assert login_email("wune") == ""  # tên đăng nhập forum, không phải email HR
+    assert login_email("a b@gegeteam.net") == ""
+    assert login_email("") == ""
+    assert login_email(None) == ""
+    assert login_email("x" * 140 + "@gegeteam.net") == ""
+
+
+def test_pw_message_never_leaks_unknown_codes():
+    assert pw_message("bad") == "Sai email hoặc mật khẩu."
+    assert "10 phút" in pw_message("lock")
+    assert "nhân viên" in pw_message("emp")
+    assert pw_message("khong-co-ma-nay") == pw_message("bad")
+    assert pw_message(None) == pw_message("bad")
+
+
+def test_finish_record_and_log_subject_tell_qr_from_password():
+    qr = finish_record("an@gegeteam.net", "forum", "14.250.78.243", "qr", T0)
+    pw = finish_record("an@gegeteam.net", "forum", None, "password", T0)
+    assert finish_valid(qr, "forum", T0 + 1) and finish_valid(pw, "forum", T0 + 1)
+    assert finish_log_subject(qr, "Gege Forum") == "Đăng nhập Gege Forum bằng QR (trình duyệt 14.250.78.243)"
+    assert finish_log_subject(pw, "Gege Forum") == (
+        "Đăng nhập Gege Forum bằng mật khẩu HR nhập trên trang đó (trình duyệt ?)"
+    )
+    assert finish_log_subject({"user": "a", "ip": "1.1.1.1"}, "Gege Forum").startswith(
+        "Đăng nhập Gege Forum bằng QR"
+    )

@@ -196,6 +196,7 @@ PORTAL_SETTING_FIELDS = [
     "seat_console_url",
     # Đăng nhập Gege Forum bằng QR quét từ app HR (plans/plan-forum-qr-login.md).
     "enable_forum_qr_login",
+    "enable_forum_password_login",
     "forum_url",
     "default_work_location",
     "default_attendance_policy",

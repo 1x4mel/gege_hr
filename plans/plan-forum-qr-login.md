@@ -1,7 +1,8 @@
-# Đăng nhập Gege Forum bằng mã QR quét từ app HR
+# Đăng nhập Gege Forum bằng tài khoản HR ngay trên trang forum (QR + email / mật khẩu)
 
 Ngày: 2026-10-10 · Yêu cầu của owner: "forum (.111) cũng có đăng nhập bằng quét mã QR từ Gege HR" (như console).
-**Trạng thái:** code xong (gege_hr + trader-ui + theme forum); tính năng mặc định **TẮT** — xem "Bật" ở cuối.
+**Trạng thái:** QR đã deploy 10/10 (HR + theme), owner tự bật. Cùng ngày thêm **email + mật khẩu HR ở form bên trái của
+forum** (mục riêng bên dưới). Mỗi cách một công tắc, mặc định **TẮT**.
 
 ## Bối cảnh
 
@@ -48,11 +49,39 @@ trang đăng nhập forum (theme JS)                HR (.116)                   
 
 Tính năng mặc định tắt để owner tự quyết sau khi đọc bảng trên.
 
+## Email + mật khẩu HR ở form bên trái của forum (10/10, yêu cầu thêm của owner)
+
+Form "Email / Mật khẩu" của Discourse chỉ kiểm mật khẩu riêng của forum; nhân viên hay gõ nhầm tài khoản HR vào đó.
+Nay theme bắt lệnh gửi form: **email thuộc tên miền công ty** (`hr_login_domains`, mặc định `gegeteam.net`) thì gửi thẳng
+tới HR; tên đăng nhập forum / email khác (tài khoản dự phòng `1x4mel`) vẫn đi đường cũ của Discourse.
+
+```
+form forum ── POST web_qr.password_start (usr, pwd, app=forum; khác origin, KHÔNG cookie) ──► HR kiểm mật khẩu
+           ◄── { ok, t } hoặc { ok:false, msg }  (sai → báo ngay trên trang, không tải lại)
+           ── mở web_qr.finish?t=…  ──► HR tạo phiên ──► forum/login?gege_qr=1 ──► OIDC như QR
+```
+
+- **Không dùng form POST thẳng tới HR** (kiểu `console_login`): forum và HR cùng site `gegeteam.xyz` nên trình duyệt gửi
+  kèm cookie phiên HR, mà Frappe (`HTTPRequest.validate_csrf_token`) từ chối MỌI POST có phiên nhưng thiếu CSRF token →
+  ai đang đăng nhập HR ở cùng trình duyệt sẽ gặp "Invalid Request". `fetch` với `credentials: omit` thì là khách, không dính.
+  **`console_login` của trang web console dính đúng lỗi này** → thêm `seat_bridge.console_assertion` (cùng cách: fetch
+  không cookie, CORS cho origin console, trả `go`), console chuyển sang dùng nó.
+- Kiểm mật khẩu dùng chung một hàm với giấy xác nhận của console / gege-seat (`web_qr.check_hr_password`): chỉ nhân viên
+  đang làm, sai 5 lần / 10 phút theo email thì khoá tạm, không lộ tài khoản có tồn tại hay không. Thêm giới hạn 30 lần /
+  phút theo IP.
+- Mật khẩu đi thẳng trình duyệt → HR qua HTTPS, **không tới máy chủ forum**. Nhưng nó được gõ trên trang của forum: mã
+  chạy trên trang đó (theme, plugin, ai có quyền admin forum) về nguyên tắc đọc được. Và nếu một bản nâng cấp Discourse
+  đổi `#login-form` / `#login-account-name` làm theme không bắt được nữa, mật khẩu HR sẽ bị gửi cho máy chủ forum như một
+  lần đăng nhập sai → sau mỗi lần nâng cấp forum phải thử lại (docs/08 của repo forum).
+- Công tắc: HR `enable_forum_password_login` (mặc định tắt) + theme `hr_password_login_enabled`. Theme hỏi
+  `web_qr.features` để biết HR có bật không; chưa bật thì form chạy y như cũ.
+- Nhật ký: "Đăng nhập Gege Forum bằng mật khẩu HR nhập trên trang đó (trình duyệt <ip>)".
+
 ## Code
 
 | Repo | Nội dung |
 |---|---|
-| gege_hr | `api/web_qr.py` (`start`, `status`, `finish`, `peek`, `approve`), `utils/web_qr.py` (helper thuần + test `tests/test_web_qr.py`), `seat_bridge` nhận mã của HR, `VN HR Portal Setting`: `enable_forum_qr_login` (Check, 0), `forum_url` (Data — để trống = `https://forum.gegeteam.xyz`), `auth.me().features.seat_qr` = bật một trong hai loại QR |
+| gege_hr | `api/web_qr.py` (`start`, `status`, `finish`, `peek`, `approve`, `features`, `password_start`, `check_hr_password`), `seat_bridge.console_assertion`, `utils/web_qr.py` (helper thuần + test `tests/test_web_qr.py`), `seat_bridge` nhận mã của HR, `VN HR Portal Setting`: `enable_forum_qr_login` + `enable_forum_password_login` (Check, 0), `forum_url` (Data — để trống = `https://forum.gegeteam.xyz`), `auth.me().features.seat_qr` = bật một trong hai loại QR |
 | trader-ui | `SeatLoginView` / `seatQr.js`: mã `kind = "web"` có `title` → hiện tên trang, IP · trình duyệt, cảnh báo; công tắc ở Dữ liệu nền |
 | Gege-discourse | theme: `javascripts/discourse/lib/gege-qr-login.js` (JS thuần), `api-initializers/gege-qr-login.gjs`, CSS, setting `qr_login_enabled`; tài liệu `docs/08-dang-nhap-qr.md` |
 

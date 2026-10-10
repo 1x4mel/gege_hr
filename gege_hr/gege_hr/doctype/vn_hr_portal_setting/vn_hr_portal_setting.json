@@ -81,6 +81,13 @@
    "label": "Enable Forum QR Login"
   },
   {
+   "default": "0",
+   "description": "Cho ph\u00e9p nh\u1eadp email + m\u1eadt kh\u1ea9u HR ngay \u1edf form \u0111\u0103ng nh\u1eadp c\u1ee7a Gege Forum (m\u1eadt kh\u1ea9u g\u1eedi th\u1eb3ng t\u1edbi HR qua HTTPS, kh\u00f4ng qua m\u00e1y ch\u1ee7 forum).",
+   "fieldname": "enable_forum_password_login",
+   "fieldtype": "Check",
+   "label": "Enable Forum Password Login"
+  },
+  {
    "default": "https://forum.gegeteam.xyz",
    "description": "\u0110\u1ecba ch\u1ec9 Gege Forum \u2014 HR ch\u1ec9 c\u1ea5p m\u00e3 QR cho trang n\u00e0y v\u00e0 ch\u1ec9 chuy\u1ec3n h\u01b0\u1edbng v\u1ec1 \u0111\u00fang \u0111\u1ecba ch\u1ec9 n\u00e0y. \u0110\u1ec3 tr\u1ed1ng = https://forum.gegeteam.xyz.",
    "fieldname": "forum_url",
