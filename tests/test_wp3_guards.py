@@ -74,7 +74,9 @@ def _make_frappe_mod(*, counts=None, sa_rows=None, si_future=None, prev_status=N
                 return list(sa_rows or [])
             if doctype == "VN Employee Shift Instance":
                 return list(si_future or [])
-            return []
+            rows = getattr(self, "rows", {}).get(doctype, [])
+            eq = {k: v for k, v in (filters or {}).items() if not isinstance(v, (list, tuple))}
+            return [r for r in rows if all(r.get(k) == v for k, v in eq.items())]
 
         def set_value(self, doctype, name, updates=None, *more, **_kw):
             self.set_values.append((doctype, name, updates))
@@ -96,6 +98,8 @@ def _make_frappe_mod(*, counts=None, sa_rows=None, si_future=None, prev_status=N
         def __init__(self, name):
             self.name = name
 
+        flags = types.SimpleNamespace()
+
         def cancel(self):
             cancelled.append(self.name)
 
@@ -109,6 +113,8 @@ def _make_frappe_mod(*, counts=None, sa_rows=None, si_future=None, prev_status=N
 
     frappe_mod.get_doc = get_doc
     frappe_mod.cancelled = cancelled
+    frappe_mod.deleted = []
+    frappe_mod.delete_doc = lambda doctype, name, **_kw: frappe_mod.deleted.append((doctype, name))
     return frappe_mod, utils
 
 
@@ -144,30 +150,71 @@ def test_delete_allowed_when_clean(lifecycle):
 # --------------------------------------------------------------------------- #
 # MH4 — Active → Left ends SAs + cancels future SIs
 # --------------------------------------------------------------------------- #
-def test_mh4_left_ends_assignments_and_cancels_future_si(lifecycle):
-    frappe_mod, mod = lifecycle
-    frappe_mod.db.counts = {}
-    frappe_mod.db.__dict__.get  # noqa: B018
-    # db fixtures
-    frappe_mod.db.counts = {}
-    sa_rows = [{"employee": "E1", "docstatus": 1, "status": "Active", "name": "SA-1"}]
-    si_future = ["SI-F1", "SI-F2"]
-    frappe_mod.db.get_all = lambda doctype, filters=None, **_kw: (
-        sa_rows if doctype == "Shift Assignment" else si_future
+def _left_doc(before_status="Active", relieving_date="2026-08-15"):
+    """Employee vừa lưu thành Left; ``get_doc_before_save`` trả bản TRƯỚC khi lưu như Frappe thật."""
+    before = types.SimpleNamespace(status=before_status) if before_status else None
+    return types.SimpleNamespace(
+        name="HR-EMP-001", status="Left", relieving_date=relieving_date, get_doc_before_save=lambda: before
     )
-    doc = types.SimpleNamespace(name="HR-EMP-001", status="Left", relieving_date="2026-08-15")
-    mod.handle_employee_status_change(doc)
+
+
+def test_mh4_left_ends_assignments_and_drops_empty_shift_data(lifecycle):
+    frappe_mod, mod = lifecycle
+    frappe_mod.db.get_all = None  # dùng get_all theo bảng bên dưới
+    rows = {
+        "Shift Assignment": ["SA-1"],
+        "VN Employee Shift Instance": [
+            ADict(name="SI-1", work_date="2026-08-16"),  # sau ngày nghỉ, rỗng → bỏ
+            ADict(name="SI-2", work_date="2026-08-17"),  # có giờ vào thật → giữ
+            ADict(name="SI-3", work_date="2026-08-20"),  # tương lai, chưa có phiên → bỏ
+        ],
+        "VN Attendance Work Session": [
+            ADict(name="WS-1", shift_instance="SI-1", actual_checkin=None, actual_checkout=None),
+            ADict(
+                name="WS-2", shift_instance="SI-2", actual_checkin="2026-08-17 08:00:00", actual_checkout=None
+            ),
+        ],
+        "Attendance": [
+            ADict(name="ATT-1", attendance_date="2026-08-16"),
+            ADict(name="ATT-2", attendance_date="2026-08-17"),
+        ],
+    }
+
+    def get_all(doctype, filters=None, fields=None, pluck=None, **_kw):
+        out = rows.get(doctype, [])
+        si = (filters or {}).get("shift_instance")
+        return [r for r in out if si is None or r.get("shift_instance") == si]
+
+    frappe_mod.db.get_all = get_all
+    # DB ĐÃ là Left ở on_update (đúng như Frappe thật) — hook vẫn phải chạy vì bản trước khi lưu là Active.
+    frappe_mod.db.get_value = lambda *a, **k: "Left"
+    mod.handle_employee_status_change(_left_doc())
     sa_sets = [sv for sv in frappe_mod.db.set_values if sv[0] == "Shift Assignment"]
-    assert sa_sets and sa_sets[0][2].get("end_date") == "2026-08-15"
-    assert frappe_mod.cancelled == ["SI-F1", "SI-F2"]
+    assert sa_sets and sa_sets[0][2] == {"end_date": "2026-08-15", "status": "Inactive"}
+    # gỡ liên kết vòng trước, rồi xoá nháp điểm danh → phiên rỗng → lịch ca; ngày 17/08 có chấm công thật được giữ
+    assert ("VN Attendance Work Session", "WS-1", "attendance") in frappe_mod.db.set_values
+    assert frappe_mod.deleted == [
+        ("Attendance", "ATT-1"),
+        ("VN Attendance Work Session", "WS-1"),
+        ("VN Employee Shift Instance", "SI-1"),
+        ("VN Employee Shift Instance", "SI-3"),
+    ]
+    assert frappe_mod.cancelled == ["SI-1", "SI-3"]
 
 
 def test_left_twice_is_noop(lifecycle):
     frappe_mod, mod = lifecycle
-    frappe_mod.db.counts = {}
-    doc = types.SimpleNamespace(name="HR-EMP-001", status="Left")
-    mod.handle_employee_status_change(doc)  # prev status Left → no-op, no raise
+    frappe_mod.db.get_all = lambda doctype, **_kw: ["SA-1"] if doctype == "Shift Assignment" else []
+    mod.handle_employee_status_change(_left_doc(before_status="Left"))  # đã Left từ trước → không làm gì
     assert frappe_mod.db.set_values == []
+    assert frappe_mod.deleted == []
+
+
+def test_left_on_first_insert_still_acts(lifecycle):
+    frappe_mod, mod = lifecycle
+    frappe_mod.db.get_all = lambda doctype, **_kw: ["SA-1"] if doctype == "Shift Assignment" else []
+    mod.handle_employee_status_change(_left_doc(before_status=None))  # không có bản trước khi lưu
+    assert [sv[0] for sv in frappe_mod.db.set_values] == ["Shift Assignment"]
 
 
 # --------------------------------------------------------------------------- #
