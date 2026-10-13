@@ -48,6 +48,7 @@ class _FakeDoc:
         else:
             self.name = name or "NEW-0001"
         self.inserted = self.saved = self.submitted = self.cancelled = False
+        self.flags = types.SimpleNamespace()
 
     def insert(self, **k):
         self.inserted = True
@@ -153,7 +154,7 @@ class _Stub:
         self.created.append(doc)
         return doc
 
-    def delete_doc(self, doctype, name):
+    def delete_doc(self, doctype, name, **kw):
         self.deleted.append((doctype, name))
 
     def throw(self, msg, exc=Exception, *a, **k):
@@ -821,6 +822,54 @@ def test_delete_cancelled_succeeds(admin):
     res = mod.delete_shift_assignment("SA-1")
     assert ("Shift Assignment", "SA-1") in stub.deleted
     assert res == {"name": "SA-1"}
+
+
+# --- B12a: lịch ca do phân ca sinh ra phải được dọn trước, không thì Frappe chặn xoá --- #
+def test_delete_purges_generated_instances_and_empty_sessions(admin):
+    mod, stub, db = admin
+    _register(stub, db, _mk_sa("SA-1", docstatus=2, status="Inactive"))
+    db.rows["VN Employee Shift Instance"] = [
+        {"name": "SI-1", "source_shift_assignment": "SA-1", "docstatus": 2},  # đã huỷ
+        {"name": "SI-2", "source_shift_assignment": "SA-1", "docstatus": 1},  # còn hiệu lực → huỷ rồi xoá
+        {
+            "name": "SI-9",
+            "source_shift_assignment": "SA-KHAC",
+            "docstatus": 1,
+        },  # của phân ca khác: không đụng
+    ]
+    db.rows["VN Attendance Work Session"] = [
+        {"name": "WS-1", "shift_instance": "SI-1", "actual_checkin": None, "actual_checkout": None},
+        {"name": "WS-9", "shift_instance": "SI-9", "actual_checkin": "2026-06-15 08:00:00"},
+    ]
+    assert mod.delete_shift_assignment("SA-1") == {"name": "SA-1"}
+    assert stub.deleted == [
+        ("VN Attendance Work Session", "WS-1"),
+        ("VN Employee Shift Instance", "SI-1"),
+        ("VN Employee Shift Instance", "SI-2"),
+        ("Shift Assignment", "SA-1"),
+    ]
+    cancelled = [d.name for d in stub.created if d.cancelled]
+    assert cancelled == ["SI-2"]  # chỉ lịch ca đang hiệu lực mới phải huỷ trước khi xoá
+
+
+def test_delete_blocked_by_real_work_session(admin):
+    mod, stub, db = admin
+    _register(stub, db, _mk_sa("SA-1", docstatus=2, status="Inactive"))
+    db.rows["VN Employee Shift Instance"] = [
+        {"name": "SI-1", "source_shift_assignment": "SA-1", "docstatus": 2},
+        {"name": "SI-2", "source_shift_assignment": "SA-1", "docstatus": 2},
+    ]
+    db.rows["VN Attendance Work Session"] = [
+        {"name": "WS-1", "shift_instance": "SI-1", "actual_checkin": None},
+        {
+            "name": "WS-2",
+            "shift_instance": "SI-2",
+            "actual_checkin": "2026-06-15 08:00:00",
+        },  # có giờ vào thật
+    ]
+    with pytest.raises(Exception):
+        mod.delete_shift_assignment("SA-1")
+    assert stub.deleted == []  # dừng trước khi xoá bất cứ thứ gì
 
 
 # --- B12b: xoá bị chặn khi ca đã có dữ liệu chấm công (chuẩn Frappe) -------- #

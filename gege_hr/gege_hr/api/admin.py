@@ -2648,6 +2648,50 @@ def amend_shift_assignment(
     return {"name": doc.name, "amended_from": name}
 
 
+def _purge_generated_shift_instances(assignment: str) -> dict:
+    """Xoá lịch ca (VN Employee Shift Instance) do phân ca này sinh ra + phiên chấm công RỖNG của chúng.
+
+    Lịch ca giữ Link ``source_shift_assignment`` nên Frappe từ chối xoá phân ca ("is linked with VN Employee
+    Shift Instance") — kể cả khi lịch ca đã huỷ. Vì ``create_shift_assignment`` sinh lịch ca ngay cho phần
+    [ngày bắt đầu..hôm nay], mọi phân ca bắt đầu từ hôm nay trở về trước đều không xoá được dù bảng báo
+    ``can_delete`` (Nguyễn Như Ý, 13/10/2026).
+
+    Chỉ gọi SAU khi đã chắc ca không có check-in / điểm danh. Phiên chấm công có giờ vào / ra thật là lịch sử
+    chấm công → dừng, không xoá gì. Không dùng ``force``: bản ghi khác còn trỏ tới thì để Frappe chặn.
+    """
+    instances = frappe.get_all(
+        "VN Employee Shift Instance",
+        filters={"source_shift_assignment": assignment},
+        fields=["name", "docstatus"],
+    )
+    sessions_of: dict[str, list] = {}
+    for inst in instances:
+        sessions = frappe.get_all(
+            "VN Attendance Work Session",
+            filters={"shift_instance": inst.get("name")},
+            fields=["name", "actual_checkin", "actual_checkout"],
+        )
+        if any(s.get("actual_checkin") or s.get("actual_checkout") for s in sessions):
+            frappe.throw(
+                _("Ca đã có phiên chấm công thực tế ({0}) — chỉ được Ngưng hoặc Đóng, không thể xoá.").format(
+                    inst.get("name")
+                )
+            )
+        sessions_of[inst.get("name")] = sessions
+    removed = {"instances": 0, "sessions": 0}
+    for inst in instances:
+        for s in sessions_of[inst.get("name")]:
+            frappe.delete_doc("VN Attendance Work Session", s.get("name"), ignore_permissions=True)
+            removed["sessions"] += 1
+        if inst.get("docstatus") == 1:
+            si = frappe.get_doc("VN Employee Shift Instance", inst.get("name"))
+            si.flags.ignore_permissions = True
+            si.cancel()
+        frappe.delete_doc("VN Employee Shift Instance", inst.get("name"), ignore_permissions=True)
+        removed["instances"] += 1
+    return removed
+
+
 @frappe.whitelist()
 def delete_shift_assignment(name: str) -> dict:
     """Permanently delete a Shift Assignment — Frappe only allows docstatus 0/2.
@@ -2674,6 +2718,8 @@ def delete_shift_assignment(name: str) -> dict:
     employee = doc.employee
     company = doc.company or _company_for_employee(doc.employee)
     try:
+        # Lịch ca do phân ca này sinh ra còn trỏ về nó → dọn trước, không thì Frappe báo "is linked with …".
+        _purge_generated_shift_instances(name)
         frappe.delete_doc("Shift Assignment", name)
     except Exception as exc:
         frappe.throw(_("Không xoá được ca làm việc: {0}").format(str(exc)))
