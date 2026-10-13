@@ -945,6 +945,33 @@ def test_list_work_location_falls_back_to_employee_default(admin):
     assert by["SA-2"]["work_location_source"] == "shift"
 
 
+def test_work_location_fallback_reads_aliased_list_rows(admin):
+    """Real DB rows from the list query carry the location under the ALIAS ``work_location``
+    (``vn_work_location as work_location``), not ``vn_work_location`` — the fallback must still
+    see it as the assignment's own location (regression: shown blank / replaced by the default)."""
+    mod, stub, db = admin
+    stub._meta["Employee"] = ["default_work_location"]
+    db.rows["Employee"] = [
+        {"name": "E-1", "default_work_location": None},  # nhân viên chưa có địa điểm mặc định
+        {"name": "E-2", "default_work_location": "Mặc định"},
+        {"name": "E-3", "default_work_location": "Mặc định"},
+    ]
+    rows = mod._apply_work_location_fallback(
+        [
+            {"name": "SA-1", "employee": "E-1", "work_location": "126 Ngo Thi Thu Minh"},
+            {"name": "SA-2", "employee": "E-2", "work_location": "Site B"},
+            {"name": "SA-3", "employee": "E-3", "work_location": None},
+        ]
+    )
+    by = {r["name"]: r for r in rows}
+    assert (by["SA-1"]["work_location"], by["SA-1"]["work_location_source"]) == (
+        "126 Ngo Thi Thu Minh",
+        "shift",
+    )
+    assert (by["SA-2"]["work_location"], by["SA-2"]["work_location_source"]) == ("Site B", "shift")
+    assert (by["SA-3"]["work_location"], by["SA-3"]["work_location_source"]) == ("Mặc định", "employee")
+
+
 def test_list_work_location_without_employee_field(admin):
     mod, stub, db = admin
     stub._meta["Shift Assignment"] = ["vn_work_location"]

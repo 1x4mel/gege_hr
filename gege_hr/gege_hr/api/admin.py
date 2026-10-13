@@ -1478,7 +1478,11 @@ def _apply_work_location_fallback(rows: list[dict]) -> list[dict]:
         return rows
 
     def _own(row):
-        return (row.get("vn_work_location") or "").strip()
+        # The list query selects ``vn_work_location as work_location`` — the row then has NO
+        # ``vn_work_location`` key. Reading only that key treated every listed assignment as
+        # "no own location": the pinned location was overwritten by the employee default, or
+        # shown blank when the employee has none (Nguyễn Như Ý, 13/10/2026). Read the alias too.
+        return (row.get("vn_work_location") or row.get("work_location") or "").strip()
 
     defaults: dict[str, str] = {}
     try:
