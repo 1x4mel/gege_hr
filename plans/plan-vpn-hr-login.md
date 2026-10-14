@@ -3,7 +3,11 @@
 Ngày: 2026-10-14 · Yêu cầu của owner: đăng nhập Gege VPN bằng tài khoản Gege HR, giống console và forum.
 Phía VPN: repo `1x4mel/Gege-VPN`, `docs/DANG-NHAP-HR.md`.
 
-**Trạng thái:** code + test xong (nhánh `feat/vpn-hr-login`), chưa deploy. Công tắc mặc định TẮT.
+**Trạng thái (14/10 14:30): ĐÃ DEPLOY .116** — #67 (adf9139, đã `bench migrate`) + trader-ui #44 (cfb031e, đã build);
+main = develop qua #68 / trader-ui #45. Khoá `vpn_hub_key` đã đặt (Desk) và trùng `hub.ini [hr] key` trên mel-sing1.
+Đã kiểm thật qua Cloudflare: `features app=vpn` (không Origin) → `{"qr": false, "password": false}`; có `Origin` → `{}`;
+`start` khi tắt → `{"ok": false}`; `redeem` không khoá → 403; forum không đổi. **Hai công tắc VPN vẫn TẮT** — owner bật ở
+Dữ liệu nền rồi thử đăng nhập thật (chưa ai thử trọn vòng bằng tài khoản thật).
 
 ## Khác forum ở đâu
 
