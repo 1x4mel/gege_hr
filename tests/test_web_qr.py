@@ -10,16 +10,19 @@ from gege_hr.gege_hr.utils.web_qr import (
     approve,
     client_ip,
     device_label,
+    email_list,
     finish_log_subject,
     finish_record,
     finish_request_ok,
     finish_valid,
     flag_for,
+    hub_key_ok,
     info_view,
     login_email,
     matrix_rows,
     new_record,
     normalize_origin,
+    origin_ok,
     poll_state,
     public_base,
     pw_message,
@@ -232,3 +235,71 @@ def test_finish_record_and_log_subject_tell_qr_from_password():
     assert finish_log_subject({"user": "a", "ip": "1.1.1.1"}, "Gege Forum").startswith(
         "Đăng nhập Gege Forum bằng QR"
     )
+
+
+# --------------------------------------------------------------------------- #
+# App Gege VPN (plans/plan-vpn-hr-login.md)
+# --------------------------------------------------------------------------- #
+def test_app_config_vpn_is_native_app_without_browser_targets():
+    cfg = app_config("vpn", None)
+    assert cfg["app"] == "vpn" and cfg["title"] == "Gege VPN" and cfg["native"] is True
+    assert cfg["origin"] is None and cfg["done"] is None and cfg["fail"] is None
+    assert flag_for(cfg, "qr") == "enable_vpn_qr_login"
+    assert flag_for(cfg, "password") == "enable_vpn_password_login"
+
+
+def test_origin_ok_web_needs_exact_origin_app_needs_none():
+    forum = app_config("forum", None)
+    assert origin_ok(forum, "https://forum.gegeteam.xyz")
+    assert not origin_ok(forum, "https://evil.example")
+    assert not origin_ok(forum, None)
+    assert not origin_ok(forum, "")
+    vpn = app_config("vpn", None)
+    assert origin_ok(vpn, None) and origin_ok(vpn, "")
+    # trình duyệt luôn gắn Origin → trang web (kể cả forum) không mượn được đường của app
+    assert not origin_ok(vpn, "https://forum.gegeteam.xyz")
+    assert not origin_ok(vpn, "null")
+    assert not origin_ok(None, None)
+
+
+def test_vpn_ticket_never_becomes_hr_session():
+    vpn = app_config("vpn", None)
+    for as_json in (True, False):
+        for origin in (None, "", "https://hr.gegeteam.xyz"):
+            assert not finish_request_ok(vpn, as_json, origin, "same-origin", "cors")
+            assert not finish_request_ok(vpn, as_json, origin, None, None)
+
+
+def test_vpn_ticket_is_bound_to_vpn_app():
+    rec = finish_record("a@gegeteam.net", "vpn", "1.2.3.4", "password", T0)
+    assert finish_valid(rec, "vpn", T0 + 5)
+    assert not finish_valid(rec, "forum", T0 + 5)
+    assert not finish_valid(finish_record("a@gegeteam.net", "forum", "", "qr", T0), "vpn", T0 + 5)
+    assert not finish_valid(rec, "vpn", T0 + FINISH_TTL_S + 1)
+
+
+def test_device_label_vpn_app():
+    assert device_label("GegeVPN/0.2 (Linux; pilot2)") == "App Gege VPN trên Linux"
+
+
+def test_hub_key_ok():
+    key = "k" * 40
+    assert hub_key_ok(key, key)
+    assert not hub_key_ok(key, key + "x")
+    assert not hub_key_ok(key, "")
+    assert not hub_key_ok(key, None)
+    assert not hub_key_ok("ngan-qua", "ngan-qua")  # khoá < 32 ký tự coi như chưa đặt
+    assert not hub_key_ok(None, None)
+    assert not hub_key_ok("", "")
+
+
+def test_email_list():
+    assert email_list(["A@GegeTeam.net", "a@gegeteam.net", " b@x.vn ", "khong-email", 5, None]) == [
+        "a@gegeteam.net",
+        "b@x.vn",
+    ]
+    assert email_list('["c@x.vn"]') == ["c@x.vn"]
+    assert email_list("khong-phai-json") == []
+    assert email_list({"a": 1}) == []
+    assert email_list(None) == []
+    assert len(email_list([f"u{i}@x.vn" for i in range(600)])) == 500

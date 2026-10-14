@@ -20,6 +20,11 @@ Email + mật khẩu HR nhập ở form của forum đi cùng đường: :func:`
 khẩu rồi trả luôn vé hoàn tất → :func:`finish`. KHÔNG dùng form POST thẳng tới HR: trình duyệt đang có phiên HR sẽ gửi
 kèm cookie (forum và HR cùng site) và Frappe từ chối mọi POST có phiên mà thiếu CSRF token.
 
+App Gege VPN (``app="vpn"``, plans/plan-vpn-hr-login.md) đi chung :func:`start` / :func:`status` /
+:func:`password_start` nhưng là chương trình trên máy người dùng (yêu cầu không có ``Origin``). Vé hoàn tất của nó KHÔNG
+đổi lấy phiên HR: app đưa vé cho máy chủ Hub của VPN, Hub gọi :func:`redeem` (kèm khoá ``vpn_hub_key``) để biết vé là
+của ai. Mật khẩu HR đi thẳng app → HR, không qua Hub. Hub định kỳ hỏi :func:`vpn_active` để khoá người đã nghỉ việc.
+
 Helper thuần (test không cần bench) nằm ở ``utils/web_qr.py``.
 """
 
@@ -138,7 +143,7 @@ def start(app: str | None = None):
 
     cfg = _app(app)
     origin = frappe.get_request_header("Origin")
-    if not cfg or origin != cfg["origin"]:
+    if not web_qr.origin_ok(cfg, origin):
         return _json({"ok": False})
     ip = _client_ip()
     try:
@@ -171,7 +176,7 @@ def status(poll: str | None = None, app: str | None = None):
     """Trình duyệt giữ khoá ``poll`` hỏi kết quả: ``wait`` / ``gone`` / ``ok`` kèm vé hoàn tất (chỉ trả một lần)."""
     cfg = _app(app)
     origin = frappe.get_request_header("Origin")
-    if not cfg or origin != cfg["origin"]:
+    if not web_qr.origin_ok(cfg, origin):
         return _json({"state": web_qr.STATE_GONE})
     key = parse_qr_code(poll)
     cache = frappe.cache()
@@ -293,7 +298,7 @@ def features(app: str | None = None):
     """Trang đăng nhập của ``app`` hỏi HR đang cho những cách nào: ``{"qr": bool, "password": bool}``."""
     cfg = _app(app, None)
     origin = frappe.get_request_header("Origin")
-    if not cfg or origin != cfg["origin"]:
+    if not web_qr.origin_ok(cfg, origin):
         return _json({})
     return _json(
         {"qr": _on(cfg, web_qr.VIA_QR), "password": _on(cfg, web_qr.VIA_PASSWORD), "title": cfg["title"]},
@@ -308,7 +313,7 @@ def password_start(usr: str | None = None, pwd: str | None = None, app: str | No
 
     cfg = _app(app, web_qr.VIA_PASSWORD)
     origin = frappe.get_request_header("Origin")
-    if not cfg or origin != cfg["origin"]:
+    if not web_qr.origin_ok(cfg, origin):
         return _json({"ok": False})
     ip = _client_ip()
     try:
@@ -360,3 +365,64 @@ def approve(code: str, user: str) -> dict | None:
         "action": "web",
         "msg": f"Đã xác nhận — trình duyệt sẽ tự vào {cfg['title']}.",
     }
+
+
+# --------------------------------------------------------------------------- #
+# Máy chủ Hub của Gege VPN (gọi từ máy chủ, kèm khoá) — plans/plan-vpn-hr-login.md
+# --------------------------------------------------------------------------- #
+def _require_vpn_hub() -> None:
+    """Chỉ Hub giữ đúng khoá ``vpn_hub_key`` mới gọi được; sai khoá thì giới hạn chặt theo IP."""
+    from frappe.utils.password import get_decrypted_password
+
+    from gege_hr.gege_hr.utils.ratelimit import rate_limit
+
+    try:
+        key = get_decrypted_password(
+            "VN HR Portal Setting", "VN HR Portal Setting", "vpn_hub_key", raise_exception=False
+        )
+    except Exception:
+        key = None
+    if not web_qr.hub_key_ok(key, frappe.get_request_header("X-Gege-Vpn-Key")):
+        rate_limit(f"vpnhub:bad:{_client_ip()}", max_requests=10, window_seconds=600)
+        frappe.throw(_("Không phải máy chủ Gege VPN."), frappe.PermissionError)
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def redeem(t: str | None = None):
+    """Hub đổi vé hoàn tất của app Gege VPN lấy danh tính: ``{"ok", "user", "full_name", "via"}``. Vé dùng một lần."""
+    from frappe.core.doctype.activity_log.activity_log import add_authentication_log
+
+    _require_vpn_hub()
+    cfg = _app(web_qr.APP_VPN, None)
+    token = parse_qr_code(t)
+    record = None
+    if cfg and token and _once("f:" + token, web_qr.FINISH_TTL_S):
+        cache = frappe.cache()
+        record = cache.get_value(_FIN + token)
+        cache.delete_value(_FIN + token)
+    via = web_qr.VIA_PASSWORD if (record or {}).get("via") == web_qr.VIA_PASSWORD else web_qr.VIA_QR
+    if not cfg or not web_qr.finish_valid(record, cfg["app"], time.time()) or not _on(cfg, via):
+        return _json({"ok": False, "msg": "Vé đăng nhập không hợp lệ hoặc đã hết hạn."})
+    user = _employee_user(record["user"])
+    if not user:
+        return _json({"ok": False, "msg": web_qr.pw_message(web_qr.PW_EMP)})
+    try:
+        add_authentication_log(web_qr.finish_log_subject(record, cfg["title"]), user)
+    except Exception:
+        frappe.log_error(title="web_qr.redeem")
+    return _json(
+        {
+            "ok": True,
+            "user": user,
+            "full_name": frappe.db.get_value("User", user, "full_name") or "",
+            "via": via,
+        }
+    )
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def vpn_active(users=None):
+    """Hub hỏi những email nào còn là nhân viên đang làm (để khoá VPN của người đã nghỉ): ``{"active": [...]}``."""
+    _require_vpn_hub()
+    emails = web_qr.email_list(users)
+    return _json({"ok": True, "active": [e for e in emails if _employee_user(e)]})

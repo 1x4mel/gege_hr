@@ -95,6 +95,26 @@
    "label": "Enable HR Login QR"
   },
   {
+   "default": "0",
+   "description": "Cho ph\u00e9p \u0111\u0103ng nh\u1eadp app Gege VPN b\u1eb1ng c\u00e1ch qu\u00e9t m\u00e3 QR hi\u1ec7n trong app b\u1eb1ng app HR tr\u00ean \u0111i\u1ec7n tho\u1ea1i.",
+   "fieldname": "enable_vpn_qr_login",
+   "fieldtype": "Check",
+   "label": "Enable VPN QR Login"
+  },
+  {
+   "default": "0",
+   "description": "Cho ph\u00e9p nh\u1eadp email + m\u1eadt kh\u1ea9u HR ngay trong app Gege VPN (m\u1eadt kh\u1ea9u g\u1eedi th\u1eb3ng t\u1edbi HR qua HTTPS, kh\u00f4ng qua m\u00e1y ch\u1ee7 VPN).",
+   "fieldname": "enable_vpn_password_login",
+   "fieldtype": "Check",
+   "label": "Enable VPN Password Login"
+  },
+  {
+   "description": "Kho\u00e1 b\u00ed m\u1eadt (\u2265 32 k\u00fd t\u1ef1) m\u00e0 m\u00e1y ch\u1ee7 Hub c\u1ee7a Gege VPN d\u00f9ng \u0111\u1ec3 \u0111\u1ed5i v\u00e9 \u0111\u0103ng nh\u1eadp l\u1ea5y t\u00e0i kho\u1ea3n v\u00e0 h\u1ecfi ai c\u00f2n \u0111ang l\u00e0m. Ph\u1ea3i tr\u00f9ng v\u1edbi [hr] key trong hub.ini.",
+   "fieldname": "vpn_hub_key",
+   "fieldtype": "Password",
+   "label": "Gege VPN Hub Key"
+  },
+  {
    "default": "https://forum.gegeteam.xyz",
    "description": "\u0110\u1ecba ch\u1ec9 Gege Forum \u2014 HR ch\u1ec9 c\u1ea5p m\u00e3 QR cho trang n\u00e0y v\u00e0 ch\u1ec9 chuy\u1ec3n h\u01b0\u1edbng v\u1ec1 \u0111\u00fang \u0111\u1ecba ch\u1ec9 n\u00e0y. \u0110\u1ec3 tr\u1ed1ng = https://forum.gegeteam.xyz.",
    "fieldname": "forum_url",

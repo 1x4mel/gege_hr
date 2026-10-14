@@ -200,6 +200,10 @@ PORTAL_SETTING_FIELDS = [
     "forum_url",
     # Đăng nhập chính Gege HR bằng QR ở trang đăng nhập (plans/plan-hr-login-qr.md).
     "enable_hr_qr_login",
+    # Đăng nhập app Gege VPN bằng tài khoản HR (plans/plan-vpn-hr-login.md). Khoá ``vpn_hub_key`` (Password)
+    # đặt ở Desk, không đi qua đây.
+    "enable_vpn_qr_login",
+    "enable_vpn_password_login",
     "default_work_location",
     "default_attendance_policy",
     "payroll_cutoff_day",
