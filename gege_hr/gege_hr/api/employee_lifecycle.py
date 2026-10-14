@@ -10,10 +10,11 @@ Two DocType hooks wired from ``hooks.py``:
   :func:`handle_employee_status_change`).
 
 * ``handle_employee_status_change`` (Employee.on_update) — when status flips
-  Active → Left: end the active Shift Assignments (end_date = relieved_date or
-  today), cancel FUTURE Shift Instances (history Work Sessions are kept for
-  payroll audit), so the scheduler stops materialising shifts for a departed
-  employee.
+  Active → Left: end the active Shift Assignments (end_date = relieving_date or
+  today) and drop the Shift Instances AFTER that date that have no real
+  check-in data (with their empty Work Sessions / draft Attendance); days with
+  real data are kept for payroll audit. The scheduler then stops materialising
+  shifts for a departed employee.
 """
 
 from __future__ import annotations
@@ -54,27 +55,89 @@ def guard_employee_delete(doc, method: str | None = None) -> None:
     )
 
 
-def handle_employee_status_change(doc, method: str | None = None) -> None:
-    """Active → Left: end Shift Assignments + cancel future Shift Instances.
+def _was_left_before(doc) -> bool:
+    """Trạng thái TRƯỚC lần lưu này có phải ``Left`` không.
 
-    Historical Work Sessions are INTENTIONALLY kept (payroll audits need
-    them). Idempotent — safe on every save, acts only on the flip.
+    Hook chạy ở ``on_update`` — lúc đó DB đã mang giá trị mới, nên đọc ``Employee.status`` từ DB luôn thấy
+    ``Left`` và hook tự coi là "đã nghỉ từ trước" rồi bỏ qua. Hậu quả tới 13/10/2026: cho nghỉ việc mà phân ca vẫn
+    Active, lịch ca vẫn được sinh tiếp. Phải hỏi bản trước khi lưu (``get_doc_before_save``).
+    """
+    getter = getattr(doc, "get_doc_before_save", None)
+    before = getter() if callable(getter) else None
+    if before is None:
+        return False
+    return (getattr(before, "status", None) or "") == "Left"
+
+
+def _drop_shift_data_after(employee: str, end_on) -> dict:
+    """Sau ngày nghỉ việc: bỏ lịch ca CHƯA có giờ vào / ra thật, kèm phiên chấm công rỗng và bản nháp điểm danh.
+
+    Ngày nghỉ có thể lùi về quá khứ (báo nghỉ muộn) — các ngày từ đó tới nay nếu để lại sẽ hiện "vắng" cho người đã
+    nghỉ. Ngày có giờ vào / ra thật là lịch sử chấm công → giữ nguyên (HR tự quyết). Không dùng ``force``.
+    """
+    out = {"instances": 0, "sessions": 0, "attendance": 0, "kept": []}
+    instances = frappe.db.get_all(
+        "VN Employee Shift Instance",
+        filters={"employee": employee, "docstatus": 1, "work_date": [">", end_on]},
+        fields=["name", "work_date"],
+    )
+    sessions_of = {
+        inst.get("name"): frappe.db.get_all(
+            "VN Attendance Work Session",
+            filters={"shift_instance": inst.get("name")},
+            fields=["name", "actual_checkin", "actual_checkout"],
+        )
+        for inst in instances
+    }
+    kept = {
+        str(inst.get("work_date"))
+        for inst in instances
+        if any(s.get("actual_checkin") or s.get("actual_checkout") for s in sessions_of[inst.get("name")])
+    }
+    out["kept"] = sorted(kept)
+    todo = [inst for inst in instances if str(inst.get("work_date")) not in kept]
+    # Bản nháp điểm danh và phiên chấm công trỏ VÒNG vào nhau (WS.attendance ↔ Attendance.vn_work_session) nên
+    # Frappe không cho xoá cái nào trước → gỡ chiều WS → Attendance, xoá bản nháp, rồi mới xoá phiên.
+    for inst in todo:
+        for s in sessions_of[inst.get("name")]:
+            frappe.db.set_value("VN Attendance Work Session", s.get("name"), "attendance", None)
+    drafts = frappe.db.get_all(
+        "Attendance",
+        filters={"employee": employee, "docstatus": 0, "attendance_date": [">", end_on]},
+        fields=["name", "attendance_date"],
+    )
+    for att in drafts:
+        if str(att.get("attendance_date")) in kept:
+            continue
+        frappe.delete_doc("Attendance", att.get("name"), ignore_permissions=True)
+        out["attendance"] += 1
+    for inst in todo:
+        for s in sessions_of[inst.get("name")]:
+            frappe.delete_doc("VN Attendance Work Session", s.get("name"), ignore_permissions=True)
+            out["sessions"] += 1
+        si_doc = frappe.get_doc("VN Employee Shift Instance", inst.get("name"))
+        si_doc.flags.ignore_permissions = True
+        si_doc.cancel()
+        frappe.delete_doc("VN Employee Shift Instance", inst.get("name"), ignore_permissions=True)
+        out["instances"] += 1
+    return out
+
+
+def handle_employee_status_change(doc, method: str | None = None) -> None:
+    """Active → Left: kết thúc phân ca vào ngày nghỉ + bỏ lịch ca rỗng sau ngày nghỉ.
+
+    Phiên chấm công có dữ liệu thật được GIỮ (đối soát lương). Chỉ chạy đúng lần lưu chuyển trạng thái.
     """
     if (doc.status or "") != "Left":
         return
-    # Only act when this save is the flip (db_value None → not previously Left).
-    try:
-        prev = frappe.db.get_value("Employee", doc.name, "status")
-    except Exception:
-        prev = None
-    if prev == "Left":
+    if _was_left_before(doc):
         return
 
     end_on = getattr(doc, "relieving_date", None) or getattr(doc, "custom_relieving_date", None)
     if not end_on:
         end_on = frappe.utils.today()
 
-    # 1) End active Shift Assignments so the daily generator skips them.
+    # 1) Kết thúc phân ca đang Active để job sinh lịch ca hằng ngày bỏ qua người này.
     try:
         active = frappe.db.get_all(
             "Shift Assignment",
@@ -89,29 +152,16 @@ def handle_employee_status_change(doc, method: str | None = None) -> None:
     except Exception:  # noqa: BLE001 — partial install tolerance
         pass
 
-    # 2) Cancel FUTURE Shift Instances (today onwards); keep history.
+    # 2) Bỏ lịch ca sau ngày nghỉ (kể cả các ngày đã qua nếu ngày nghỉ lùi về trước); giữ ngày có chấm công thật.
     try:
-        future = frappe.db.get_all(
-            "VN Employee Shift Instance",
-            filters={
-                "employee": doc.name,
-                "docstatus": 1,
-                "work_date": [">=", frappe.utils.today()],
-            },
-            pluck="name",
-        )
-        for si in future:
-            try:
-                si_doc = frappe.get_doc("VN Employee Shift Instance", si)
-                si_doc.cancel()
-                si_doc.delete(ignore_permissions=True, force=True)
-            except Exception:
-                frappe.log_error(title=f"employee Left: cancel SI failed {si}")
+        _drop_shift_data_after(doc.name, end_on)
     except Exception:
-        pass
+        frappe.log_error(title=f"employee Left: drop shift data failed {doc.name}")
 
     try:
-        frappe.logger().info(f"[gege_hr] Employee {doc.name} → Left: SAs ended, future SIs cancelled")
+        frappe.logger().info(
+            f"[gege_hr] Employee {doc.name} → Left: SAs ended, shift data after {end_on} dropped"
+        )
     except Exception:
         pass
 

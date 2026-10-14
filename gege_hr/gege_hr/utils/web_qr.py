@@ -1,6 +1,7 @@
 """Đăng nhập trang web (Gege Forum, và chính trang đăng nhập Gege HR) bằng mã QR quét từ app HR — helper thuần.
+App Gege VPN (không phải trang web) cũng dùng chung đường này — xem :data:`APP_VPN`.
 
-Thiết kế: ``plans/plan-forum-qr-login.md``, ``plans/plan-hr-login-qr.md``. Không import frappe ở đây (bộ test chạy
+Thiết kế: ``plans/plan-forum-qr-login.md``, ``plans/plan-hr-login-qr.md``, ``plans/plan-vpn-hr-login.md``. Không import frappe ở đây (bộ test chạy
 không cần bench); phần gọi Redis / tạo phiên nằm ở ``api/web_qr.py``.
 """
 
@@ -13,6 +14,10 @@ APPROVED_GRACE_S = 30  # đã xác nhận ở giây cuối → trình duyệt v�
 FINISH_TTL_S = 60  # vé hoàn tất: trình duyệt phải đổi ngay sau khi được xác nhận
 APP_FORUM = "forum"
 APP_HR = "hr"  # chính trang đăng nhập của Gege HR (cùng origin)
+# App Gege VPN: chương trình trên máy người dùng gọi thẳng HR (không phải trình duyệt → không có ``Origin``). Vé hoàn
+# tất KHÔNG đổi lấy phiên HR (``finish`` từ chối) mà do máy chủ Hub của VPN đổi lấy danh tính qua ``redeem`` (có khoá).
+APP_VPN = "vpn"
+VPN_KEY_MIN_LEN = 32
 DEFAULT_FORUM_URL = "https://forum.gegeteam.xyz"
 STATE_WAIT, STATE_OK, STATE_GONE = "wait", "ok", "gone"
 
@@ -61,7 +66,31 @@ def app_config(app: str | None, forum_url: str | None = None, hr_base: str | Non
             # mật khẩu: trang đăng nhập HR dùng thẳng /api/method/login của Frappe, không đi đường vé
             "flag_password": None,
         }
+    if name == APP_VPN:
+        return {
+            "app": APP_VPN,
+            "title": "Gege VPN",
+            "native": True,  # không phải trang web: yêu cầu KHÔNG được mang Origin, không có phiên HR
+            "origin": None,
+            "done": None,
+            "fail": None,
+            "flag_qr": "enable_vpn_qr_login",
+            "flag_password": "enable_vpn_password_login",
+        }
     return None
+
+
+def origin_ok(cfg: dict | None, origin: str | None) -> bool:
+    """Yêu cầu có đến từ đúng trang không.
+
+    Trang web: ``Origin`` phải đúng origin của trang. App (``native``): trình duyệt luôn gắn ``Origin`` vào ``fetch``
+    POST, nên yêu cầu của app KHÔNG được có ``Origin`` — trang web lạ không mượn được đường của app.
+    """
+    if not cfg:
+        return False
+    if cfg.get("native"):
+        return not origin
+    return bool(origin) and origin == cfg.get("origin")
 
 
 def flag_for(cfg: dict | None, via: str | None) -> str | None:
@@ -122,6 +151,7 @@ def device_label(user_agent: str | None) -> str:
         (
             name
             for key, name in (
+                ("GegeVPN/", "App Gege VPN"),
                 ("Edg/", "Edge"),
                 ("OPR/", "Opera"),
                 ("CocCoc", "Cốc Cốc"),
@@ -229,6 +259,8 @@ def finish_request_ok(
       ``Sec-Fetch-Site: same-origin`` (trang khác không giả được) và ``Sec-Fetch-Mode`` khác ``navigate``. Không nhận
       mở link: xem ghi chú ở ``api.web_qr.finish``.
     """
+    if cfg.get("native"):
+        return False  # app (Gege VPN) không có phiên HR: vé của nó chỉ đổi qua ``redeem``
     if cfg.get("app") == APP_HR:
         if not as_json or str(sec_fetch_site or "") != "same-origin":
             return False
@@ -269,3 +301,39 @@ def finish_record(user: str, app: str, ip: str | None, via: str, now_ts: float) 
 def finish_log_subject(record: dict, title: str) -> str:
     how = "mật khẩu HR nhập trên trang đó" if record.get("via") == VIA_PASSWORD else "QR"
     return f"Đăng nhập {title} bằng {how} (trình duyệt {record.get('ip') or '?'})"
+
+
+# --------------------------------------------------------------------------- #
+# App Gege VPN: máy chủ Hub đổi vé lấy danh tính (plans/plan-vpn-hr-login.md)
+# --------------------------------------------------------------------------- #
+VPN_ACTIVE_MAX = 500
+
+
+def hub_key_ok(expected: str | None, given: str | None) -> bool:
+    """Khoá Hub đúng (so sánh thời gian hằng). Khoá chưa đặt / quá ngắn → luôn từ chối."""
+    import hmac
+
+    exp = str(expected or "")
+    got = str(given or "")
+    if len(exp) < VPN_KEY_MIN_LEN or not got:
+        return False
+    return hmac.compare_digest(got, exp)
+
+
+def email_list(raw) -> list[str]:
+    """Danh sách email Hub gửi lên (list hoặc chuỗi JSON) → đã chuẩn hoá, bỏ trùng, tối đa ``VPN_ACTIVE_MAX``."""
+    import json
+
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return []
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw[:VPN_ACTIVE_MAX]:
+        email = login_email(item if isinstance(item, str) else None)
+        if email and email not in out:
+            out.append(email)
+    return out

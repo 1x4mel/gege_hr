@@ -62,6 +62,11 @@ ruff format --check <file1> <file2> ...
   `enable_hr_qr_login` (mặc định tắt) — `plans/plan-hr-login-qr.md`. `finish` cho `app="hr"` CHỈ nhận `fetch` cùng origin
   (`utils/web_qr.finish_request_ok`: `fmt=json` + `Sec-Fetch-Site: same-origin`), không nhận mở link — đừng nới.
   Tài liệu: `plans/plan-forum-qr-login.md`; phía forum: repo `Gege-discourse` `docs/08-dang-nhap-qr.md`.
+- **App Gege VPN đăng nhập bằng tài khoản HR (14/10/2026)**: cùng `api/web_qr.py`, `app="vpn"` (`native`): app Python gọi
+  `start` / `status` / `password_start` KHÔNG kèm `Origin` (`utils/web_qr.origin_ok` — có `Origin` là từ chối); vé KHÔNG
+  đổi ở `finish` mà máy chủ Hub VPN gọi `redeem` (+ `vpn_active` để khoá người nghỉ) kèm `X-Gege-Vpn-Key` =
+  `vpn_hub_key` (Password, đặt ở Desk, KHÔNG ghi vào repo/log). Công tắc `enable_vpn_qr_login` / `enable_vpn_password_login`
+  mặc định tắt — `plans/plan-vpn-hr-login.md`; phía VPN: repo `Gege-VPN` `docs/DANG-NHAP-HR.md`.
 - Cách tính công theo ca (ngưỡng co theo độ dài ca / theo phút, ân hạn trễ, Hourly đọc phiên chấm công):
   `plans/plan-cach-tinh-cong-theo-ca.md`.
 
