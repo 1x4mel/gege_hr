@@ -426,3 +426,66 @@ def vpn_active(users=None):
     _require_vpn_hub()
     emails = web_qr.email_list(users)
     return _json({"ok": True, "active": [e for e in emails if _employee_user(e)]})
+
+
+# --------------------------------------------------------------------------- #
+# SSO gege-seat: ca đang mở trên máy công ty = bằng chứng danh tính (18/10)
+# --------------------------------------------------------------------------- #
+_SEAT_SSO = "gege_webqr:seat:"
+SEAT_SSO_TTL_S = 60
+SEAT_SSO_TAG = "gege_seat_sso:"   # tag:<host>:<email> -> [sid] — seat_bridge.kill_sessions đọc để thu hồi
+
+
+def seat_issue(user: str, dest: str, host: str) -> str:
+    """Console (seat_bridge.web_login) xin vé cho người ĐANG TRONG CA trên máy host — không mật khẩu."""
+    token = secrets.token_urlsafe(24)
+    frappe.cache().set_value(
+        _SEAT_SSO + token,
+        {"user": user, "dest": dest, "host": host, "ts": time.time()},
+        expires_in_sec=SEAT_SSO_TTL_S,
+    )
+    return token
+
+
+@frappe.whitelist(allow_guest=True, methods=["GET"])
+def seat_go(t: str | None = None):
+    """Trình duyệt trên máy đang trong ca đổi vé SSO gege-seat lấy phiên HR rồi chuyển tiếp (forum OIDC / HR).
+
+    Vé chỉ console mới xin được cho đúng người trong ca (seat_bridge.web_login chặn theo IP + khoá console);
+    mở cả trang, dùng một lần, 60 giây. Phiên tạo ở đây được ghi theo seat:<host> để thu hồi khi hết ca —
+    phiên trên điện thoại nhân viên không nằm trong danh sách nên không bị ảnh hưởng.
+    """
+    from frappe.core.doctype.activity_log.activity_log import add_authentication_log
+
+    token = parse_qr_code(t)
+    record = None
+    if token and _once("sg:" + token, SEAT_SSO_TTL_S):
+        cache = frappe.cache()
+        record = cache.get_value(_SEAT_SSO + token)
+        cache.delete_value(_SEAT_SSO + token)
+    cfg = None
+    ok = bool(record) and web_qr.record_age_ok(record, time.time(), SEAT_SSO_TTL_S)
+    if ok:
+        app = web_qr.APP_FORUM if record["dest"] == web_qr.APP_FORUM else web_qr.APP_HR
+        cfg = _app(app, None)
+        ok = bool(cfg) and enabled("enable_seat_qr_login") and _employee_user(record["user"])
+    frappe.local.response["type"] = "redirect"
+    if not ok:
+        frappe.local.response["location"] = (cfg or {}).get("fail") or "/login"
+        return
+    user = _employee_user(record["user"])
+    try:
+        frappe.local.login_manager.login_as(user)
+        tag = SEAT_SSO_TAG + record["host"] + ":" + user.lower()
+        sids = frappe.cache().get_value(tag) or []
+        sids.append(frappe.session.sid)
+        frappe.cache().set_value(tag, sids, expires_in_sec=12 * 3600)
+        add_authentication_log(
+            f"Đăng nhập {cfg['title']} qua ca gege-seat (máy {record['host']})", user
+        )
+        frappe.db.commit()  # GET: Frappe không tự commit — phiên phải được lưu trước khi chuyển hướng
+        frappe.local.response["location"] = cfg["done"]
+    except Exception:
+        frappe.db.rollback()
+        frappe.log_error(title="web_qr.seat_go")
+        frappe.local.response["location"] = cfg["fail"]
