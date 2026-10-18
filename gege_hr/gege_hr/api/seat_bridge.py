@@ -226,8 +226,10 @@ def web_login(email: str | None = None, host: str | None = None, dest: str | Non
     Kiểm như màn hình vào ca: chỉ console gọi được, công tắc QR bật, người là nhân viên đang làm.
     Trả go — trình duyệt trên máy mở go (web_qr.seat_go) là có phiên HR rồi đi tiếp OIDC forum / trang HR.
     """
+    from gege_hr.gege_hr.utils.web_qr import login_email
+
     _require_console()
-    user = web_qr.login_email(email)
+    user = login_email(email)
     host_s = str(host or "")[:32]
     dest_s = str(dest or "")[:16]
     if dest_s not in ("forum", "hr"):
@@ -238,8 +240,9 @@ def web_login(email: str | None = None, host: str | None = None, dest: str | Non
     if not user or not frappe.db.exists("Employee", {"user_id": user, "status": "Active"}):
         return {"ok": False, "msg": "Tài khoản chưa được liên kết nhân viên đang làm việc."}
     token = web_qr.seat_issue(user, dest_s, host_s)
-    base = web_qr.public_base(frappe.local.request.host)
-    return {"ok": True, "go": f"{base}/api/method/gege_hr.gege_hr.api.web_qr.seat_go?t={token}"}
+    # Duong dan TUONG DOI: console go voi dia chi cong khai cua HR (hr.app) — phien HR tao tren dung domain
+    # ma forum OIDC dang dung (go qua IP LAN thi cookie HR se khong gan voi mien cong khai).
+    return {"ok": True, "go": f"/api/method/gege_hr.gege_hr.api.web_qr.seat_go?t={token}"}
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -247,8 +250,10 @@ def kill_sessions(email: str | None = None, host: str | None = None) -> dict:
     """Hết ca trên máy host → xoá mọi phiên HR tạo qua SSO gege-seat từ máy đó (điện thoại không bị ảnh hưởng)."""
     import frappe.sessions
 
+    from gege_hr.gege_hr.utils.web_qr import login_email
+
     _require_console()
-    user = web_qr.login_email(email)
+    user = login_email(email)
     tag = web_qr.SEAT_SSO_TAG + str(host or "")[:32] + ":" + (user or "")
     sids = frappe.cache().get_value(tag) or []
     killed = 0
