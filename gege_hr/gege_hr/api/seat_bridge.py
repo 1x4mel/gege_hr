@@ -214,3 +214,49 @@ def verify_assertion(assertion: str | None = None, aud: str | None = None) -> di
     if not seat_checkin.assertion_valid(record, seat_checkin.valid_audience(aud), time.time()):
         return {"ok": False, "msg": "Giấy xác nhận đăng nhập không hợp lệ hoặc đã hết hạn."}
     return {"ok": True, "email": record["email"]}
+
+
+# --------------------------------------------------------------------------- #
+# SSO gege-seat (18/10): ca đang mở trên máy = bằng chứng danh tính
+# --------------------------------------------------------------------------- #
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def web_login(email: str | None = None, host: str | None = None, dest: str | None = None) -> dict:
+    """Console xin VÉ hoàn tất web cho người đang trong ca trên host (dest = forum / hr).
+
+    Kiểm như màn hình vào ca: chỉ console gọi được, công tắc QR bật, người là nhân viên đang làm.
+    Trả go — trình duyệt trên máy mở go (web_qr.seat_go) là có phiên HR rồi đi tiếp OIDC forum / trang HR.
+    """
+    _require_console()
+    user = web_qr.login_email(email)
+    host_s = str(host or "")[:32]
+    dest_s = str(dest or "")[:16]
+    if dest_s not in ("forum", "hr"):
+        return {"ok": False, "msg": "dest phải là forum hoặc hr"}
+    setting = frappe.get_cached_doc("VN HR Portal Setting", "VN HR Portal Setting")
+    if not setting.get("enable_seat_qr_login"):
+        return {"ok": False, "msg": "Vào ca bằng QR chưa được bật."}
+    if not user or not frappe.db.exists("Employee", {"user_id": user, "status": "Active"}):
+        return {"ok": False, "msg": "Tài khoản chưa được liên kết nhân viên đang làm việc."}
+    token = web_qr.seat_issue(user, dest_s, host_s)
+    base = web_qr.public_base(frappe.local.request.host)
+    return {"ok": True, "go": f"{base}/api/method/gege_hr.gege_hr.api.web_qr.seat_go?t={token}"}
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def kill_sessions(email: str | None = None, host: str | None = None) -> dict:
+    """Hết ca trên máy host → xoá mọi phiên HR tạo qua SSO gege-seat từ máy đó (điện thoại không bị ảnh hưởng)."""
+    import frappe.sessions
+
+    _require_console()
+    user = web_qr.login_email(email)
+    tag = web_qr.SEAT_SSO_TAG + str(host or "")[:32] + ":" + (user or "")
+    sids = frappe.cache().get_value(tag) or []
+    killed = 0
+    for sid in sids or []:
+        try:
+            frappe.sessions.delete_session(sid=sid, reason="gege-seat: kết thúc ca")
+            killed += 1
+        except Exception:
+            pass
+    frappe.cache().delete_value(tag)
+    return {"ok": True, "killed": killed}
