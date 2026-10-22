@@ -303,3 +303,38 @@ def test_email_list():
     assert email_list({"a": 1}) == []
     assert email_list(None) == []
     assert len(email_list([f"u{i}@x.vn" for i in range(600)])) == 500
+
+
+def test_app_config_chatwoot():
+    cfg = app_config("chatwoot", None, None)
+    assert cfg["app"] == "chatwoot" and cfg["title"] == "Gege Chatwoot"
+    assert cfg["origin"] == "https://chat.gegeteam.xyz"  # để trống = mặc định
+    # có phiên HR rồi thì trang SSO của Chatwoot đi OIDC và vào thẳng — đích lấy từ cấu hình
+    assert cfg["done"] == "https://chat.gegeteam.xyz/sso/hr/login"
+    assert cfg["fail"] == "https://chat.gegeteam.xyz/app/login?gege_qr=err"
+    custom = app_config("chatwoot", None, None, "https://Chat.Example.com/app/login?x=1")
+    assert custom["origin"] == "https://chat.example.com"
+    assert custom["done"] == "https://chat.example.com/sso/hr/login"
+    # URL rác → về mặc định, không nhận đích lạ
+    assert app_config("chatwoot", None, None, "javascript:alert(1)")["origin"] == "https://chat.gegeteam.xyz"
+    # forum / hr không bị ảnh hưởng bởi tham số mới
+    assert (
+        app_config("forum", None, None, "https://chat.gegeteam.xyz")["origin"] == "https://forum.gegeteam.xyz"
+    )
+
+
+def test_flag_for_chatwoot():
+    cw = app_config("chatwoot", None, None)
+    assert flag_for(cw, "qr") == "enable_chatwoot_qr_login"
+    assert flag_for(cw, "password") == "enable_chatwoot_password_login"
+
+
+def test_origin_and_finish_rules_chatwoot_like_forum():
+    cw = app_config("chatwoot", None, None)
+    assert origin_ok(cw, "https://chat.gegeteam.xyz") is True
+    assert origin_ok(cw, "https://forum.gegeteam.xyz") is False
+    assert origin_ok(cw, None) is False  # trang web phải có Origin
+    assert finish_request_ok(cw, False, None, None) is True  # mở cả trang: đích lấy từ cấu hình
+    assert finish_request_ok(cw, True, "https://chat.gegeteam.xyz", "same-site") is True
+    assert finish_request_ok(cw, True, "https://forum.gegeteam.xyz", "same-site") is False
+    assert finish_request_ok(cw, True, None, None) is False
