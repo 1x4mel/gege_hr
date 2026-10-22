@@ -62,6 +62,11 @@ ruff format --check <file1> <file2> ...
   `enable_hr_qr_login` (mặc định tắt) — `plans/plan-hr-login-qr.md`. `finish` cho `app="hr"` CHỈ nhận `fetch` cùng origin
   (`utils/web_qr.finish_request_ok`: `fmt=json` + `Sec-Fetch-Site: same-origin`), không nhận mở link — đừng nới.
   Tài liệu: `plans/plan-forum-qr-login.md`; phía forum: repo `Gege-discourse` `docs/08-dang-nhap-qr.md`.
+- **Gege Chatwoot đăng nhập bằng tài khoản HR (22/10/2026)**: cùng `api/web_qr.py`, `app="chatwoot"` — đi y hệt forum (QR +
+  email / mật khẩu ở form của Chatwoot, kết thúc ở `finish` rồi trang SSO `/sso/hr/login` của Chatwoot đi OIDC). Công tắc
+  `enable_chatwoot_qr_login` / `enable_chatwoot_password_login` mặc định tắt, `chatwoot_url` — `plans/plan-chatwoot-hr-login.md`;
+  phía Chatwoot: repo `gege-chatwoot-g2g-eldo` `docs/chat-domain-va-dang-nhap-hr.md`. Quyền vào Chatwoot = role HR
+  `Chat Agent` / `Chat Admin`, do phía Chatwoot kiểm.
 - **App Gege VPN đăng nhập bằng tài khoản HR (14/10/2026)**: cùng `api/web_qr.py`, `app="vpn"` (`native`): app Python gọi
   `start` / `status` / `password_start` KHÔNG kèm `Origin` (`utils/web_qr.origin_ok` — có `Origin` là từ chối); vé KHÔNG
   đổi ở `finish` mà máy chủ Hub VPN gọi `redeem` (+ `vpn_active` để khoá người nghỉ) kèm `X-Gege-Vpn-Key` =

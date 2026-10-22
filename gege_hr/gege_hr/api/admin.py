@@ -198,6 +198,10 @@ PORTAL_SETTING_FIELDS = [
     "enable_forum_qr_login",
     "enable_forum_password_login",
     "forum_url",
+    # Đăng nhập Gege Chatwoot bằng tài khoản HR (plans/plan-chatwoot-hr-login.md).
+    "enable_chatwoot_qr_login",
+    "enable_chatwoot_password_login",
+    "chatwoot_url",
     # Đăng nhập chính Gege HR bằng QR ở trang đăng nhập (plans/plan-hr-login-qr.md).
     "enable_hr_qr_login",
     # Đăng nhập app Gege VPN bằng tài khoản HR (plans/plan-vpn-hr-login.md). Khoá ``vpn_hub_key`` (Password)

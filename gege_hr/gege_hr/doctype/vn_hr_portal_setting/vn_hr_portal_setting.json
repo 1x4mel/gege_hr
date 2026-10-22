@@ -122,6 +122,27 @@
    "label": "Gege Forum URL"
   },
   {
+   "default": "0",
+   "description": "Cho ph\u00e9p \u0111\u0103ng nh\u1eadp Gege Chatwoot (chat.gegeteam.xyz) b\u1eb1ng c\u00e1ch qu\u00e9t m\u00e3 QR tr\u00ean trang \u0111\u0103ng nh\u1eadp Chatwoot b\u1eb1ng app HR. Ch\u1ec9 ng\u01b0\u1eddi c\u00f3 role Chat Agent / Chat Admin m\u1edbi v\u00e0o \u0111\u01b0\u1ee3c Chatwoot.",
+   "fieldname": "enable_chatwoot_qr_login",
+   "fieldtype": "Check",
+   "label": "Enable Chatwoot QR Login"
+  },
+  {
+   "default": "0",
+   "description": "Cho ph\u00e9p nh\u1eadp email + m\u1eadt kh\u1ea9u HR ngay \u1edf form \u0111\u0103ng nh\u1eadp Gege Chatwoot (m\u1eadt kh\u1ea9u g\u1eedi th\u1eb3ng t\u1edbi HR qua HTTPS, kh\u00f4ng qua m\u00e1y ch\u1ee7 Chatwoot).",
+   "fieldname": "enable_chatwoot_password_login",
+   "fieldtype": "Check",
+   "label": "Enable Chatwoot Password Login"
+  },
+  {
+   "default": "https://chat.gegeteam.xyz",
+   "description": "\u0110\u1ecba ch\u1ec9 Gege Chatwoot \u2014 HR ch\u1ec9 c\u1ea5p m\u00e3 QR cho trang n\u00e0y v\u00e0 ch\u1ec9 chuy\u1ec3n h\u01b0\u1edbng v\u1ec1 \u0111\u00fang \u0111\u1ecba ch\u1ec9 n\u00e0y. \u0110\u1ec3 tr\u1ed1ng = https://chat.gegeteam.xyz.",
+   "fieldname": "chatwoot_url",
+   "fieldtype": "Data",
+   "label": "Gege Chatwoot URL"
+  },
+  {
    "fieldname": "timezone_break",
    "fieldtype": "Section Break",
    "label": "Time Zone"

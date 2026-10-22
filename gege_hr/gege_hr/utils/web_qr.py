@@ -1,7 +1,8 @@
-"""Đăng nhập trang web (Gege Forum, và chính trang đăng nhập Gege HR) bằng mã QR quét từ app HR — helper thuần.
-App Gege VPN (không phải trang web) cũng dùng chung đường này — xem :data:`APP_VPN`.
+"""Đăng nhập trang web (Gege Forum, Gege Chatwoot, và chính trang đăng nhập Gege HR) bằng mã QR quét từ app HR — helper
+thuần. App Gege VPN (không phải trang web) cũng dùng chung đường này — xem :data:`APP_VPN`.
 
-Thiết kế: ``plans/plan-forum-qr-login.md``, ``plans/plan-hr-login-qr.md``, ``plans/plan-vpn-hr-login.md``. Không import frappe ở đây (bộ test chạy
+Thiết kế: ``plans/plan-forum-qr-login.md``, ``plans/plan-hr-login-qr.md``, ``plans/plan-vpn-hr-login.md``,
+``plans/plan-chatwoot-hr-login.md``. Không import frappe ở đây (bộ test chạy
 không cần bench); phần gọi Redis / tạo phiên nằm ở ``api/web_qr.py``.
 """
 
@@ -19,6 +20,11 @@ APP_HR = "hr"  # chính trang đăng nhập của Gege HR (cùng origin)
 APP_VPN = "vpn"
 VPN_KEY_MIN_LEN = 32
 DEFAULT_FORUM_URL = "https://forum.gegeteam.xyz"
+# Gege Chatwoot (hộp thư G2G / Eldorado, máy .120): giống forum — có phiên HR thì trang SSO của Chatwoot
+# (/sso/hr/login, OIDC với HR) cho vào ngay. Quyền vào Chatwoot do role HR "Chat Agent" / "Chat Admin" quyết định
+# ở phía Chatwoot (repo gege-chatwoot-g2g-eldo, bridge/sso/hr_sso.py), không phải ở đây.
+APP_CHATWOOT = "chatwoot"
+DEFAULT_CHATWOOT_URL = "https://chat.gegeteam.xyz"
 STATE_WAIT, STATE_OK, STATE_GONE = "wait", "ok", "gone"
 
 
@@ -34,7 +40,12 @@ def normalize_origin(url: str | None) -> str:
     return f"{p.scheme}://{p.netloc}".lower()
 
 
-def app_config(app: str | None, forum_url: str | None = None, hr_base: str | None = None) -> dict | None:
+def app_config(
+    app: str | None,
+    forum_url: str | None = None,
+    hr_base: str | None = None,
+    chatwoot_url: str | None = None,
+) -> dict | None:
     """Trang web được phép xin mã. Đích chuyển hướng CHỈ lấy từ đây — không nhận URL từ người gọi.
 
     ``flag_qr`` / ``flag_password`` = tên công tắc ở ``VN HR Portal Setting`` cho từng cách đăng nhập (``None`` = trang
@@ -51,6 +62,18 @@ def app_config(app: str | None, forum_url: str | None = None, hr_base: str | Non
             "fail": f"{base}/login?gege_qr=err",
             "flag_qr": "enable_forum_qr_login",
             "flag_password": "enable_forum_password_login",
+        }
+    if name == APP_CHATWOOT:
+        base = normalize_origin(chatwoot_url) or DEFAULT_CHATWOOT_URL
+        return {
+            "app": APP_CHATWOOT,
+            "title": "Gege Chatwoot",
+            "origin": base,
+            # có phiên HR rồi → trang SSO của Chatwoot đi OIDC với HR (client Skip Authorization) và vào thẳng
+            "done": f"{base}/sso/hr/login",
+            "fail": f"{base}/app/login?gege_qr=err",
+            "flag_qr": "enable_chatwoot_qr_login",
+            "flag_password": "enable_chatwoot_password_login",
         }
     if name == APP_HR:
         base = normalize_origin(hr_base)

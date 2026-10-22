@@ -16,6 +16,10 @@ Kết quả giống hệt nhập mật khẩu HR ở bước OIDC (trình duyệ
 của QR: ai đó đưa mã của HỌ cho nhân viên quét; vì vậy màn xác nhận hiện IP + trình duyệt đang xin đăng nhập, mã
 sống 150 giây, dùng một lần, và tính năng mặc định TẮT (``enable_forum_qr_login``, ``enable_hr_qr_login``).
 
+Gege Chatwoot (``app="chatwoot"``, plans/plan-chatwoot-hr-login.md) đi y hệt forum: Chatwoot đăng nhập bằng OIDC của HR
+(trang SSO ``/sso/hr/login`` trên máy Chatwoot), nên có phiên HR là vào được; công tắc ``enable_chatwoot_qr_login`` /
+``enable_chatwoot_password_login`` mặc định TẮT.
+
 Email + mật khẩu HR nhập ở form của forum đi cùng đường: :func:`password_start` (khác origin, không cookie) kiểm mật
 khẩu rồi trả luôn vé hoàn tất → :func:`finish`. KHÔNG dùng form POST thẳng tới HR: trình duyệt đang có phiên HR sẽ gửi
 kèm cookie (forum và HR cùng site) và Frappe từ chối mọi POST có phiên mà thiếu CSRF token.
@@ -72,10 +76,11 @@ def _hr_base() -> str:
 def _cfg(app: str | None) -> dict | None:
     """Cấu hình trang web được phép (chỉ kiểm tên trang, chưa kiểm công tắc)."""
     try:
-        forum_url = _setting().get("forum_url")
+        setting = _setting()
+        forum_url, chatwoot_url = setting.get("forum_url"), setting.get("chatwoot_url")
     except Exception:
-        forum_url = None
-    return web_qr.app_config(app, forum_url, _hr_base())
+        forum_url = chatwoot_url = None
+    return web_qr.app_config(app, forum_url, _hr_base(), chatwoot_url)
 
 
 def _on(cfg: dict | None, via: str = web_qr.VIA_QR) -> bool:
@@ -433,7 +438,7 @@ def vpn_active(users=None):
 # --------------------------------------------------------------------------- #
 _SEAT_SSO = "gege_webqr:seat:"
 SEAT_SSO_TTL_S = 60
-SEAT_SSO_TAG = "gege_seat_sso:"   # tag:<host>:<email> -> [sid] — seat_bridge.kill_sessions đọc để thu hồi
+SEAT_SSO_TAG = "gege_seat_sso:"  # tag:<host>:<email> -> [sid] — seat_bridge.kill_sessions đọc để thu hồi
 
 
 def seat_issue(user: str, dest: str, host: str) -> str:
@@ -480,9 +485,7 @@ def seat_go(t: str | None = None):
         sids = frappe.cache().get_value(tag) or []
         sids.append(frappe.session.sid)
         frappe.cache().set_value(tag, sids, expires_in_sec=12 * 3600)
-        add_authentication_log(
-            f"Đăng nhập {cfg['title']} qua ca gege-seat (máy {record['host']})", user
-        )
+        add_authentication_log(f"Đăng nhập {cfg['title']} qua ca gege-seat (máy {record['host']})", user)
         frappe.db.commit()  # GET: Frappe không tự commit — phiên phải được lưu trước khi chuyển hướng
         frappe.local.response["location"] = cfg["done"]
     except Exception:
