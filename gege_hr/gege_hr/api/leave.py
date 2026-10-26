@@ -969,7 +969,21 @@ def _approve_cancellation_one(name: str) -> dict:
     passed). Raises on invalid state so a caller (single endpoint / bulk loop)
     can decide how to surface the failure. Shared with
     ``bulk_approve_cancellations``."""
+    # FIX 2026-10-01: HR Manager có User Permission Employee riêng → Frappe
+    # chặn get_doc cho docs của NV khác. Bypass — _require_manager() đã gate.
+    try:
+        _prev = frappe.flags.ignore_permissions
+    except AttributeError:
+        _prev = False
+    try:
+        frappe.flags.ignore_permissions = True
+    except Exception:
+        pass
     cr = frappe.get_doc("VN Leave Cancellation Request", name)
+    try:
+        frappe.flags.ignore_permissions = _prev
+    except Exception:
+        pass
     if cr.workflow_state == "Approved":
         return {
             "name": name,
@@ -982,19 +996,31 @@ def _approve_cancellation_one(name: str) -> dict:
             frappe.PermissionError,
         )
 
-    cancelled_leave = False
-    if cr.leave_application:
-        cancelled_leave = _cancel_linked_leave(cr.leave_application)
-
+    # FIX 2026-10-01: cập nhật workflow_state TRƯỚC khi cancel Leave —
+    # save() SAU khi cancel sẽ crash "Cannot link cancelled document" vì
+    # Link field leave_application trỏ đến doc đã docstatus=2.
     cr.workflow_state = "Approved"
     cr.approved_by = frappe.session.user
     try:
         cr.approved_at = frappe.utils.now()
     except Exception:
         pass
-    if cancelled_leave:
-        cr.attendance_recalculated = 1
     cr.save()
+
+    cancelled_leave = False
+    if cr.leave_application:
+        cancelled_leave = _cancel_linked_leave(cr.leave_application)
+        if cancelled_leave:
+            try:
+                frappe.db.set_value(
+                    "VN Leave Cancellation Request",
+                    name,
+                    "attendance_recalculated",
+                    1,
+                    update_modified=True,
+                )
+            except Exception:
+                cr.attendance_recalculated = 1
 
     try:
         notify.push_notification(
