@@ -37,10 +37,12 @@ def _inject_assign_to(monkeypatch, calls):
 
 
 def _inject_print_format(monkeypatch, calls):
-    """Fake ``frappe.utils.print_format.download_pdf`` recorder."""
-    pf = types.ModuleType("frappe.utils.print_format")
-    pf.download_pdf = lambda *a, **kw: calls.append((a, kw))
-    monkeypatch.setitem(sys.modules, "frappe.utils.print_format", pf)
+    """Fake ``utils.print_pdf.send_pdf`` recorder (đã kiểm quyền ở tầng app)."""
+    pp = types.ModuleType("gege_hr.gege_hr.utils.print_pdf")
+    pp.send_pdf = lambda doctype, name, print_format=None: calls.append(
+        ((doctype, name), {"format": print_format})
+    )
+    monkeypatch.setitem(sys.modules, "gege_hr.gege_hr.utils.print_pdf", pp)
 
 
 # --------------------------------------------------------------------------- #

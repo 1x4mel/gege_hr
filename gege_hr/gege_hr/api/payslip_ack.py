@@ -461,6 +461,9 @@ def _maybe_lock_period_after_confirm(period_name: str | None) -> None:
         try:
             doc = frappe.get_doc(SLIP_DOCTYPE, r["name"])
             if doc.docstatus == 0:
+                # Chạy dưới phiên NHÂN VIÊN vừa xác nhận cuối cùng — nhân viên
+                # không có (và không nên có) quyền submit Salary Slip.
+                doc.flags.ignore_permissions = True
                 doc.submit()
             submitted += 1
         except Exception:

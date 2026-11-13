@@ -342,7 +342,11 @@ doc_events = {
     # company's materialisation) + handle Active → Left cleanly.
     "Employee": {
         "on_trash": "gege_hr.gege_hr.api.employee_lifecycle.guard_employee_delete",
-        "on_update": "gege_hr.gege_hr.api.employee_lifecycle.handle_employee_status_change",
+        "on_update": [
+            "gege_hr.gege_hr.api.employee_lifecycle.handle_employee_status_change",
+            # 13/11/2026: User Permission "chính mình" cho nhân viên thường.
+            "gege_hr.gege_hr.api.employee_lifecycle.ensure_self_user_permission",
+        ],
         # plan-employee-frontend-parity §2.5 — chặn chuỗi reports_to vòng lặp.
         "validate": "gege_hr.gege_hr.api.employee_lifecycle.guard_reports_to_cycle",
     },

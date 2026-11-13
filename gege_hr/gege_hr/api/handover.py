@@ -332,7 +332,7 @@ def suggest_handover_receivers(employee: str | None = None) -> list[dict]:
             clauses.append(["company", "=", company])
         if department:
             clauses.append(["department", "=", department])
-        rows = frappe.db.get_list(
+        rows = frappe.get_all(
             "Employee",
             filters=clauses,
             fields=["name", "employee_name", "reports_to", "department"],
@@ -344,7 +344,7 @@ def suggest_handover_receivers(employee: str | None = None) -> list[dict]:
         report_clauses: list[list] = [["status", "=", "Active"], ["reports_to", "=", emp]]
         if company:
             report_clauses.append(["company", "=", company])
-        reports = frappe.db.get_list(
+        reports = frappe.get_all(
             "Employee",
             filters=report_clauses,
             fields=["name", "employee_name", "reports_to", "department"],
