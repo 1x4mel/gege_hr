@@ -239,13 +239,23 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
     # HR roles on Attendance, Employee, Leave Application, Leave Ledger Entry,
     # Expense Claim, Appraisal and Staffing Plan — those are NOT repeated here.
     # Only the three ref_doctypes below were missing it on this site.
+    #
+    # Custom DocPerm THAY THẾ toàn bộ DocPerm chuẩn của doctype (Frappe
+    # Meta.set_custom_permissions) — không gộp. Một dòng chỉ có {"report": 1}
+    # vì vậy xoá luôn quyền read/write chuẩn của role đó. Với doctype có
+    # Workflow, doc.save(ignore_permissions=True) vẫn gọi get_transitions() →
+    # check_permission("read") → PermissionError. 13/11/2026: HR Manager sửa giờ
+    # ra cho nhân viên, bước tự miễn phiếu "Quên chấm ra" hỏng vì lý do này →
+    # phiếu bị đóng kèm phạt, giao diện vẫn báo thiếu chấm ra.
+    # Ở đây ghi lại đúng quyền chuẩn của role + report.
     "VN Monthly Attendance Period": {  # VN Chấm công theo nhân viên (Script Report)
-        HR_MANAGER: {"report": 1},
-        HR_USER: {"report": 1},
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1, "report": 1},
+        HR_USER: {"read": 1, "write": 1, "create": 1, "report": 1},
     },
     "VN Checkout Miss": {  # VN Checkout Miss by Employee (deskfree-complete B4)
-        HR_MANAGER: {"report": 1},
-        HR_USER: {"report": 1},
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1, "report": 1},
+        HR_USER: {"read": 1, "report": 1},
+        "Payroll Manager": {"read": 1, "write": 1, "create": 1, "delete": 1},
     },
     "Employee Advance": {  # Employee Advance Summary (HRMS) — no standard grant
         HR_MANAGER: {"read": 1, "report": 1},
@@ -425,8 +435,10 @@ def _upsert_perm(doctype: str, role: str, ptypes: dict[str, int]) -> None:
     """Create or update a ``Custom DocPerm`` granting ``ptypes`` to ``role``.
 
     Idempotent. Mirrors what Frappe's Role Permissions Manager writes (a
-    ``Custom DocPerm`` child of the DocType, merged with the standard perms at
-    runtime by taking the most permissive value).
+    ``Custom DocPerm`` child of the DocType). NOTE: once a DocType has ANY
+    ``Custom DocPerm`` row, Frappe uses those rows INSTEAD of the standard
+    DocPerm (no merge) — so a grant must list every ptype the role needs,
+    including ``read``.
     """
     if not frappe.db.exists("DocType", doctype):
         print(f"  skip (doctype missing): {doctype}")
