@@ -189,3 +189,70 @@ def guard_reports_to_cycle(doc, method: str | None = None) -> None:
     cycle = detect_cycle(chain, doc.name)
     if cycle:
         frappe.throw(_("Chuỗi báo cáo tạo vòng lặp: {0}").format(" → ".join(cycle)))
+
+
+# --------------------------------------------------------------------------- #
+# User Permission "Employee = chính mình" cho nhân viên thường (13/11/2026).
+#
+# HRMS Employee.update_user_permissions chỉ tạo khi NGƯỜI LƯU có quyền ghi
+# User Permission — HR Manager lưu qua SPA không có → bỏ qua âm thầm, 26/29
+# nhân viên không bị giới hạn và đọc được hồ sơ / đơn / lượt chấm công của mọi
+# người qua /api/resource. Tài khoản HR / Payroll thì KHÔNG được giới hạn (họ
+# xử lý bản ghi của người khác).
+# --------------------------------------------------------------------------- #
+UNRESTRICTED_ROLES = frozenset({"HR Manager", "HR User", "Payroll Manager", "Payroll User", "System Manager"})
+
+
+def needs_self_permission(status, user_id, create_user_permission, roles) -> bool:
+    """Pure rule: nhân viên đang làm, có tài khoản, bật ô Create User Permission
+    và không giữ vai trò HR / Payroll / System → cần giới hạn theo chính mình."""
+    if (status or "") != "Active" or not (user_id or "").strip():
+        return False
+    try:
+        if not int(create_user_permission or 0):
+            return False
+    except (TypeError, ValueError):
+        return False
+    return not (set(roles or ()) & UNRESTRICTED_ROLES)
+
+
+def ensure_self_user_permission(doc, method: str | None = None) -> None:
+    """Employee.on_update — best-effort, không bao giờ làm hỏng lần lưu hồ sơ."""
+    try:
+        user = (doc.user_id or "").strip()
+        if not needs_self_permission(
+            doc.status, user, doc.create_user_permission, frappe.get_roles(user) if user else ()
+        ):
+            return
+        from frappe.permissions import add_user_permission
+
+        add_user_permission("Employee", doc.name, user, ignore_permissions=True)
+    except Exception:
+        frappe.log_error(title="ensure_self_user_permission failed", message=str(getattr(doc, "name", "")))
+
+
+def backfill_self_user_permissions(dry_run: int = 1) -> dict:
+    """Bù giới hạn cho nhân viên hiện có. ``bench --site … execute
+    gege_hr.gege_hr.api.employee_lifecycle.backfill_self_user_permissions --kwargs "{'dry_run': 0}"``."""
+    from frappe.permissions import add_user_permission
+
+    added, skipped = [], []
+    for e in frappe.get_all(
+        "Employee",
+        filters={"status": "Active", "user_id": ["is", "set"]},
+        fields=["name", "employee_name", "user_id", "status", "create_user_permission"],
+        order_by="name",
+    ):
+        if not needs_self_permission(
+            e.status, e.user_id, e.create_user_permission, frappe.get_roles(e.user_id)
+        ):
+            skipped.append(e.name)
+            continue
+        if frappe.db.exists("User Permission", {"user": e.user_id, "allow": "Employee", "for_value": e.name}):
+            continue
+        added.append(f"{e.name} {e.employee_name}")
+        if not int(dry_run):
+            add_user_permission("Employee", e.name, e.user_id, ignore_permissions=True)
+    if not int(dry_run):
+        frappe.db.commit()
+    return {"dry_run": int(dry_run), "added": added, "skipped_unrestricted_or_off": skipped}
