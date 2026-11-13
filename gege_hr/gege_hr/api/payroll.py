@@ -2575,9 +2575,10 @@ def download_payslip_pdf(name: str | None = None) -> None:
                 frappe.PermissionError,
             )
     try:
-        from frappe.utils.print_format import download_pdf  # lazy: stub-safe
+        # Quyền đã kiểm ở trên (manager hoặc chủ phiếu đã phát hành).
+        from gege_hr.gege_hr.utils.print_pdf import send_pdf  # lazy: stub-safe
 
-        download_pdf("Salary Slip", name, format=PAYSLIP_PRINT_FORMAT)
+        send_pdf("Salary Slip", name, PAYSLIP_PRINT_FORMAT)
     except Exception as e:
         frappe.throw(
             _("Không tạo được PDF — chạy bench migrate để seed Print Format '{0}'. {1}").format(

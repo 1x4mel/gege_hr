@@ -70,6 +70,8 @@ def fake(monkeypatch):
 
     db = _FakeDB()
     monkeypatch.setattr(stub, "db", db)
+    # handover dùng frappe.get_all (không lọc theo User Permission của người gọi).
+    monkeypatch.setattr(stub, "get_all", lambda doctype, **kw: db.get_list(doctype, **kw), raising=False)
     return types.SimpleNamespace(api=api, db=db)
 
 

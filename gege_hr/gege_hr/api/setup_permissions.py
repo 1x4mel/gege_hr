@@ -128,7 +128,8 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
     "Shift Assignment": {
         # create_shift_assignment (create + submit), end_shift_assignment
         # (write + cancel), list_shift_assignments (read).
-        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
+        # delete: delete_shift_assignment (admin.py) — HRMS chuẩn có sẵn.
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1, "delete": 1},
     },
     # --- Leave (core Frappe HR) — leave.py self-service + HR approval --------
     # HR Manager also gets ``share`` so the unified-inbox approval flow can grant
@@ -229,16 +230,18 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
         HR_USER: {"read": 1},
     },
     "Attendance": {  # team_attendance / team_daily_status reads Attendance rows
-        HR_MANAGER: {"read": 1},
+        # write/create/submit/cancel: mark_attendance_bulk, attendance_sync
+        # generate/backfill chạy dưới phiên HR (insert + submit).
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1, "report": 1},
         HR_USER: {"read": 1},
         "Line Manager": {"read": 1},
     },
     # --- Report engine (api/reports.py → frappe.desk.query_report.run) ---------
     # query_report.run gates on frappe.has_permission(ref_doctype, "report").
-    # B0 survey (2026-08-29): standard DocPerm already grants report=1 to both
-    # HR roles on Attendance, Employee, Leave Application, Leave Ledger Entry,
-    # Expense Claim, Appraisal and Staffing Plan — those are NOT repeated here.
-    # Only the three ref_doctypes below were missing it on this site.
+    # B0 survey (2026-08-29) assumed the standard DocPerm report=1 survives —
+    # it does NOT once this matrix writes a Custom DocPerm for the doctype
+    # (13/11/2026: Attendance / Employee / Expense Claim reports were blocked).
+    # Every doctype listed here must carry ``report`` itself.
     #
     # Custom DocPerm THAY THẾ toàn bộ DocPerm chuẩn của doctype (Frappe
     # Meta.set_custom_permissions) — không gộp. Một dòng chỉ có {"report": 1}
@@ -256,6 +259,8 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
         HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1, "report": 1},
         HR_USER: {"read": 1, "report": 1},
         "Payroll Manager": {"read": 1, "write": 1, "create": 1, "delete": 1},
+        # Nhân viên xem phiếu của mình (bị giới hạn bởi User Permission).
+        EMPLOYEE: {"read": 1},
     },
     "Employee Advance": {  # Employee Advance Summary (HRMS) — no standard grant
         HR_MANAGER: {"read": 1, "report": 1},
@@ -300,7 +305,7 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
         HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
     },
     "Leave Period": {
-        HR_MANAGER: {"read": 1, "write": 1, "create": 1},
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},  # delete_leave_period
     },
     "Leave Policy": {
         # Full docstatus lifecycle (plan leave-policy-frontend-crud): without
@@ -340,6 +345,10 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
     # Attendance Correction or Overtime request.
     "VN Salary Advance Request": {
         HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1, "submit": 1, "cancel": 1, "amend": 1},
+        # Nhân viên tự gửi/sửa/huỷ đơn (advance.py). Không có dòng này Workflow
+        # chặn send_for_approval → đơn kẹt Draft âm thầm. Phạm vi "đơn của mình"
+        # do User Permission Employee = chính mình (giống Correction/Overtime).
+        EMPLOYEE: {"read": 1, "write": 1, "create": 1},
     },
     "VN Attendance Correction Request": {
         HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
@@ -376,7 +385,7 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
     },
     # --- Expense / grievance / travel / onboarding (manager approve + HR admin) -
     "Expense Claim": {  # HRMS — expense.approve_expense_claim / reject
-        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1, "report": 1},
         EMPLOYEE: {"read": 1, "write": 1, "create": 1},
     },
     "Employee Grievance": {  # HRMS — employee_services.resolve_grievance
@@ -402,10 +411,20 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
     },
     # --- Employee master: HR admin edit (admin.save_employee) ------------------
     "Employee": {
-        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1},
+        HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1, "report": 1},
         HR_USER: {"read": 1},
         EMPLOYEE: {"read": 1},
     },
+}
+
+# Quyền mức trường (permlevel > 0). Custom DocPerm thay thế cả các dòng
+# permlevel > 0 chuẩn → phải ghi lại, nếu không trường permlevel 1 (vd
+# ``approval_status`` của Expense Claim, ``status`` của Leave Application) bị
+# âm thầm trả về giá trị cũ khi lưu không bỏ qua quyền.
+FIELD_LEVEL_MATRIX: dict[str, dict[str, dict[int, dict[str, int]]]] = {
+    "Expense Claim": {HR_MANAGER: {1: {"read": 1, "write": 1}}, EMPLOYEE: {1: {"read": 1}}},
+    "Leave Application": {HR_MANAGER: {1: {"read": 1, "write": 1}}, EMPLOYEE: {1: {"read": 1}}},
+    "Employee Checkin": {HR_MANAGER: {1: {"read": 1, "write": 1}}, EMPLOYEE: {1: {"read": 1}}},
 }
 
 # The portal roles a full-access test account should hold. Provisioning a test
@@ -431,7 +450,7 @@ def _ensure_role(role: str) -> None:
             frappe.db.rollback()
 
 
-def _upsert_perm(doctype: str, role: str, ptypes: dict[str, int]) -> None:
+def _upsert_perm(doctype: str, role: str, ptypes: dict[str, int], permlevel: int = 0) -> None:
     """Create or update a ``Custom DocPerm`` granting ``ptypes`` to ``role``.
 
     Idempotent. Mirrors what Frappe's Role Permissions Manager writes (a
@@ -447,7 +466,7 @@ def _upsert_perm(doctype: str, role: str, ptypes: dict[str, int]) -> None:
 
     name = frappe.db.get_value(
         "Custom DocPerm",
-        {"parent": doctype, "role": role, "permlevel": 0, "if_owner": 0},
+        {"parent": doctype, "role": role, "permlevel": permlevel, "if_owner": 0},
     )
     if name:
         doc = frappe.get_doc("Custom DocPerm", name)
@@ -459,7 +478,7 @@ def _upsert_perm(doctype: str, role: str, ptypes: dict[str, int]) -> None:
                 "parenttype": "DocType",
                 "parentfield": "permissions",
                 "role": role,
-                "permlevel": 0,
+                "permlevel": permlevel,
             }
         )
 
@@ -480,7 +499,7 @@ def _upsert_perm(doctype: str, role: str, ptypes: dict[str, int]) -> None:
     doc.flags.ignore_permissions = True
     doc.save()
     granted = {k: v for k, v in ptypes.items() if v}
-    print(f"  grant {doctype} / {role} -> {granted}")
+    print(f"  grant {doctype} / {role} (level {permlevel}) -> {granted}")
 
 
 def grant_hr_permissions() -> dict:
@@ -489,6 +508,10 @@ def grant_hr_permissions() -> dict:
     for doctype, roles in PERMISSION_MATRIX.items():
         for role, ptypes in roles.items():
             _upsert_perm(doctype, role, ptypes)
+    for doctype, roles in FIELD_LEVEL_MATRIX.items():
+        for role, levels in roles.items():
+            for level, ptypes in levels.items():
+                _upsert_perm(doctype, role, ptypes, permlevel=level)
     frappe.db.commit()
     frappe.clear_cache()
     print("=== grant_hr_permissions done ===")

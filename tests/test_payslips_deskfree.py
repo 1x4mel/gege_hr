@@ -171,6 +171,11 @@ def api(monkeypatch):
     monkeypatch.setitem(sys.modules, "frappe", stub)
     monkeypatch.setitem(sys.modules, "frappe.utils", utils)
     monkeypatch.setitem(sys.modules, "frappe.utils.print_format", pf)
+    # API gọi utils.print_pdf.send_pdf (bỏ qua kiểm quyền in của Frappe) — nối
+    # về recorder download_pdf để các assert giữ nguyên.
+    pp = types.ModuleType("gege_hr.gege_hr.utils.print_pdf")
+    pp.send_pdf = lambda doctype, name, print_format=None: pf.download_pdf(doctype, name, format=print_format)
+    monkeypatch.setitem(sys.modules, "gege_hr.gege_hr.utils.print_pdf", pp)
     mod = importlib.reload(importlib.import_module(PAYROLL_API))
     monkeypatch.setattr(mod, "frappe", stub)
 

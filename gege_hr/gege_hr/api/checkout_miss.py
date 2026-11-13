@@ -1554,9 +1554,10 @@ def download_checkout_miss_pdf(name: str) -> dict:
     ticket_emp = frappe.db.get_value(MISS_DOCTYPE, name, "employee")
     _require_hr_or_owner(ticket_emp)
     try:
-        from frappe.utils.print_format import download_pdf  # lazy: stub-safe
+        # Quyền đã kiểm ở trên (_require_hr_or_owner).
+        from gege_hr.gege_hr.utils.print_pdf import send_pdf  # lazy: stub-safe
 
-        download_pdf(MISS_DOCTYPE, name, format=PRINT_FORMAT)
+        send_pdf(MISS_DOCTYPE, name, PRINT_FORMAT)
     except Exception as e:
         # Pass the underlying cause through — a Jinja/format error must stay
         # visible at the API, not swallowed by the Vietnamese wrapper.
