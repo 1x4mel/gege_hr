@@ -28,6 +28,7 @@ live here rather than in ``utils/`` because they only make sense behind a
 from __future__ import annotations
 
 import json
+import traceback
 from datetime import timedelta
 
 import frappe
@@ -3748,7 +3749,9 @@ def _sync_recalc_after_checkin(docname: str, employee: str) -> None:
 
 
 # Ticket states a manual OUT still waives — mirrors the approved-CR sync in
-# approval.py. Waived is already done; Closed is terminal (state machine).
+# approval.py. Waived is already done. Closed is terminal EXCEPT when the
+# engine closed it (calc._auto_resolve_checkout_miss: no ``resolved_by``) —
+# that only means "a real OUT now exists", which is exactly the manual OUT.
 _MANUAL_OUT_WAIVABLE = ("Pending", "Explained", "Penalised")
 
 
@@ -3816,25 +3819,63 @@ def _waive_checkout_miss_for_manual_out(employee: str, out_log: str, time_out) -
     nhân viên → miễn ticket "Quên chấm ra" của ca đó (Waived + miễn phạt,
     bảng công tháng không đếm nữa) — cùng cách duyệt CR ở approval.py.
 
+    Ghi thẳng ticket (không qua ``checkout_miss._resolve_one`` / ``doc.save``):
+    quyền HR đã kiểm ở đầu ``admin_custom_checkin``, còn Workflow của
+    VN Checkout Miss lại kiểm quyền đọc theo User Permission — tài khoản HR có
+    User Permission "Employee = chính mình" bị chặn với ticket người khác
+    (13/11/2026: sửa giờ ra cho Vũ Nam Phương, ticket không được miễn).
+
+    Ticket do engine tự đóng (Closed, chưa ai xử lý) cũng được miễn: lần sửa
+    trước có thể đã để recalc đóng nó trước khi kịp miễn.
+
     Gọi SAU khi punch đã commit và TRƯỚC recalc: recalc tự đóng ticket
-    Pending/Explained thành Closed (trạng thái cuối, không miễn được nữa).
-    Best-effort — lỗi (kể cả kỳ lương đã khoá) không làm hỏng lần sửa giờ.
-    Returns the waived ticket name, or ``None``.
+    Pending/Explained thành Closed. Best-effort — lỗi (kể cả kỳ lương đã khoá)
+    không làm hỏng lần sửa giờ. Returns the waived ticket name, or ``None``.
     """
     try:
+        from frappe.utils import now
+
         from gege_hr.gege_hr.api import checkout_miss as cm_api
 
         name = _checkout_miss_for_out_log(employee, out_log)
         if not name:
             return None
-        status = (frappe.db.get_value("VN Checkout Miss", name, "status") or "").strip()
-        if status not in _MANUAL_OUT_WAIVABLE:
-            return None
-        cm_api._resolve_one(
+        t = frappe.db.get_value(
+            "VN Checkout Miss",
             name,
-            "waive",
-            _("Tự động miễn: HR/Admin sửa giờ ra thủ công ({0}).").format(time_out),
-            None,
+            ["status", "resolved_by", "employee", "work_date", "company"],
+            as_dict=True,
+        )
+        if not t:
+            return None
+        status = (t.get("status") or "").strip()
+        engine_closed = status == "Closed" and not t.get("resolved_by")
+        if status not in _MANUAL_OUT_WAIVABLE and not engine_closed:
+            return None
+        if cm_api._payroll_state_for(t) == "locked":
+            return None  # kỳ lương đã phát phiếu — xử lý qua VN Payroll Adjustment
+        note = _("Tự động miễn: HR/Admin sửa giờ ra thủ công ({0}).").format(time_out)
+        frappe.db.set_value(
+            "VN Checkout Miss",
+            name,
+            {
+                "status": "Waived",
+                "penalty_waived": 1,
+                "resolved_by": getattr(getattr(frappe, "session", None), "user", None) or "Administrator",
+                "resolved_on": now(),
+                "note": note,
+            },
+        )
+        audit_api.log(
+            "Checkout Miss Resolve",
+            company=t.get("company"),
+            employee=t.get("employee") or employee,
+            work_date=t.get("work_date"),
+            reference_doctype="VN Checkout Miss",
+            reference_name=name,
+            description=f"waive ticket {name} — {note}",
+            old_value=status,
+            new_value="Waived",
         )
         frappe.db.commit()
         return name
@@ -3846,7 +3887,7 @@ def _waive_checkout_miss_for_manual_out(employee: str, out_log: str, time_out) -
             pass
         frappe.log_error(
             title="admin_custom_checkin: waive checkout miss failed",
-            message=f"checkin={out_log} employee={employee}",
+            message=f"checkin={out_log} employee={employee}\n{traceback.format_exc()}",
         )
         return None
 

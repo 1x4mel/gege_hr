@@ -236,6 +236,7 @@ def admin_module(monkeypatch):
     # ``admin.py`` does ``from frappe.utils import getdate/get_datetime`` — stub.
     frappe_utils = types.ModuleType("frappe.utils")
     frappe_utils.getdate = lambda v=None: dt.date(2026, 8, 12)
+    frappe_utils.now = lambda: "2026-08-12 08:00:00"
     frappe_utils.get_datetime = lambda v=None: (
         v if isinstance(v, dt.datetime) else dt.datetime(2026, 8, 12, 1, 0, 0)
     )
@@ -460,29 +461,42 @@ def test_inserts_when_no_existing_checkin_found(admin_module):
 # Owner 2026-10-04: HR/Admin entering the OUT by hand waives the shift's
 # "Quên chấm ra" ticket
 # --------------------------------------------------------------------------- #
-def _wire_ticket(monkeypatch, stub, *, status, resolve_raises=None):
+def _wire_ticket(monkeypatch, stub, *, status, resolved_by=None, payroll_state=None, write_raises=None):
     """The day's OUT is auto-close's fake log CHK-OUT-1, linked to ticket VCM-1
-    in ``status``. Waive + recalc calls are recorded in order in the result."""
+    in ``status``. The ticket write (waive) + recalc calls are recorded in order."""
     events = []
     stub.db.checkin_rows = ["CHK-OUT-1"]
+    ticket = {
+        "status": status,
+        "resolved_by": resolved_by,
+        "employee": "HR-EMP-1",
+        "work_date": "2026-09-11",
+        "company": "GeGe",
+    }
 
     def get_value(doctype, name, field, **_kw):
         if (doctype, name, field) == ("Employee Checkin", "CHK-OUT-1", "vn_checkout_miss"):
             return "VCM-1"
-        if (doctype, name, field) == ("VN Checkout Miss", "VCM-1", "status"):
-            return status
+        if (doctype, name) == ("VN Checkout Miss", "VCM-1"):
+            return dict(ticket)
         return None
 
     stub.db.get_value = get_value
+    plain_set_value = stub.db.set_value
+
+    def set_value(doctype, name, field, value=None, **kw):
+        if doctype == "VN Checkout Miss":
+            if write_raises:
+                raise write_raises
+            events.append(("waive", name, field))
+            return None
+        return plain_set_value(doctype, name, field, value, **kw)
+
+    stub.db.set_value = set_value
+    stub.db.rollback = lambda: None
 
     cm = types.ModuleType("gege_hr.gege_hr.api.checkout_miss")
-
-    def _resolve_one(name, action, note, penalty_override):
-        if resolve_raises:
-            raise resolve_raises
-        events.append(("waive", name, action, note, penalty_override))
-
-    cm._resolve_one = _resolve_one
+    cm._payroll_state_for = lambda t: payroll_state
     monkeypatch.setitem(sys.modules, "gege_hr.gege_hr.api.checkout_miss", cm)
     att = sys.modules["gege_hr.gege_hr.api.attendance"]
     monkeypatch.setattr(
@@ -498,16 +512,31 @@ def test_manual_out_waives_checkout_miss_before_recalc(admin_module, monkeypatch
     events = _wire_ticket(monkeypatch, stub, status="Penalised")
     res = admin.admin_custom_checkin("HR-EMP-1", time_out="2026-09-11 20:25")
     assert res["status"] == "ok"
-    assert events[0][:3] == ("waive", "VCM-1", "waive")
-    assert "2026-09-11 20:25" in events[0][3]
-    assert events[0][4] is None
+    kind, name, values = events[0]
+    assert (kind, name) == ("waive", "VCM-1")
+    assert values["status"] == "Waived" and values["penalty_waived"] == 1
+    assert "2026-09-11 20:25" in values["note"]
     assert events[1] == ("recalc", "CHK-OUT-1")
 
 
-@pytest.mark.parametrize("status", ["Closed", "Waived"])
-def test_manual_out_leaves_final_tickets_alone(admin_module, monkeypatch, status):
+def test_manual_out_waives_engine_closed_ticket(admin_module, monkeypatch):
+    """13/11/2026 (Vũ Nam Phương): an earlier edit's recalc auto-closed the
+    ticket (Closed, nobody resolved it) before it was waived → a later manual
+    OUT must still waive it, or the day keeps showing "Thiếu chấm ra"."""
     admin, stub = admin_module
-    events = _wire_ticket(monkeypatch, stub, status=status)
+    events = _wire_ticket(monkeypatch, stub, status="Closed", resolved_by=None)
+    admin.admin_custom_checkin("HR-EMP-1", time_out="2026-09-11 20:25")
+    assert [e[0] for e in events] == ["waive", "recalc"]
+    assert events[0][2]["status"] == "Waived"
+
+
+@pytest.mark.parametrize(
+    ("status", "resolved_by"), [("Closed", "hr@gegeteam.net"), ("Waived", "hr@gegeteam.net")]
+)
+def test_manual_out_leaves_final_tickets_alone(admin_module, monkeypatch, status, resolved_by):
+    """HR đã tự đóng / đã miễn → giữ nguyên."""
+    admin, stub = admin_module
+    events = _wire_ticket(monkeypatch, stub, status=status, resolved_by=resolved_by)
     admin.admin_custom_checkin("HR-EMP-1", time_out="2026-09-23 20:00")
     assert [e[0] for e in events] == ["recalc"]
 
@@ -519,10 +548,18 @@ def test_in_only_edit_does_not_waive(admin_module, monkeypatch):
     assert "waive" not in [e[0] for e in events]
 
 
-def test_waive_failure_never_fails_the_edit(admin_module, monkeypatch):
-    """E.g. payroll period locked → _resolve_one throws; the punch edit stands."""
+def test_locked_payroll_is_not_waived(admin_module, monkeypatch):
     admin, stub = admin_module
-    events = _wire_ticket(monkeypatch, stub, status="Pending", resolve_raises=RuntimeError("locked"))
+    events = _wire_ticket(monkeypatch, stub, status="Pending", payroll_state="locked")
+    res = admin.admin_custom_checkin("HR-EMP-1", time_out="2026-09-11 20:25")
+    assert res["status"] == "ok"
+    assert [e[0] for e in events] == ["recalc"]
+
+
+def test_waive_failure_never_fails_the_edit(admin_module, monkeypatch):
+    """The ticket write throws → the punch edit still stands."""
+    admin, stub = admin_module
+    events = _wire_ticket(monkeypatch, stub, status="Pending", write_raises=RuntimeError("boom"))
     res = admin.admin_custom_checkin("HR-EMP-1", time_out="2026-09-11 20:25")
     assert res["status"] == "ok"
     assert [e[0] for e in events] == ["recalc"]
@@ -556,8 +593,13 @@ def test_new_out_waives_ticket_whose_shift_window_holds_it(admin_module, monkeyp
         if doctype == "VN Employee Shift Instance":
             ps, pe = windows[name]
             return types.SimpleNamespace(planned_start=ps, planned_end=pe)
-        if (doctype, name, field) == ("VN Checkout Miss", "VCM-1", "status"):
-            return "Pending"
+        if (doctype, name) == ("VN Checkout Miss", "VCM-1"):
+            return {
+                "status": "Pending",
+                "resolved_by": None,
+                "employee": "HR-EMP-1",
+                "work_date": "2026-09-11",
+            }
         return None
 
     stub.db.get_all = get_all
