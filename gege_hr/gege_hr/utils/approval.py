@@ -155,14 +155,14 @@ ROLE_APPROVERS = {
     "HR Manager": "HR Manager",
 }
 
-# Vai trò "chỉ duyệt" (24/11/2026): duyệt đơn nghỉ + OT ở bước HR nhưng KHÔNG
+# HR thực tập "HR Intern" (24/11/2026): duyệt đơn nghỉ + OT ở bước HR, xem team, KHÔNG
 # được sửa chấm công (các cổng sửa công chỉ nhận HR Manager / System Manager).
-LEAVE_OT_APPROVER_ROLE = "Leave & OT Approver"
+HR_INTERN_ROLE = "HR Intern"
 
 # Bước duyệt loại "HR Manager" của các loại đơn này còn nhận thêm các role sau.
 HR_STEP_EXTRA_ROLES: dict[str, frozenset[str]] = {
-    "Leave Application": frozenset({LEAVE_OT_APPROVER_ROLE}),
-    "Overtime Request": frozenset({LEAVE_OT_APPROVER_ROLE}),
+    "Leave Application": frozenset({HR_INTERN_ROLE}),
+    "Overtime Request": frozenset({HR_INTERN_ROLE}),
 }
 
 
@@ -299,7 +299,7 @@ def approver_matches(
     if atype in ROLE_APPROVERS:
         if ROLE_APPROVERS[atype] in (roles or set()):
             return True
-        # Bước HR của đơn nghỉ / OT còn nhận "Leave & OT Approver".
+        # Bước HR của đơn nghỉ / OT còn nhận "HR Intern".
         return atype == "HR Manager" and bool(extra_approver_roles(transaction_type) & set(roles or ()))
     if atype == "Specific User":
         return bool(step.get("approver_user")) and user == step.get("approver_user")

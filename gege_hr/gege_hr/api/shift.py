@@ -195,8 +195,10 @@ def _team_schedule_viewer() -> tuple[str | None, bool]:
         roles = set(frappe.get_roles() or [])
     except Exception:
         roles = set()
-    if not roles & set(SCHEDULE_MANAGER_ROLES):
+    if not roles & (set(SCHEDULE_MANAGER_ROLES) | SCHEDULE_VIEW_ONLY_ROLES):
         frappe.throw(_("Bạn không có quyền xem lịch làm việc của team."), frappe.PermissionError)
+    if _is_schedule_readonly(roles):
+        return None, True  # HR Intern: xem toàn công ty; cờ thao tác tắt ở grid
     is_hr = bool(roles & _TEAM_SCHEDULE_HR_ROLES)
     return emp_utils.get_employee_for_user(), is_hr
 
@@ -351,6 +353,7 @@ def team_schedule_context(from_date: str | None = None, to_date: str | None = No
     /hr/schedule).
     """
     manager_emp, is_hr = _team_schedule_viewer()
+    readonly = _is_schedule_readonly()  # HR Intern: chỉ xem, mọi cờ thao tác False
     today = tz_utils.now_in_portal().date()
     start = getdate(from_date) if from_date else today
     end = getdate(to_date) if to_date else add_days(today, 6)
@@ -358,6 +361,7 @@ def team_schedule_context(from_date: str | None = None, to_date: str | None = No
     emp_names = [m.get("name") for m in members if m.get("name")]
 
     is_lm = bool(manager_emp) and not is_hr
+    acting = bool(is_hr or is_lm) and not readonly
     try:
         _roles = set(frappe.get_roles() or [])
     except Exception:
@@ -371,11 +375,11 @@ def team_schedule_context(from_date: str | None = None, to_date: str | None = No
         "scope": {"mode": "company" if is_hr else "team", "member_count": len(members)},
         "can": {
             "view_grid": True,
-            "assign": bool(is_hr or is_lm),
-            "override_day": bool(is_hr or is_lm),
-            "end": bool(is_hr or is_lm),
-            "amend": bool(is_hr or is_lm),
-            "approve_requests": bool(is_hr or is_lm),
+            "assign": acting,
+            "override_day": acting,
+            "end": acting,
+            "amend": acting,
+            "approve_requests": acting,
             "bulk": bulk_ok,
             "export": bool(is_hr or is_lm),
         },
@@ -409,6 +413,7 @@ def team_schedule_grid(
     with ≥1 future working gap (empty, not-on-leave day).
     """
     manager_emp, is_hr = _team_schedule_viewer()
+    readonly = _is_schedule_readonly()  # HR Intern: chỉ xem, mọi cờ thao tác False
     today = tz_utils.now_in_portal().date()
     start = getdate(from_date) if from_date else today
     end = getdate(to_date) if to_date else add_days(today, 6)
@@ -597,7 +602,7 @@ def team_schedule_grid(
                 "ot_hours": ot_hours,
             }
             cell["can"] = _grid_cell_can(
-                is_hr=is_hr,
+                is_hr=is_hr and not readonly,
                 is_lm_of=is_lm,  # every scope member of an LM is a direct report
                 locked=d_iso in locked,
                 day=d_iso,
@@ -799,6 +804,19 @@ def team_schedule_ics(employee: str | None = None, token: str | None = None) -> 
 # --------------------------------------------------------------------------- #
 
 SCHEDULE_MANAGER_ROLES = ["HR Manager", "HR User", "System Manager", "Line Manager"]
+# HR thực tập (24/11/2026): chỉ XEM lịch mọi người, không quản lý lịch.
+SCHEDULE_VIEW_ONLY_ROLES = frozenset({"HR Intern"})
+
+
+def _is_schedule_readonly(roles=None) -> bool:
+    """True khi người gọi chỉ có role xem (HR Intern) mà không có role quản lý lịch."""
+    if roles is None:
+        try:
+            roles = set(frappe.get_roles() or [])
+        except Exception:
+            return False
+    roles = set(roles)
+    return bool(roles & SCHEDULE_VIEW_ONLY_ROLES) and not (roles & set(SCHEDULE_MANAGER_ROLES))
 
 
 def _is_schedule_manager() -> bool:
@@ -813,7 +831,7 @@ def _is_schedule_manager() -> bool:
 def _assert_can_view_employee(employee_name: str | None, own_employee: str | None) -> None:
     """Harden ``my_schedule``: viewing ANOTHER employee requires a manager role."""
     if employee_name and own_employee and employee_name != own_employee:
-        if not _is_schedule_manager():
+        if not (_is_schedule_manager() or _is_schedule_readonly()):
             frappe.throw(
                 _("Bạn không có quyền xem lịch làm việc của nhân viên khác."),
                 frappe.PermissionError,

@@ -130,9 +130,9 @@ def test_approver_matches_hr_manager_role():
     )
 
 
-def test_leave_ot_approver_matches_hr_step_of_leave_and_ot_only():
+def test_hr_intern_matches_hr_step_of_leave_and_ot_only():
     step = {"approver_type": "HR Manager"}
-    roles = {"Employee", rules.LEAVE_OT_APPROVER_ROLE}
+    roles = {"Employee", rules.HR_INTERN_ROLE}
     for ttype in ("Leave Application", "Overtime Request"):
         assert rules.approver_matches(
             step, user="a@x", roles=roles, line_manager_user=None, dept_head_user=None, transaction_type=ttype

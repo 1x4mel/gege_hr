@@ -51,6 +51,13 @@ def _require_hr() -> None:
         frappe.throw(_("Yêu cầu quyền HR."), frappe.PermissionError)
 
 
+def _require_calendar_viewer() -> None:
+    """Đọc lịch nghỉ: HR + HR thực tập (HR Intern — chỉ xem, không build/invalidate)."""
+    roles = set(frappe.get_roles(frappe.session.user))
+    if not (_is_hr() or "HR Intern" in roles):
+        frappe.throw(_("Yêu cầu quyền HR."), frappe.PermissionError)
+
+
 def _table_ready() -> bool:
     try:
         return bool(frappe.db.table_exists(DOCTYPE))
@@ -82,7 +89,7 @@ def get_leave_calendar(
     """
     # D2 (plan leave-calendar-desk-free): gate the read too — a cached row
     # used to be readable by any logged-in user, leaking company-wide leave.
-    _require_hr()
+    _require_calendar_viewer()
     # Resolve sensible defaults so the calendar renders before the SPA has
     # chosen a company (the HR admin account often has no linked Employee, so
     # the client's defaultCompany() is empty). Year/month default to today.
@@ -120,7 +127,7 @@ def get_leave_calendar(
                 department=department,
             )
     # No fresh cache → build live.
-    payload = build_leave_calendar(
+    payload = _build_leave_calendar(
         company=company, year=year, month=month, branch=branch, department=department
     )
     return _apply_read_filters(
@@ -249,8 +256,20 @@ def build_leave_calendar(
     branch: str | None = None,
     department: str | None = None,
 ) -> dict:
-    """Compute the month's leave data and persist it as a cache row."""
+    """Compute the month's leave data and persist it as a cache row (HR only)."""
     _require_hr()
+    return _build_leave_calendar(company, year, month, branch, department)
+
+
+def _build_leave_calendar(
+    company: str,
+    year,
+    month,
+    branch: str | None = None,
+    department: str | None = None,
+) -> dict:
+    """Dựng cache lịch tháng — không gate (người gọi đã gate: build = HR, đọc lỡ
+    cache trong :func:`get_leave_calendar` = HR + HR Intern)."""
     window = calendar_utils.month_window(year, month)
     if window is None:
         frappe.throw(_("Thiếu hoặc sai year/month."), frappe.ValidationError)
@@ -511,7 +530,7 @@ def calendar_employee_options(search: str | None = None, limit=50) -> list[dict]
     ``{value, label, description}`` rows ordered by name, ``search`` matches
     ``employee_name`` (LIKE), ``limit`` clamped to 200.
     """
-    _require_hr()
+    _require_calendar_viewer()
     try:
         n = int(limit or 50)
     except (TypeError, ValueError):

@@ -1710,7 +1710,21 @@ def _day_detail_core(emp: str, day: date) -> dict:
 # --------------------------------------------------------------------------- #
 # Team Today — desk-free manager roster (plans/team-today-desk-free.md)
 # --------------------------------------------------------------------------- #
-TEAM_VIEW_ROLES = ("HR Manager", "HR User", "System Manager", "Line Manager")
+TEAM_VIEW_ROLES = ("HR Manager", "HR User", "System Manager", "Line Manager", "HR Intern")
+# HR thực tập (24/11/2026): XEM team toàn công ty nhưng không thao tác gì (không
+# nhắc, không tạo đơn hộ, không đổi ca, không sửa công) — xem :func:`_is_team_readonly`.
+TEAM_READONLY_ROLES = frozenset({"HR Intern"})
+_TEAM_ACTING_ROLES = frozenset({"HR Manager", "HR User", "System Manager", "Line Manager"})
+
+
+def _is_team_readonly(roles=None) -> bool:
+    """True khi người gọi CHỈ xem team (HR Intern, không kèm role HR / LM nào)."""
+    if roles is None:
+        roles = emp_utils.get_user_roles() or []
+    roles = set(roles)
+    return bool(roles & TEAM_READONLY_ROLES) and not (roles & _TEAM_ACTING_ROLES)
+
+
 TEAM_STATUS_TOKENS = (
     "Present",
     "Late",
@@ -1744,6 +1758,10 @@ def _team_viewer() -> tuple[str | None, bool]:
     roles = set(emp_utils.get_user_roles() or [])
     if not roles & set(TEAM_VIEW_ROLES):
         frappe.throw(_("Bạn không có quyền xem tình trạng team."), frappe.PermissionError)
+    if _is_team_readonly(roles):
+        # Xem toàn công ty (manager_emp=None + is_hr=True chỉ dùng cho PHẠM VI xem);
+        # mọi cờ thao tác bị tắt ở team_day_can(readonly=True) / nudge.
+        return None, True
     is_hr = bool(roles & {"HR Manager", "HR User", "System Manager"})
     return emp_utils.get_employee_for_user(), is_hr
 
@@ -2149,7 +2167,9 @@ def _is_attendance_editor(roles=None) -> bool:
     return bool(set(roles) & ATTENDANCE_EDIT_ROLES)
 
 
-def team_day_can(*, status, locked, is_hr, is_lm_of, ws=None, is_today=False, is_editor=False) -> dict:
+def team_day_can(
+    *, status, locked, is_hr, is_lm_of, ws=None, is_today=False, is_editor=False, readonly=False
+) -> dict:
     """Pure — server-driven action matrix cho Team Today drawer (plan §2.2).
 
     FE chỉ render theo matrix này; BE là nguồn sự thật duy nhất. Sửa chấm
@@ -2161,6 +2181,17 @@ def team_day_can(*, status, locked, is_hr, is_lm_of, ws=None, is_today=False, is
     edit = bool(is_editor) and not bool(locked)
     needs_checkin_nudge = str(status) == "Not Checked In"
     needs_checkout_nudge = str(status) in ("Present", "Late") and bool(ws.get("missing_checkout"))
+    if readonly:  # HR Intern: chỉ xem chi tiết
+        return {
+            "view_detail": True,
+            "fix_punch": False,
+            "mark_attendance": False,
+            "request_correction": False,
+            "override_shift": False,
+            "nudge": False,
+            "open_360": False,
+            "export": True,
+        }
     return {
         "view_detail": True,
         "fix_punch": edit,
@@ -2361,6 +2392,7 @@ def team_member_day_detail(employee: str | None = None, date_str: str | None = N
             ws=ws,
             is_today=is_today,
             is_editor=_is_attendance_editor(),
+            readonly=_is_team_readonly(),
         ),
     }
 
@@ -2376,6 +2408,8 @@ def nudge_team_member(
     Tạo 1 VN Notification (best-effort) + audit 1 dòng + realtime ping. Chống
     spam bằng ``rate_limit`` 1 lần / employee / kind / ngày / 10 phút (F8).
     """
+    if _is_team_readonly():
+        frappe.throw(_("Tài khoản chỉ xem — không gửi nhắc được."), frappe.PermissionError)
     manager_emp, is_hr = _team_viewer()
     kind = str(kind or "").strip()
     if kind not in _NUDGE_TITLES:
@@ -2574,14 +2608,15 @@ def team_attendance(
     ``status_filter`` / ``page`` / ``page_size`` are optional server-side
     filters (backward compatible — the legacy response keys are unchanged).
     """
-    frappe.only_for(["HR Manager", "HR User", "System Manager", "Line Manager"])
+    frappe.only_for(["HR Manager", "HR User", "System Manager", "Line Manager", "HR Intern"])
     # HR Manager / System Manager oversee the whole company, so they see every
     # active employee — independent of the (often empty) ``reports_to`` link.
     # Line Manager / HR User still only see their direct reports. This keeps the
     # team grid consistent with the per-employee monthly view, which never
     # depends on ``reports_to``.
     caller_roles = set(frappe.get_roles())
-    is_company_wide = bool(caller_roles & {"HR Manager", "System Manager"})
+    # HR Intern: xem toàn công ty, KHÔNG có cờ thao tác (is_hr/is_lm/editor đều False).
+    is_company_wide = bool(caller_roles & {"HR Manager", "System Manager"}) or _is_team_readonly(caller_roles)
     # Capability-matrix role facts (plan §4 WP2). ``is_hr`` mirrors the manage
     # roles of ``admin._require_attendance_editor_for``; OT approval follows
     # ``attendance_admin_ops.OT_APPROVER_ROLES`` (HR Manager / System Manager).
@@ -3143,9 +3178,9 @@ def team_attendance_context(manager: str = "", from_date: str = "", to_date: str
     the grid loads; the FE renders chrome (lock banner, buttons) from this
     payload only — BE là nguồn sự thật duy nhất.
     """
-    frappe.only_for(["HR Manager", "HR User", "System Manager", "Line Manager"])
+    frappe.only_for(["HR Manager", "HR User", "System Manager", "Line Manager", "HR Intern"])
     caller_roles = set(frappe.get_roles())
-    is_company_wide = bool(caller_roles & {"HR Manager", "System Manager"})
+    is_company_wide = bool(caller_roles & {"HR Manager", "System Manager"}) or _is_team_readonly(caller_roles)
     is_hr = bool(caller_roles & {"HR Manager", "System Manager", "HR User"})
     is_lm = bool(caller_roles & {"Line Manager"})
     is_ot_approver = bool(caller_roles & {"HR Manager", "System Manager"})

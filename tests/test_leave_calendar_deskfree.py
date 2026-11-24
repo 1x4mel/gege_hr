@@ -520,3 +520,14 @@ def test_lc13b_legacy_array_payload_normalized_by_read_filters(monkeypatch):
     assert out["from_cache"] is True
     assert out["data"]["leaves"] == []  # Open row lọc bỏ theo statuses
     assert out["data"]["holidays"] == []
+
+
+def test_lc_hr_intern_reads_but_cannot_rebuild(monkeypatch):
+    """HR thực tập (24/11/2026): đọc lịch nghỉ (kể cả lỡ cache), không build/invalidate."""
+    fake = make_fake(monkeypatch, roles=("Employee", "HR Intern"))
+    out = fake.api.get_leave_calendar(company=COMPANY, year=2026, month=9)
+    assert isinstance(out, dict)
+    with pytest.raises(Exception, match="quyền HR"):
+        fake.api.build_leave_calendar(company=COMPANY, year=2026, month=9)
+    with pytest.raises(Exception, match="quyền HR"):
+        fake.api.invalidate_leave_calendar(company=COMPANY, year=2026, month=9)

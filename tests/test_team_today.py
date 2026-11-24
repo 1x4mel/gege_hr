@@ -754,3 +754,48 @@ def test_idor_tt2_plain_employee_denied_everywhere(_env_for_roster):
 @pytest.fixture
 def _env_for_roster(env):
     return _seed_all(env)
+
+
+# --------------------------------------------------------------------------- #
+# HR thực tập (HR Intern, 24/11/2026): xem toàn công ty, không thao tác gì.
+# --------------------------------------------------------------------------- #
+def test_hr_intern_sees_company_wide_even_with_linked_employee(_env_for_roster):
+    env = _env_for_roster
+    env.state["roles"] = ["Employee", "HR Intern"]
+    env.state["emp"] = "M1"  # có link Employee nhưng vẫn xem toàn công ty
+    res = env.att.team_daily_status(date_str=DAY)
+    assert {"E1", "E2", "E3", "E4"} <= {m["name"] for m in res["members"]}
+
+
+def test_hr_intern_day_detail_is_read_only(_env_for_roster):
+    env = _env_for_roster
+    env.state["roles"] = ["Employee", "HR Intern"]
+    env.state["emp"] = "M1"
+    can = env.att.team_member_day_detail(employee="E3", date_str=DAY)["can"]
+    assert can["view_detail"] is True
+    for key in ("fix_punch", "mark_attendance", "request_correction", "override_shift", "nudge", "open_360"):
+        assert can[key] is False, key
+
+
+def test_hr_intern_cannot_nudge(_env_for_roster):
+    env = _env_for_roster
+    env.state["roles"] = ["Employee", "HR Intern"]
+    env.state["emp"] = "M1"
+    with pytest.raises(_Thrown) as ei:
+        env.att.nudge_team_member(employee="E2", kind="missing_checkin", date_str=DAY)
+    assert ei.value.kind == "Permission"
+    assert env.pushed == []
+
+
+def test_hr_intern_with_line_manager_keeps_manager_powers(env):
+    """Có thêm role Line Manager thì không còn là tài khoản chỉ xem."""
+    assert env.att._is_team_readonly(["Employee", "HR Intern"]) is True
+    assert env.att._is_team_readonly(["HR Intern", "Line Manager"]) is False
+    assert env.att._is_team_readonly(["Employee"]) is False
+
+
+def test_team_day_can_readonly_pure(env):
+    can = env.att.team_day_can(
+        status="Not Checked In", locked=False, is_hr=True, is_lm_of=True, is_editor=True, readonly=True
+    )
+    assert {k for k, v in can.items() if v} == {"view_detail", "export"}

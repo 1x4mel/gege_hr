@@ -1278,3 +1278,24 @@ def test_c22_ics_token_gate(shift):
     out = mod.team_schedule_ics(employee="E-2", token=mod._schedule_ics_token("E-2"))
     assert out.startswith("BEGIN:VCALENDAR")
     assert "SUMMARY:Day" in out and out.endswith("END:VCALENDAR")
+
+
+def test_hr_intern_team_schedule_read_only(shift):
+    """HR thực tập (24/11/2026): xem lịch toàn công ty, mọi cờ thao tác tắt."""
+    mod, stub, db = shift.mod, shift.stub, shift.db
+    stub._roles = {"Employee", "HR Intern"}
+    _seed_team(db, stub)
+    ctx = mod.team_schedule_context()
+    assert ctx["scope"]["mode"] == "company"
+    for key in ("assign", "override_day", "end", "amend", "approve_requests", "bulk"):
+        assert ctx["can"][key] is False, key
+    grid = mod.team_schedule_grid("2026-09-10", "2026-09-16")
+    assert grid["members"]
+    cells = [c for m in grid["members"] for c in (m.get("days") or [])]
+    assert cells
+    for cell in cells:
+        can = cell.get("can") or {}
+        assert not any(v for k, v in can.items() if k != "view_detail"), can
+    # legacy team_schedule (SPA hiện dùng) đọc được lịch người khác
+    assert mod.team_schedule()
+    assert mod._is_schedule_readonly({"HR Intern", "Line Manager"}) is False

@@ -75,7 +75,7 @@ _EMP = "Employee"
 _HRU = "HR User"
 _HRM = "HR Manager"
 _PAY = "Payroll Manager"
-_LOA = "Leave & OT Approver"  # chỉ duyệt bước HR của đơn OT (utils/approval)
+_INTERN = "HR Intern"  # HR thực tập: chỉ duyệt bước HR của đơn OT (utils/approval)
 
 
 def _exists(doctype: str, name: str) -> bool:
@@ -120,11 +120,11 @@ def _ensure_masters() -> None:
 
     # Transition.allowed là Link → Role phải có trước (after_migrate chạy seed
     # workflow TRƯỚC grant_hr_permissions, nơi role được tạo cho DocPerm).
-    if not _exists("Role", _LOA):
+    if not _exists("Role", _INTERN):
         try:
-            frappe.get_doc({"doctype": "Role", "role_name": _LOA}).insert(ignore_permissions=True)
+            frappe.get_doc({"doctype": "Role", "role_name": _INTERN}).insert(ignore_permissions=True)
         except Exception:
-            frappe.log_error(f"gege_hr workflow seed: Role {_LOA}")
+            frappe.log_error(f"gege_hr workflow seed: Role {_INTERN}")
 
 
 # --------------------------------------------------------------------------- #
@@ -212,11 +212,11 @@ _WORKFLOWS = [
         "transitions": _transition_rows(
             _common_transitions()
             + [("Approved", "Confirm", "Confirmed", _HRM)]
-            # Leave & OT Approver: chỉ thao tác ở bước HR (Pending HR).
+            # HR Intern: chỉ thao tác ở bước HR (Pending HR).
             + [
-                ("Pending HR", "Approve", "Approved", _LOA),
-                ("Pending HR", "Reject", "Rejected", _LOA),
-                ("Pending HR", "Return", "Draft", _LOA),
+                ("Pending HR", "Approve", "Approved", _INTERN),
+                ("Pending HR", "Reject", "Rejected", _INTERN),
+                ("Pending HR", "Return", "Draft", _INTERN),
             ]
         ),
     },

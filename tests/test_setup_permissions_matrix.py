@@ -16,7 +16,7 @@ NAMES = {
     "HR_MANAGER": "HR Manager",
     "HR_USER": "HR User",
     "EMPLOYEE": "Employee",
-    "LEAVE_OT_APPROVER": "Leave & OT Approver",
+    "HR_INTERN": "HR Intern",
 }
 
 
@@ -84,9 +84,11 @@ def test_employee_never_edits_or_deletes_checkins():
     assert not g.get("write") and not g.get("delete")
 
 
-# Vai trò chỉ duyệt (24/11/2026): duyệt đơn nghỉ + OT, KHÔNG sửa chấm công.
-LOA = "Leave & OT Approver"
+# HR thực tập (24/11/2026): duyệt đơn nghỉ + OT, xem team; KHÔNG sửa chấm công,
+# KHÔNG đọc thẳng hồ sơ Employee.
+INTERN = "HR Intern"
 ATTENDANCE_DOCTYPES = (
+    "Employee",  # hồ sơ có lương / ngân hàng / CCCD — HR Intern đọc qua API rút gọn
     "Employee Checkin",
     "Attendance",
     "VN Attendance Work Session",
@@ -96,19 +98,19 @@ ATTENDANCE_DOCTYPES = (
 )
 
 
-def test_leave_ot_approver_can_approve_leave_and_ot():
+def test_hr_intern_can_approve_leave_and_ot():
     m = _matrix()
-    leave = m["Leave Application"][LOA]
+    leave = m["Leave Application"][INTERN]
     assert leave.get("read") and leave.get("write") and leave.get("submit")
     assert not leave.get("create") and not leave.get("cancel") and not leave.get("delete")
-    ot = m["VN Overtime Request"][LOA]
+    ot = m["VN Overtime Request"][INTERN]
     assert ot.get("read") and ot.get("write")
     assert not ot.get("create") and not ot.get("submit") and not ot.get("delete")
     fl = _literal(SRC, "FIELD_LEVEL_MATRIX")
-    assert fl["Leave Application"][LOA][1] == {"read": 1, "write": 1}
+    assert fl["Leave Application"][INTERN][1] == {"read": 1, "write": 1}
 
 
-def test_leave_ot_approver_never_touches_attendance():
+def test_hr_intern_never_touches_attendance_or_employee():
     m = _matrix()
     for dt in ATTENDANCE_DOCTYPES:
-        assert LOA not in m.get(dt, {}), f"{dt} không được cấp cho {LOA}"
+        assert INTERN not in m.get(dt, {}), f"{dt} không được cấp cho {INTERN}"
