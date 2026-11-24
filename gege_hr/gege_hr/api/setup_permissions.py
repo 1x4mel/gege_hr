@@ -41,6 +41,7 @@ from frappe import _
 
 HR_MANAGER = "HR Manager"
 HR_USER = "HR User"
+LEAVE_OT_APPROVER = "Leave & OT Approver"  # = utils.approval.LEAVE_OT_APPROVER_ROLE
 EMPLOYEE = "Employee"
 
 # DocType-level grants at permlevel 0. Only the ptypes each flow truly needs —
@@ -153,6 +154,9 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
         },
         HR_USER: {"read": 1},
         "Line Manager": {"read": 1},
+        # Vai trò chỉ duyệt (utils/approval.LEAVE_OT_APPROVER_ROLE): duyệt =
+        # status Approved/Rejected + submit (tạo Leave Ledger). Không create/cancel.
+        LEAVE_OT_APPROVER: {"read": 1, "write": 1, "submit": 1},
     },
     # --- Mobile / device check-in (core Frappe) — attendance.py -------------
     "Employee Checkin": {
@@ -362,6 +366,8 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
     "VN Overtime Request": {
         HR_MANAGER: {"read": 1, "write": 1, "create": 1, "submit": 1, "cancel": 1},
         HR_USER: {"read": 1},
+        # Vai trò chỉ duyệt: đổi workflow_state ở bước HR (duyệt / từ chối / trả lại).
+        LEAVE_OT_APPROVER: {"read": 1, "write": 1},
         # Employee self-service: create / write (read) on their own OT requests.
         # Ownership is enforced at the app layer (overtime._assert_own) — every
         # employee is scoped to their own docs; HR can grant/revoke this from the
@@ -414,6 +420,7 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
         HR_MANAGER: {"read": 1, "write": 1, "create": 1, "delete": 1, "report": 1},
         HR_USER: {"read": 1},
         EMPLOYEE: {"read": 1},
+        LEAVE_OT_APPROVER: {"read": 1},
     },
 }
 
@@ -423,7 +430,11 @@ PERMISSION_MATRIX: dict[str, dict[str, dict[str, int]]] = {
 # âm thầm trả về giá trị cũ khi lưu không bỏ qua quyền.
 FIELD_LEVEL_MATRIX: dict[str, dict[str, dict[int, dict[str, int]]]] = {
     "Expense Claim": {HR_MANAGER: {1: {"read": 1, "write": 1}}, EMPLOYEE: {1: {"read": 1}}},
-    "Leave Application": {HR_MANAGER: {1: {"read": 1, "write": 1}}, EMPLOYEE: {1: {"read": 1}}},
+    "Leave Application": {
+        HR_MANAGER: {1: {"read": 1, "write": 1}},
+        EMPLOYEE: {1: {"read": 1}},
+        LEAVE_OT_APPROVER: {1: {"read": 1, "write": 1}},  # trường status (Approved/Rejected)
+    },
     "Employee Checkin": {HR_MANAGER: {1: {"read": 1, "write": 1}}, EMPLOYEE: {1: {"read": 1}}},
 }
 

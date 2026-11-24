@@ -48,6 +48,7 @@ def _doc(user, status="Active", cup=1, name="HR-EMP-1"):
         ("Active", "emp@x", 1, ["Employee"], True),
         ("Active", "hr@x", 1, ["Employee", "HR Manager"], False),
         ("Active", "pay@x", 1, ["Payroll Manager"], False),
+        ("Active", "loa@x", 1, ["Employee", "Leave & OT Approver"], False),
         ("Active", "emp@x", 0, ["Employee"], False),
         ("Left", "emp@x", 1, ["Employee"], False),
         ("Active", "", 1, ["Employee"], False),

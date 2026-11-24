@@ -367,6 +367,7 @@ def _user_can_act(doc_dict: dict, transaction_type: str, user: str, _cache: dict
         roles=roles,
         line_manager_user=attrs.get("line_manager_user"),
         dept_head_user=attrs.get("dept_head_user"),
+        transaction_type=transaction_type,
     ):
         return True
     # Delegation (desk-free B2, §3.5): a user who holds the step may hand it to
@@ -1828,7 +1829,7 @@ def filter_options(approver: str | None = None) -> dict:
     """
     user = _resolve_approver(approver)
     roles = set(emp_utils.get_user_roles() or [])
-    if not (roles & (emp_utils.HR_MANAGER_ROLES | {"HR User", "Line Manager"})):
+    if not (roles & (emp_utils.HR_MANAGER_ROLES | {"HR User", "Line Manager", rules.LEAVE_OT_APPROVER_ROLE})):
         return {"employees": [], "departments": [], "branches": []}
 
     # employee → { label, department, branch } — the FE facet filters map rows
@@ -2060,7 +2061,9 @@ def get_request_detail(name: str | None = None, request_type: str | None = None)
     except Exception:
         own_employee = None
     is_owner = bool(data.get("employee") and data.get("employee") == own_employee)
-    if not (can_act or is_hr or is_owner):
+    # "Leave & OT Approver" xem lại được đơn nghỉ / OT đã xử lý (tab Đã xử lý).
+    is_type_approver = bool(roles & rules.extra_approver_roles(request_type))
+    if not (can_act or is_hr or is_owner or is_type_approver):
         frappe.throw(_("Bạn không có quyền xem yêu cầu này."), frappe.PermissionError)
 
     row = _normalise_row(data, request_type, user)

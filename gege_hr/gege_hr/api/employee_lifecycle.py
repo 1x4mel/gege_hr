@@ -200,7 +200,10 @@ def guard_reports_to_cycle(doc, method: str | None = None) -> None:
 # người qua /api/resource. Tài khoản HR / Payroll thì KHÔNG được giới hạn (họ
 # xử lý bản ghi của người khác).
 # --------------------------------------------------------------------------- #
-UNRESTRICTED_ROLES = frozenset({"HR Manager", "HR User", "Payroll Manager", "Payroll User", "System Manager"})
+# "Leave & OT Approver" duyệt đơn của người khác → cũng không giới hạn.
+UNRESTRICTED_ROLES = frozenset(
+    {"HR Manager", "HR User", "Payroll Manager", "Payroll User", "System Manager", "Leave & OT Approver"}
+)
 
 
 def needs_self_permission(status, user_id, create_user_permission, roles) -> bool:

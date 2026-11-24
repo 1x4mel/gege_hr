@@ -12,7 +12,12 @@ import ast
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "gege_hr" / "gege_hr" / "api" / "setup_permissions.py"
-NAMES = {"HR_MANAGER": "HR Manager", "HR_USER": "HR User", "EMPLOYEE": "Employee"}
+NAMES = {
+    "HR_MANAGER": "HR Manager",
+    "HR_USER": "HR User",
+    "EMPLOYEE": "Employee",
+    "LEAVE_OT_APPROVER": "Leave & OT Approver",
+}
 
 
 def _matrix() -> dict:
@@ -77,3 +82,33 @@ def test_employee_can_file_salary_advance():
 def test_employee_never_edits_or_deletes_checkins():
     g = _matrix()["Employee Checkin"]["Employee"]
     assert not g.get("write") and not g.get("delete")
+
+
+# Vai trò chỉ duyệt (24/11/2026): duyệt đơn nghỉ + OT, KHÔNG sửa chấm công.
+LOA = "Leave & OT Approver"
+ATTENDANCE_DOCTYPES = (
+    "Employee Checkin",
+    "Attendance",
+    "VN Attendance Work Session",
+    "VN Employee Shift Instance",
+    "VN Attendance Correction Request",
+    "Shift Assignment",
+)
+
+
+def test_leave_ot_approver_can_approve_leave_and_ot():
+    m = _matrix()
+    leave = m["Leave Application"][LOA]
+    assert leave.get("read") and leave.get("write") and leave.get("submit")
+    assert not leave.get("create") and not leave.get("cancel") and not leave.get("delete")
+    ot = m["VN Overtime Request"][LOA]
+    assert ot.get("read") and ot.get("write")
+    assert not ot.get("create") and not ot.get("submit") and not ot.get("delete")
+    fl = _literal(SRC, "FIELD_LEVEL_MATRIX")
+    assert fl["Leave Application"][LOA][1] == {"read": 1, "write": 1}
+
+
+def test_leave_ot_approver_never_touches_attendance():
+    m = _matrix()
+    for dt in ATTENDANCE_DOCTYPES:
+        assert LOA not in m.get(dt, {}), f"{dt} không được cấp cho {LOA}"
