@@ -367,6 +367,7 @@ def _user_can_act(doc_dict: dict, transaction_type: str, user: str, _cache: dict
         roles=roles,
         line_manager_user=attrs.get("line_manager_user"),
         dept_head_user=attrs.get("dept_head_user"),
+        transaction_type=transaction_type,
     ):
         return True
     # Delegation (desk-free B2, §3.5): a user who holds the step may hand it to
@@ -380,6 +381,29 @@ def _user_can_act(doc_dict: dict, transaction_type: str, user: str, _cache: dict
         if user and user in _delegated_users(holder, transaction_type, doc_dict.get("name"), _cache=_cache):
             return True
     return False
+
+
+def _share_with_extra_approver(doctype: str, name: str, request_type: str, user: str) -> None:
+    """HR Intern giữ User Permission "Employee = chính mình" (để không đọc được hồ sơ /
+    phiếu lương người khác) → Frappe chặn save/submit đơn của nhân viên khác. Khi họ
+    ĐÃ qua ``_user_can_act`` ở bước HR, chia sẻ riêng đơn này cho họ (DocShare — cùng
+    cơ chế HRMS ``share_doc_with_approver``), rồi luồng duyệt chạy đúng quyền Frappe.
+    Người đã có quyền ghi (HR Manager…) không bị đụng tới."""
+    roles = set(emp_utils.get_user_roles() or [])
+    if not (roles & rules.extra_approver_roles(request_type)):
+        return
+    if frappe.has_permission(doctype, "write", name, user=user):
+        return
+    frappe.share.add_docshare(
+        doctype,
+        name,
+        user,
+        read=1,
+        write=1,
+        submit=1,
+        flags={"ignore_share_permission": True},
+        notify=0,
+    )
 
 
 def _write_log(
@@ -1131,6 +1155,7 @@ def approve_request(
             _("Bạn không phải người duyệt ở bước này."),
             frappe.PermissionError,
         )
+    _share_with_extra_approver(cfg["doctype"], name, request_type, user)
 
     # Leave Application status is managed by core Frappe HR via docstatus, not a
     # free `status` field — so delegate to the HRMS-aware leave endpoints that
@@ -1287,6 +1312,7 @@ def reject_request(
             _("Bạn không phải người duyệt ở bước này."),
             frappe.PermissionError,
         )
+    _share_with_extra_approver(cfg["doctype"], name, request_type, user)
 
     # Leave Application: delegate to the HRMS-aware reject (see approve_request).
     if request_type == "Leave Application":
@@ -1395,6 +1421,7 @@ def return_request(
             _("Bạn không phải người duyệt ở bước này."),
             frappe.PermissionError,
         )
+    _share_with_extra_approver(cfg["doctype"], name, request_type, user)
 
     doc.set(cfg["status_field"], "Draft")
     doc.save()  # validate_workflow recognises the seeded Return transitions
@@ -1828,7 +1855,7 @@ def filter_options(approver: str | None = None) -> dict:
     """
     user = _resolve_approver(approver)
     roles = set(emp_utils.get_user_roles() or [])
-    if not (roles & (emp_utils.HR_MANAGER_ROLES | {"HR User", "Line Manager"})):
+    if not (roles & (emp_utils.HR_MANAGER_ROLES | {"HR User", "Line Manager", rules.HR_INTERN_ROLE})):
         return {"employees": [], "departments": [], "branches": []}
 
     # employee → { label, department, branch } — the FE facet filters map rows
@@ -2060,7 +2087,9 @@ def get_request_detail(name: str | None = None, request_type: str | None = None)
     except Exception:
         own_employee = None
     is_owner = bool(data.get("employee") and data.get("employee") == own_employee)
-    if not (can_act or is_hr or is_owner):
+    # "HR Intern" xem lại được đơn nghỉ / OT đã xử lý (tab Đã xử lý).
+    is_type_approver = bool(roles & rules.extra_approver_roles(request_type))
+    if not (can_act or is_hr or is_owner or is_type_approver):
         frappe.throw(_("Bạn không có quyền xem yêu cầu này."), frappe.PermissionError)
 
     row = _normalise_row(data, request_type, user)

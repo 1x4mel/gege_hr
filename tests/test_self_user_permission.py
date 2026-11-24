@@ -48,6 +48,8 @@ def _doc(user, status="Active", cup=1, name="HR-EMP-1"):
         ("Active", "emp@x", 1, ["Employee"], True),
         ("Active", "hr@x", 1, ["Employee", "HR Manager"], False),
         ("Active", "pay@x", 1, ["Payroll Manager"], False),
+        # HR thực tập vẫn bị giới hạn (không đọc hồ sơ / phiếu lương người khác).
+        ("Active", "intern@x", 1, ["Employee", "HR Intern"], True),
         ("Active", "emp@x", 0, ["Employee"], False),
         ("Left", "emp@x", 1, ["Employee"], False),
         ("Active", "", 1, ["Employee"], False),

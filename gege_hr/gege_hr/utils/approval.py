@@ -155,6 +155,22 @@ ROLE_APPROVERS = {
     "HR Manager": "HR Manager",
 }
 
+# HR thực tập "HR Intern" (24/11/2026): duyệt đơn nghỉ + OT ở bước HR, xem team, KHÔNG
+# được sửa chấm công (các cổng sửa công chỉ nhận HR Manager / System Manager).
+HR_INTERN_ROLE = "HR Intern"
+
+# Bước duyệt loại "HR Manager" của các loại đơn này còn nhận thêm các role sau.
+HR_STEP_EXTRA_ROLES: dict[str, frozenset[str]] = {
+    "Leave Application": frozenset({HR_INTERN_ROLE}),
+    "Overtime Request": frozenset({HR_INTERN_ROLE}),
+}
+
+
+def extra_approver_roles(transaction_type: str | None) -> frozenset[str]:
+    """Role phụ được duyệt bước "HR Manager" của ``transaction_type``."""
+    return HR_STEP_EXTRA_ROLES.get(transaction_type or "", frozenset())
+
+
 # Specificity used to rank scoped matrices (higher = more specific).
 _SCOPE_RANK = {"All": 0, "Employee Grade": 1, "Branch": 2, "Department": 3}
 
@@ -260,6 +276,7 @@ def approver_matches(
     roles: set[str],
     line_manager_user: str | None,
     dept_head_user: str | None,
+    transaction_type: str | None = None,
 ) -> bool:
     """Can ``user`` act on this approval step?
 
@@ -267,7 +284,8 @@ def approver_matches(
 
     * Line Manager      — ``user`` equals the requester's ``reports_to`` user.
     * Department Head   — ``user`` equals the requester's department head user.
-    * HR User/HR Manager— ``user`` holds that Frappe role.
+    * HR User/HR Manager— ``user`` holds that Frappe role. A "HR Manager" step
+      of a type in :data:`HR_STEP_EXTRA_ROLES` also accepts those roles.
     * Specific User     — ``user`` equals ``step.approver_user``.
     * Specific Role     — ``user`` holds ``step.approver_role``.
     """
@@ -279,7 +297,10 @@ def approver_matches(
     if atype == "Department Head":
         return bool(dept_head_user) and user == dept_head_user
     if atype in ROLE_APPROVERS:
-        return ROLE_APPROVERS[atype] in (roles or set())
+        if ROLE_APPROVERS[atype] in (roles or set()):
+            return True
+        # Bước HR của đơn nghỉ / OT còn nhận "HR Intern".
+        return atype == "HR Manager" and bool(extra_approver_roles(transaction_type) & set(roles or ()))
     if atype == "Specific User":
         return bool(step.get("approver_user")) and user == step.get("approver_user")
     if atype == "Specific Role":

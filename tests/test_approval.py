@@ -130,6 +130,37 @@ def test_approver_matches_hr_manager_role():
     )
 
 
+def test_hr_intern_matches_hr_step_of_leave_and_ot_only():
+    step = {"approver_type": "HR Manager"}
+    roles = {"Employee", rules.HR_INTERN_ROLE}
+    for ttype in ("Leave Application", "Overtime Request"):
+        assert rules.approver_matches(
+            step, user="a@x", roles=roles, line_manager_user=None, dept_head_user=None, transaction_type=ttype
+        )
+    # Điều chỉnh công / tạm ứng / không rõ loại → không được duyệt.
+    for ttype in ("Correction Request", "Salary Advance Request", None):
+        assert not rules.approver_matches(
+            step, user="a@x", roles=roles, line_manager_user=None, dept_head_user=None, transaction_type=ttype
+        )
+    # Bước "HR User" / "Line Manager" không nhận role này.
+    assert not rules.approver_matches(
+        {"approver_type": "HR User"},
+        user="a@x",
+        roles=roles,
+        line_manager_user=None,
+        dept_head_user=None,
+        transaction_type="Leave Application",
+    )
+    assert not rules.approver_matches(
+        {"approver_type": "Line Manager"},
+        user="a@x",
+        roles=roles,
+        line_manager_user="lm@x",
+        dept_head_user=None,
+        transaction_type="Overtime Request",
+    )
+
+
 def test_approver_matches_specific_user_and_role():
     su = {"approver_type": "Specific User", "approver_user": "alice@x"}
     assert rules.approver_matches(
