@@ -1427,3 +1427,74 @@ def test_ta35_recalc_session_now_failure_falls_back_to_job(env, monkeypatch):
     kw = next(e[1] for e in events if e[0] == "enqueue")
     assert kw["enqueue_after_commit"] is True and kw["shift_instance_name"] == "SI-D22"
     assert punch.flags.vn_recalc_inline is False
+
+
+# --------------------------------------------------------------------------- #
+# 28/11/2026 — HR Intern (chỉ đọc, xem toàn công ty) phải thấy cả CHÍNH MÌNH
+# trong lưới + Excel; HR Manager vẫn bị loại dòng của mình (TA3).
+# --------------------------------------------------------------------------- #
+def _seed_viewer_attendance(fr):
+    """M1 (= người xem trong env) có phân ca + 1 ngày Present tháng 9."""
+    fr.stores.setdefault("Shift Assignment", {})["SA-M1"] = {
+        "name": "SA-M1",
+        "employee": "M1",
+        "shift_type": "Ca Sáng",
+        "status": "Active",
+        "start_date": "2026-09-01",
+        "end_date": None,
+        "docstatus": 1,
+    }
+    fr.stores.setdefault("Attendance", {})["ATT-M1-15"] = {
+        "name": "ATT-M1-15",
+        "employee": "M1",
+        "attendance_date": "2026-09-15",
+        "status": "Present",
+        "shift": "Ca Sáng",
+        "in_time": "2026-09-15 08:00:00",
+        "out_time": "2026-09-15 17:00:00",
+        "late_entry": 0,
+        "early_exit": 0,
+        "docstatus": 1,
+    }
+    fr.stores.setdefault(WS_DT, {})["WS-M1-15"] = {
+        "name": "WS-M1-15",
+        "employee": "M1",
+        "work_date": "2026-09-15",
+        "actual_checkin": "2026-09-15 08:00:00",
+        "actual_checkout": "2026-09-15 17:00:00",
+        "late_minutes": 0,
+        "early_leave_minutes": 0,
+        "raw_overtime_hours": 0,
+        "approved_overtime_hours": 0,
+        "missing_checkout": 0,
+        "vn_auto_checkout": 0,
+        "docstatus": 1,
+    }
+
+
+def test_hr_intern_grid_includes_self(env):
+    _seed_team(env.fr)
+    _seed_month(env.fr)
+    _seed_viewer_attendance(env.fr)
+    _set_roles(env, ["HR Intern", "Employee"])
+    res = env.att.team_attendance(manager="M1", from_date="2026-09-01", to_date="2026-09-30")
+    names = {m["name"] for m in res["members"]}
+    assert "M1" in names
+
+
+def test_hr_intern_context_counts_self(env):
+    _seed_team(env.fr)
+    _seed_month(env.fr)
+    _set_roles(env, ["HR Intern", "Employee"])
+    res = env.att.team_attendance_context(from_date="2026-09-01", to_date="2026-09-30")
+    assert res["scope"] == {"mode": "company", "member_count": 4}  # M1 + E1..E3
+
+
+def test_hr_manager_grid_still_excludes_self(env):
+    _seed_team(env.fr)
+    _seed_month(env.fr)
+    _seed_viewer_attendance(env.fr)
+    _set_roles(env, ["HR Manager"])
+    res = env.att.team_attendance(manager="M1", from_date="2026-09-01", to_date="2026-09-30")
+    names = {m["name"] for m in res["members"]}
+    assert "M1" not in names

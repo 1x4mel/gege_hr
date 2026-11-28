@@ -2682,7 +2682,11 @@ def team_attendance(
             filters=member_filters,
             fields=["name", "employee_name", "designation", "department", "date_of_joining"],
         )
-        if manager_emp:
+        # Người xem chỉ-đọc (HR Intern) KHÔNG bị loại chính mình: họ không có
+        # quyền thao tác nên không lo tự sửa công mình, và lưới/Excel phải đủ
+        # cả công ty (28/11/2026 — Excel của HR thực tập thiếu chính họ).
+        # HR Manager / System Manager vẫn loại dòng của chính mình như cũ.
+        if manager_emp and not _is_team_readonly(caller_roles):
             members = [m for m in members if m.name != manager_emp]
     else:
         members = frappe.db.get_all(
@@ -3212,7 +3216,8 @@ def team_attendance_context(manager: str = "", from_date: str = "", to_date: str
         if company:
             member_filters["company"] = company
         members = frappe.db.get_all("Employee", filters=member_filters, fields=["name"])
-        if manager_emp:
+        # Giống team_attendance(): HR Intern (chỉ đọc) thấy cả dòng của mình.
+        if manager_emp and not _is_team_readonly(caller_roles):
             members = [m for m in members if m.get("name") != manager_emp]
         scope_mode = "company"
     else:
